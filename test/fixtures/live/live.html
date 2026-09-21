@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Live fixture</title></head>
+<body>
+  <h1>Live page</h1>
+  <p id="clock">tick 0</p>
+  <form onsubmit="return false">
+    <label for="name">Name</label>
+    <input id="name" name="q">
+  </form>
+  <div>
+    <button type="button" id="alerter" onclick="alert('hi')">Alert</button>
+    <button type="button" id="asker" onclick="document.getElementById('out').textContent = confirm('Are you sure?') ? 'yes' : 'no'">Ask</button>
+  </div>
+  <p id="out"></p>
+  <script>
+    let n = 0;
+    setInterval(() => { n += 1; document.getElementById('clock').textContent = 'tick ' + n; }, 30);
+  </script>
+</body>
+</html>

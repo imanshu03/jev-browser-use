@@ -1,0 +1,37 @@
+{
+  "name": "jev-browser",
+  "version": "0.1.0",
+  "description": "Natural-language browser automation with direct CDP, Chromium, or Vercel agent-browser",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "jev-browser": "./bin/jev-browser.js",
+    "jev-chat": "./bin/jev-chat.js"
+  },
+  "scripts": {
+    "start": "tsx --env-file=.env src/cli.ts",
+    "chat": "node bin/jev-chat.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts",
+    "smoke": "tsx --env-file=.env scripts/smoke.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "agent-browser": "^0.38.1",
+    "undici": "^7.29.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "allowScripts": {
+    "agent-browser@0.38.1": true
+  }
+}

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Form fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .row { margin: 8px 0; }
+    #overlay { position: fixed; left: 0; top: 0; width: 100%; height: 90px; background: rgba(0, 0, 0, 0.5); }
+    #covered-row { position: fixed; left: 24px; top: 30px; }
+    #filler { height: 3000px; background: linear-gradient(#fff, #eee); }
+  </style>
+</head>
+<body>
+  <div id="covered-row"><button type="button" id="covered">Covered</button></div>
+  <div id="overlay"></div>
+  <div style="height: 100px"></div>
+  <h1>Form fixture</h1>
+  <form action="page2.html" method="get">
+    <div class="row"><label for="name">Name</label> <input id="name" name="q"></div>
+    <div class="row"><input type="search" aria-label="Search site" name="s"></div>
+    <div class="row">
+      <select aria-label="Colour" name="c">
+        <option value="red">red</option>
+        <option value="green">green</option>
+        <option value="blue">blue</option>
+      </select>
+    </div>
+    <div class="row"><input type="checkbox" id="sub" name="sub"> <label for="sub">Subscribe</label></div>
+    <div class="row">
+      <button type="button" id="greet">Greet</button>
+      <button id="rename" type="button">Rename me</button>
+      <button type="submit">Send</button>
+    </div>
+    <p id="out"></p>
+  </form>
+  <p><a href="page2.html">Next</a></p>
+  <div id="card-row" style="position: relative; width: 600px; margin: 8px 0">
+    <div id="card" role="button" tabindex="0" style="padding: 12px 4px; height: 40px" onclick="document.getElementById('out').textContent='Card clicked'">Card row</div>
+    <div id="card-cover" style="position: absolute; left: 10%; top: 0; width: 80%; height: 100%; background: #fee"></div>
+  </div>
+  <div id="filler"></div>
+  <script>
+    document.getElementById("greet").addEventListener("click", () => {
+      document.getElementById("out").textContent = "Hello " + document.getElementById("name").value;
+    });
+  </script>
+</body>
+</html>

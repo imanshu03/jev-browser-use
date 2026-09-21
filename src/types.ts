@@ -1,0 +1,257 @@
+// Shared types and constants. No logic lives here.
+
+export type Engine = "cdp" | "chromium" | "vercel";
+
+export type Goal = "act" | "extract" | "check";
+
+export type PageKind =
+  | "task_page" | "sign_in_wall" | "captcha_or_bot_check" | "consent_or_cookie_banner"
+  | "blocking_dialog" | "error_page" | "empty_or_loading";
+
+/** The one operation head. DONE and BLOCKED live inside it. */
+export type Operation =
+  | "CLICK" | "TYPE_TEXT" | "SELECT" | "PRESS_KEY" | "SCROLL_DOWN" | "SCROLL_UP"
+  | "GO_BACK" | "WAIT" | "OPEN_URL" | "DONE" | "BLOCKED";
+
+export type ActionKind =
+  | "click" | "fill" | "select" | "check" | "uncheck" | "hover" | "press_key"
+  | "scroll_down" | "scroll_up" | "go_back" | "open_url" | "wait" | "none";
+
+export type RiskClass = "read_only" | "navigational" | "data_entry" | "submit" | "destructive";
+
+export type Outcome = "done" | "blocked" | "failed";
+
+export type BlockedKind =
+  | "needs_sign_in" | "captcha" | "overlay" | "needs_confirmation" | "needs_credential"
+  | "ambiguous" | "loop_detected" | "max_steps" | "impossible" | "no_start_url"
+  | "ambiguous_profile" | "page_too_large" | "run_timeout" | "human_aborted";
+
+export type FailedKind = "browser" | "jev" | "internal";
+
+export interface Element {
+  ref: string;
+  role: string;
+  name: string;               // cut to LIMITS.nameChars
+  depth: number;
+  under: string;              // section chain, max 3 parts, "" when unknown
+  key: string;                // `${role}|${name}|${under}`; stable across ref renumbering
+  attrs: Record<string, string | true>;
+  state: string;              // bracket attributes without ref and level, joined by ", "
+  value: string;              // text after the trailing colon, cut to 80 chars
+  options?: string[];         // option children names, max LIMITS.optionsPerElement
+  optionRefs?: string[];      // refs of option children, parallel to options ("" when none)
+  href?: string;
+  seen: number;               // collapsed duplicate count (>= 1)
+  index: number;              // document order
+}
+
+export interface ParsedPage {
+  url: string;
+  title: string;
+  elements: Element[];
+  refCount: number;
+  headings: string[];
+  fingerprint: string;
+  truncated: boolean;
+}
+
+export interface Span {
+  id: string;
+  text: string;
+  source: "quoted" | "email" | "url" | "number" | "date" | "after_verb" | "proper_noun"
+        | "clause" | "whole_task" | "var" | "page_line";
+  verb?: string;
+  secret: boolean;
+}
+
+/** One executed action. The first six fields go to Jev as `recent_actions`. */
+export interface HistoryEntry {
+  step: number;
+  operation: string;
+  target?: string;
+  value?: string;             // redacted when secret
+  result: string;
+  page_changed: boolean | null;
+  url_after?: string;
+  element_key?: string;
+}
+
+export interface StepRecord {
+  step: number;
+  url: string;
+  title: string;
+  page_kind: PageKind | null;
+  page_kind_conf: number | null;
+  done_p: number | null;      // probability of DONE in the operation head
+  operation: Operation | null;
+  operation_conf: number | null;
+  target: { ref: string; role: string; name: string; under: string } | null;
+  target_conf: number | null;
+  runner_up: number | null;
+  action: ActionKind;
+  value: string | null;
+  value_conf: number | null;
+  risk: RiskClass | null;
+  path: "fast" | "confirm" | "code" | null;
+  gate: string;
+  result: "ok" | "failed" | "recovered" | "skipped" | "paused" | "blocked" | "done" | "wait";
+  error: string | null;
+  jev_requests: number;
+  duration_ms: number;
+}
+
+export interface RunConfig {
+  task: string;
+  profile?: string;
+  url?: string;
+  /** Chat mode: the page the browser already shows. Used when nothing else resolves a start URL. */
+  fallbackUrl?: string;
+  headed: boolean;
+  cdp?: number;
+  maxSteps: number;
+  stepTimeoutMs: number;
+  runTimeoutMs: number;
+  pauseTimeoutMs: number;
+  confirm: "auto" | "always" | "never";
+  dryRun: boolean;
+  session: string;
+  model: string;
+  logLevel: "info" | "debug";
+  logJson: boolean;
+  keepOpen: boolean;
+  screenshotDir?: string;
+  agentBrowserBin: string;
+  vars: Record<string, string>;
+  goal?: Goal;
+  /** Which engine runs the task. The CLI fills it; absent means the CLI default. */
+  engine?: Engine;
+  /** Fast engine: copy the Chrome profile again even when a copy exists. */
+  refreshProfile?: boolean;
+  /** Fast engine: Chrome binary to launch. */
+  chromeBin?: string;
+}
+
+export type CheckAnswer = boolean | "unknown";
+
+export interface RunResult {
+  version: 1;
+  task: string;
+  outcome: Outcome;
+  reason: string;
+  confidence: number | null;
+  goal: Goal;
+  answer:
+    | { kind: "extract"; text: string; line_id: string; evidence: string[] }
+    | { kind: "check"; answer: CheckAnswer; probability: number; evidence: string[]; top?: { label: string; p: number }[] }
+    | null;
+  final_url: string | null;
+  final_title: string | null;
+  profile: { directory: string; name: string; how: string } | null;
+  start: { url: string; how: string; confidence: number | null } | null;
+  steps: StepRecord[];
+  blocked: { kind: BlockedKind; hint: string; top: { label: string; p: number }[]; resume: { session: string; url: string | null } } | null;
+  error: { kind: FailedKind; message: string } | null;
+  stats: {
+    steps: number; jev_requests: number; input_tokens: number; output_tokens: number; duration_ms: number; model: string; pauses: number;
+    /** Sum of Jev request round trips. */
+    jev_ms: number;
+    /** Sum of browser command round trips plus settle waits. The legacy engine reports 0. */
+    browser_ms: number;
+    engine: Engine;
+  };
+}
+
+// Target thresholds start low: the operation head already committed to the operation, and
+// measured target confidences over 26..100 elements were 0.31..0.49 in the prototype runs.
+export const THRESHOLDS: Record<RiskClass, { target: number; value: number; inScope: number; targetOk: number; humanConfirm: boolean }> = {
+  read_only:    { target: 0.20, value: 0.50, inScope: 0.00, targetOk: 0.00, humanConfirm: false },
+  navigational: { target: 0.25, value: 0.50, inScope: 0.30, targetOk: 0.00, humanConfirm: false },
+  data_entry:   { target: 0.30, value: 0.55, inScope: 0.40, targetOk: 0.00, humanConfirm: false },
+  submit:       { target: 0.50, value: 0.70, inScope: 0.60, targetOk: 0.60, humanConfirm: false },
+  destructive:  { target: 0.70, value: 0.85, inScope: 0.80, targetOk: 0.85, humanConfirm: true },
+};
+
+export const FAST_PATH = {
+  target: 0.60,               // target confidence to act at once on a plain click
+  runnerUpRatio: 0.50,
+  irreversibleMax: 0.30,
+  submitsMax: 0.40,
+  value: 0.80,
+} as const;
+
+export const GATES = {
+  pageKind: 0.60, pageKindError: 0.70, signInProb: 0.30,
+  operation: 0.20, blocked: 0.40, doneFinal: 0.70, answerOk: 0.70, check: 0.60, checkHolds: 2,
+  chunkWinner: 0.20, runnerUpRatio: 0.50, action: 0.50,
+  submitWithEnter: 0.70, irreversibleDestructive: 0.50, submitsSubmit: 0.60,
+  valueFromPage: 0.60, fillsCredential: 0.50,
+  dismissTarget: 0.60, isDismissible: 0.50,
+  key: 0.60, openUrl: 0.70, wall: 0.50,
+  profileJev: 0.80, profileHuman: 0.50, profileMentioned: 0.50,
+  site: 0.70, wantsSearch: 0.60, searchQuery: 0.50, goal: 0.50,
+  extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,
+  done: 0.50, answerLine: 0.20,       // fast engine: P(DONE) for act goals; answer_line confidence for extract goals
+} as const;
+
+export const LIMITS = {
+  chunkSize: 200, maxElements: 1000, headElements: 400, stateElements: 250, nameChars: 80, nameCharsTrimmed: 60,
+  underChars: 60, optionsPerElement: 100, valueChars: 80, textExcerptChars: 6000, textExcerptTrimmed: 2000,
+  history: 10, historyTrimmed: 3, spans: 40, spanChars: 120, pageSpans: 3,
+  lineChars: 160, linesPerRequest: 600, maxLines: 1800, evidenceLines: 3, checkLines: 300,
+  snapshotCharsResnapshot: 400_000, fullSnapshotAboveRefs: 200,
+  waitsPerPage: 2, recoversPerPage: 2, coveredPerPage: 2, lowConfStreak: 3, doneRejections: 2, doneSuppressSteps: 2,
+  pauses: 2, errorRetries: 1, staleRetries: 1, stallActions: 3,
+  sigRepeatBan: 2, fpRepeatWindow: 6, fpRepeatCount: 4,
+  tokenRequest: 60_000, tokenStatePlusLongest: 28_000, charsPerToken: 2.2,
+  openTimeoutMs: 60_000, settleDomMs: 10_000, settleIdleMs: 5_000, settlePauseMs: 400, expandWaitMs: 300,
+  coveredRetryMs: 300, coveredSecondRetryMs: 1000, pausePollMs: 5_000, confirmPromptMs: 120_000,
+  scrollPx: 600, waitIdleMs: 5_000, waitPauseMs: 1_000,
+  fastWaitMs: 1_500, waitPollMs: 100,   // fast engine WAIT: poll until the page changes, at most fastWaitMs
+  titleChars: 200, urlChars: 2000,       // fast engine state caps for page.title and page.url
+  // Fast engine.
+  fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,
+  fastElementsTrimmed: 150, answerLines: 254, answerLineChars: 160,
+} as const;
+
+export const ROLE_PRIORITY: Record<string, number> = {
+  searchbox: 0, textbox: 0, combobox: 0, textarea: 0, button: 1, checkbox: 1, radio: 1, menuitem: 1, tab: 1,
+  option: 1, switch: 1, spinbutton: 1, link: 2, slider: 2, row: 2, treeitem: 2, listitem: 3, cell: 3, gridcell: 3,
+};
+
+export const ACTIONABLE_ROLES = new Set([
+  "searchbox", "textbox", "textarea", "combobox", "button", "link", "checkbox", "radio", "menuitem",
+  "menuitemcheckbox", "menuitemradio", "tab", "option", "switch", "slider", "spinbutton",
+  "row", "listitem", "cell", "treeitem", "gridcell",
+]);
+
+/** Roles the CLICK head may target. */
+export const CLICK_ROLES = new Set([
+  "button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "option", "checkbox", "radio",
+  "treeitem", "switch", "row", "cell", "gridcell", "listitem", "combobox",
+]);
+
+/** Roles the TYPE_TEXT head may target. */
+export const FILL_ROLES = new Set(["textbox", "searchbox", "combobox", "textarea", "spinbutton"]);
+
+export const KEY_CATALOG: Record<string, string> = {
+  enter: "Enter", escape: "Escape", tab: "Tab", arrow_down: "ArrowDown", arrow_up: "ArrowUp",
+  page_down: "PageDown", page_up: "PageUp",
+};
+
+export const DESTRUCTIVE_WORDS = ["delete", "remove", "pay", "buy", "purchase", "checkout", "place order",
+  "send", "post", "publish", "transfer", "unsubscribe", "cancel subscription", "confirm order",
+  "submit order", "archive", "reply", "tweet", "share", "deactivate", "close account"];
+
+export const SUBMIT_WORDS = ["submit", "save", "apply", "sign in", "log in", "login", "register", "sign up",
+  "continue", "next", "create", "update", "add to cart", "confirm"];
+
+export const DISMISS_WORDS = ["close", "dismiss", "reject", "decline", "no thanks", "not now", "got it",
+  "accept", "agree", "ok", "×", "later", "skip", "maybe later", "i understand"];
+
+export const CREDENTIAL_NAME = /password|passcode|passphrase|\bpin\b|\botp\b|one-time|verification code|security code|2fa|mfa|totp/i;
+export const SECRET_KEY = /pass|pin|otp|secret|token|code/i;
+export const SIGN_IN_HEADING = /sign in|log in|login|choose an account|enter your password|verify it's you/i;
+export const AUTH_HOST = /accounts\.google\.com|login\.|signin\.|auth\.|sso\.|okta\.com|auth0\.com/i;
+
+/** The workspace rule: all browser work runs in Chrome Profile 14 unless the user says otherwise. */
+export const DEFAULT_PROFILE_NAME = "Parallelloop";
