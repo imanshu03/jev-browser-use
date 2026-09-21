@@ -1,4 +1,6 @@
-These instructions apply to `jev-browser` and its subdirectories.
+These instructions apply to `jev-browser-use` and its subdirectories.
+
+The package and repository name is `jev-browser-use`. Public commands remain `jev-browser` and `jev-chat`. Preserve the existing configuration paths and environment variable names when editing project branding.
 
 Use ASD-STE100 Simplified Technical English. Follow Zinsser's principles: simplicity, brevity, clarity, and humanity. Avoid staccato pairs, antithesis reframes, negative parallelism, isocolon metaphor-pairs, and backward references.
 

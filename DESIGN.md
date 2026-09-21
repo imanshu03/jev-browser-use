@@ -1,6 +1,6 @@
-# jev-browser design
+# jev-browser-use design
 
-This document defines the design of the one-shot CLI and chat mode. The public engine choices are `cdp` (default), `chromium`, and `vercel`. The `cdp` and `chromium` options share the direct implementation; `vercel` uses the `agent-browser` implementation. Below, “direct engines” means `cdp` and `chromium`. Internal `FastRunner` and `src/fast/` names remain unchanged. Engine-specific behavior is stated explicitly.
+This document defines the design of the one-shot CLI and chat mode for `jev-browser-use`. The package name is `jev-browser-use`; the command names remain `jev-browser` and `jev-chat`. Configuration directories retain the `jev-browser` name so saved keys and profile copies remain available. The public engine choices are `cdp` (default), `chromium`, and `vercel`. The `cdp` and `chromium` options share the direct implementation; `vercel` uses the `agent-browser` implementation. Below, “direct engines” means `cdp` and `chromium`. Internal `FastRunner` and `src/fast/` names remain unchanged. Engine-specific behavior is stated explicitly.
 
 Use [README.md](README.md) for installation, flags, and user commands. Exact interfaces, prompt strings, and limits live in the source files linked here. Update this document when a change affects architecture or behavior.
 

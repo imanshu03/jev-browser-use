@@ -1,7 +1,7 @@
 {
-  "name": "jev-browser",
+  "name": "jev-browser-use",
   "version": "0.1.0",
-  "description": "Natural-language browser automation with direct CDP, Chromium, or Vercel agent-browser",
+  "description": "Jev-powered browser automation for one-shot tasks and interactive chat, with cdp, chromium, and vercel engines",
   "type": "module",
   "private": true,
   "bin": {
