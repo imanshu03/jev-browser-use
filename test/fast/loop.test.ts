@@ -496,7 +496,7 @@ describe("FastRunner review fixes", () => {
     const r = await t.runner.run();
     expect(t.page.calls.filter((c) => c.op === "act")).toEqual([]);
     expect(r.steps[0]?.gate).toMatch(/^low_value 0\.28 < 0\.55/);
-    expect(r.steps[0]?.value_conf).toBe(0.28);
+    expect(r.steps[0]?.value_conf).toBeNull();
     expect(r.blocked?.kind).toBe("ambiguous");
     const v = setup("open wikipedia.org and search", { pages: { home: HOME, a: ARTICLE }, start: "home", transitions: (c) => (c.op === "act" && c.kind === "fill" ? "a" : undefined) },
       byUrl({ [HOME.url]: (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Search Wikipedia"), confidence: 0.8 }, type_text_value: { choice: "v_query", confidence: 0.2 } }), [ARTICLE.url]: done }), { vars: { query: "Alan Turing" } });
@@ -608,7 +608,7 @@ describe("FastRunner review fixes", () => {
     const t = setup("open https://app.example/edit and save", { pages: { f: FORM }, start: "f" }, byUrl({ [FORM.url]: tied }));
     const r = await t.runner.run();
     expect(t.page.calls.filter((c) => c.op === "act")).toEqual([]);
-    expect(t.log.lines.some((l) => /re-ask 1\/1: ambiguous_runner_up 0\.47 >= 0\.5 \* 0\.50 \(submit\)/.test(l))).toBe(true);
+    expect(t.log.lines.some((l) => /retry 1\/1: ambiguous_runner_up 0\.47 >= 0\.5 \* 0\.50 \(submit\)/.test(l))).toBe(true);
     expect(r.steps[0]?.jev_requests).toBe(2);
     expect(r.blocked?.kind).toBe("ambiguous");
     const nav = setup("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" },
@@ -862,7 +862,7 @@ describe("review regressions: Enter and secrets", () => {
   });
 
   it.each(["always", "never"] as const)("Enter cannot bypass %s on a destructive form", async (confirm) => {
-    const form = { ...HOME, focus: { node: 1, label: "Name", role: "textbox", submitLabel: "Delete account" } };
+    const form = { ...HOME, focus: { node: 1, label: "Name", role: "textbox", submitLabel: "Delete account", editable: true, value: "test account" } };
     const t = setup("open example.com and submit", { pages: { form }, start: "form" },
       () => ({ page_kind: "task_page", operation: "PRESS_ENTER" }), { confirm, maxSteps: 1 });
     const r = await t.runner.run();
@@ -886,5 +886,91 @@ describe("review regressions: Enter and secrets", () => {
     expect(JSON.stringify(t.oracle.requests)).not.toContain(JSON.stringify(secret).slice(1, -1));
     expect(r.final_title).toBe("Title: ***");
     expect(filled.actions[0]?.value).toBe(secret);
+  });
+});
+
+
+describe("uncertain decision recovery", () => {
+  it("observes new chat controls after a rejected click and fills before sending", async () => {
+    const url = "https://example.com/dashboard";
+    const initial = obs(url, [el("e1", "click", "Open user menu", "button")]);
+    const ready = obs(url, [el("e1", "click", "Open user menu", "button"), el("e2", "click", "Open chat panel", "button")]);
+    const editor = obs(url, [el("e3", "fill", "Message", "textbox", { value: "" })], "New chat");
+    const filled = obs(url, [el("e3", "fill", "Message", "textbox", { value: "List my latest meetings" })], "New chat", { focus: { node: 3, label: "Message", role: "textbox", submitLabel: "Send" } });
+    const sent = obs(url, [], "Message sent: List my latest meetings");
+    let decisions = 0;
+    const t = setup('open example.com and type "List my latest meetings" in a new chat and send it', {
+      pages: { initial, ready, editor, filled, sent }, start: "initial",
+      transitions: (c) => c.op === "press" ? "sent" : c.op === "act" ? c.kind === "fill" ? "filled" : "editor" : undefined,
+    }, (_name, state, questions) => {
+      decisions += 1;
+      if (decisions === 1) {
+        t.page.current = "ready";
+        return { operation: "CLICK", click_target: { choice: "1", confidence: 0.21 } };
+      }
+      if (decisions === 2) {
+        expect((state as { retry_reason: string }).retry_reason).toContain("was not executed: low_target");
+        expect(JSON.stringify(questions.click_target)).not.toContain("Open user menu");
+        return { operation: "CLICK", click_target: idx(questions, "click_target", "Open chat panel") };
+      }
+      if (decisions === 3) return { operation: "TYPE_TEXT", type_text_target: "1", type_text_value: "v_message" };
+      if (decisions === 4) return { operation: "PRESS_ENTER" };
+      return { operation: "DONE" };
+    }, { vars: { message: "List my latest meetings" } }, { human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const r = await t.runner.run();
+    expect(r.outcome, JSON.stringify({ reason: r.reason, logs: t.log.lines })).toBe("done");
+    expect(t.page.calls.filter((c) => c.op !== "navigate")).toEqual([
+      { op: "act", id: "e2", kind: "click" },
+      { op: "act", id: "e3", kind: "fill", text: "List my latest meetings" },
+      { op: "press", key: "Enter" },
+    ]);
+    expect(r.steps[0]?.gate).toMatch(/^ok/);
+    expect(t.human.prompts.some((prompt) => prompt.includes("press Enter"))).toBe(true);
+    expect(t.log.lines.some((line) => line.includes("retry 1/1"))).toBe(true);
+  });
+
+  it("retries uncertain Enter by filling the message and then submitting", async () => {
+    const editor = obs("https://example.com/chat", [el("e1", "fill", "Message", "textbox", { value: "" })]);
+    let calls = 0;
+    const t = setup('open example.com and type "List my latest meetings" and send it', { pages: { editor }, start: "editor" }, (_name, state) => {
+      calls += 1;
+      if (calls === 1) return { operation: { choice: "PRESS_ENTER", confidence: 0.3 } };
+      if (calls === 2) {
+        expect((state as { retry_reason: string }).retry_reason).toContain("Enter confidence 0.30 below 0.5");
+        return { operation: "TYPE_TEXT", type_text_target: "1", type_text_value: "v_message" };
+      }
+      if (calls === 3) return { operation: "PRESS_ENTER" };
+      return { operation: "DONE" };
+    }, { vars: { message: "List my latest meetings" }, engine: "chromium" });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.op !== "navigate").map((c) => c.op)).toEqual(["act", "press"]);
+    expect(r.steps[0]?.risk).toBe("data_entry");
+    expect(r.steps[1]?.target).toBeNull();
+    expect(t.log.lines.some((line) => line.includes("engine=chromium"))).toBe(true);
+  });
+
+  it("blocks repeated uncertain Enter without sending a key", async () => {
+    const editor = obs("https://example.com/chat", []);
+    const t = setup("open example.com and send", { pages: { editor }, start: "editor" }, () => ({ operation: { choice: "PRESS_ENTER", confidence: 0.3 } }));
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.steps[0]?.jev_requests).toBe(2);
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+  });
+});
+
+
+describe("empty editor execution guard", () => {
+  it("never sends Enter when a model returns it for an empty editor", async () => {
+    const editor = obs("https://example.com/chat", [el("e1", "fill", "Message", "textbox", { value: "" })], "", {
+      focus: { node: 1, label: "Message", role: "textbox", submitLabel: "Send", editable: true, value: "" },
+    });
+    const t = setup('open example.com and type "List my latest meetings" and send it', { pages: { editor }, start: "editor" },
+      () => ({ operation: "PRESS_ENTER" }));
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.reason).toContain("Enter unavailable");
+    expect(t.page.calls.some((call) => call.op === "press")).toBe(false);
   });
 });

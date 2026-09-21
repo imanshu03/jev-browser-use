@@ -12,6 +12,7 @@ import { findChrome, launchChrome } from "../../src/fast/chrome.js";
 import type { Action, Chrome, Observation, Page } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
+import { canPressEnter } from "../../src/fast/policy.js";
 import { fakeLogger } from "../fakes.js";
 
 const FIXTURES = path.resolve(__dirname, "../fixtures/live");
@@ -350,6 +351,22 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions (live Chrom
     page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
   });
   afterAll(async () => { await chrome?.close(); });
+
+  it.each(["true", "", "plaintext-only"])("fills a contenteditable=%j chat editor before Enter", async (mode) => {
+    await html(`<div id="editor" contenteditable="${mode}" data-placeholder="Message" style="min-height:80px;border:1px solid"> </div>`);
+    await evaluate(`document.getElementById('editor').addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); window.sent = e.currentTarget.innerText; } }); document.getElementById('editor').focus()`);
+    const empty = await page.observe();
+    const field = find(empty, "fill", "Message");
+    expect(empty.focus?.editable).toBe(true);
+    expect(canPressEnter(empty)).toBe(false);
+    await page.act(field, empty, "List my latest meetings");
+    const filled = await page.observe();
+    expect(filled.focus?.value).toBe("List my latest meetings");
+    expect(canPressEnter(filled)).toBe(true);
+    await expect(page.press("Enter", empty)).rejects.toBeInstanceOf(StalePage);
+    await page.press("Enter", filled);
+    expect(await evaluate("window.sent")).toBe("List my latest meetings");
+  });
 
   it("rejects Enter after focus moves to another form", async () => {
     await html('<form id="a" onsubmit="event.preventDefault();window.sent=this.id"><input id="one"><button>Search</button></form><form id="b" onsubmit="event.preventDefault();window.sent=this.id"><input id="two"><button>Delete account</button></form>');

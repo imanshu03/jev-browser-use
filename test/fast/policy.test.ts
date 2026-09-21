@@ -217,3 +217,22 @@ describe("label and value caps", () => {
     expect(cutText("  a   b  ", 10)).toBe("a b");
   });
 });
+
+
+describe("Enter readiness", () => {
+  it.each(["", "  ", "\n"])("offers fill but excludes Enter for an empty focused editor (%j)", (value) => {
+    const page = obs("https://example.com/chat", [el("e1", "fill", "Message", "textbox", { value })], "", {
+      focus: { node: 1, label: "Message", role: "textbox", submitLabel: "Send", editable: true, value },
+    });
+    const built = buildStep(input({ obs: page, spans: [span("s1", "List my latest meetings")] }));
+    expect(criteriaKeys(built.questions.operation)).toContain("TYPE_TEXT");
+    expect(criteriaKeys(built.questions.operation)).not.toContain("PRESS_ENTER");
+    expect(criteriaKeys(built.questions.type_text_value)).toContain("s1");
+  });
+  it("offers Enter after text is present, and excludes it without focus", () => {
+    const page = obs("https://example.com/chat", [], "", { focus: { node: 1, label: "Message", role: "textbox", submitLabel: "Send", editable: true, value: "List my latest meetings" } });
+    expect(criteriaKeys(buildStep(input({ obs: page })).questions.operation)).toContain("PRESS_ENTER");
+    page.focus = null;
+    expect(criteriaKeys(buildStep(input({ obs: page })).questions.operation)).not.toContain("PRESS_ENTER");
+  });
+});

@@ -160,7 +160,7 @@ The direct STEP state carries the same task intent in this shape:
   goal: task,
   page: { url, title, text },
   elements: [{ index, label, role, value, operations, options? }],
-  focus: { node, label, role, submitLabel } | null,
+  focus: { node, label, role, submitLabel, editable, value } | null,
   recent_actions: [{ action, kind, text, page_changed }],
   typed_values?, keys?
 }
@@ -213,11 +213,11 @@ Risk classes are `read_only`, `navigational`, `data_entry`, `submit`, and `destr
 
 The `vercel` gate uses applicable columns for the selected action. Its risk is the highest class from the action, label keywords, and model risk answers. CONFIRM can ask `target_ok` for submit or destructive risk. A close runner-up blocks a submit or destructive target when its probability is at least half the selected target's probability.
 
-The direct gate uses target confidence, value confidence, label-based risk, the runner-up rule for submit or destructive clicks, and human confirmation. It does not run the `vercel` semantic risk or `target_ok` questions. A supplied variable has value confidence 1 for the gate. Low target or value confidence bans the target and allows a bounded new request.
+The direct gate uses target confidence, value confidence, label-based risk, the runner-up rule for submit or destructive clicks, and human confirmation. It does not run the `vercel` semantic risk or `target_ok` questions. A supplied variable has value confidence 1 for the gate. Low target or value confidence bans the target and allows one new request per step. Before retrying, observe the page again and add a bounded, redacted `retry_reason` to the request state. The reason states which decision was rejected and that no input was sent. Report the retry in normal chat output. Reset target and value metadata before reading the next decision.
 
 A model CONFIRM request and a human confirmation prompt have separate roles. `--confirm auto` asks the human for destructive actions. `always` also asks for submits. `never` blocks destructive actions. A required human confirmation without a TTY blocks with `needs_confirmation`.
 
-In the direct engines, Enter is at least a submit action. A destructive label on the focused control or its form makes it destructive. Apply the corresponding operation-confidence threshold and human confirmation before pressing Enter. Recheck focus and form state after the prompt. A dry run records the proposed action without executing it.
+In the direct engines, Enter is unavailable when observed focus is absent or the focused editor is empty. Offer TYPE_TEXT for supported editors and check their current values before submission. Enforce the same rule in execution if a model returns an unavailable Enter choice. Enter is at least a submit action. A destructive label on the focused control or its form makes it destructive. Apply the corresponding operation-confidence threshold and human confirmation before pressing Enter. Low Enter confidence uses the same one-retry budget and fresh observation as a rejected target; block as ambiguous if confidence remains below the threshold. Recheck focus and form state after the prompt. A dry run records the proposed action without executing it.
 
 ### 5.2 Direct iteration
 
@@ -317,7 +317,7 @@ The direct snapshot reads visible text and supported controls in one page evalua
 
 Before a targeted action, compare the page key and target guard. The page key includes document identity, URL, viewport, safe form values, and scroll state. The target guard includes identity, accessible name, value, state, link destination, and nearby form, dialog, or row text. Geometry is resolved and hit-tested immediately before input.
 
-Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change or form change invalidates a pending Enter action. Text changes elsewhere need not invalidate an unrelated targeted click or fill.
+Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change, form change, or rich-text editor value change invalidates a pending Enter action. Native inputs, textareas, and contenteditable editors expose their values; contenteditable editors support true, empty, and plaintext-only attribute forms. Text changes elsewhere need not invalidate an unrelated targeted click or fill.
 
 Document scrolling and panel scrolling are separate actions. A panel action retains its node identity and scroll position. Prefer a scrollable panel with focus, then the largest visible panel. Clip observations to the panel viewport and check that the panel is still usable before scrolling.
 

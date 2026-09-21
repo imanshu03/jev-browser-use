@@ -21,7 +21,7 @@ import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SIGN_IN_H
 import type { Action, Chrome, FastHistoryEntry, Observation, Page } from "./model.js";
 import { StalePage } from "./model.js";
 import type { Decision, StepInput, StepMeta, TargetOp } from "./policy.js";
-import { buildStep, cutText, readStep, top3 } from "./policy.js";
+import { buildStep, canPressEnter, cutText, readStep, top3 } from "./policy.js";
 
 export interface FastRunnerDeps {
   cfg: RunConfig;
@@ -181,7 +181,7 @@ export class FastRunner {
       this.result.goal = plan.goal;
       this.result.profile = plan.profile.profile ? { directory: plan.profile.profile.directory, name: plan.profile.profile.name, how: plan.profile.how } : null;
       this.result.start = plan.start.url ? { url: plan.start.url, how: plan.start.how, confidence: plan.start.confidence } : null;
-      this.log.info(`plan profile=${plan.profile.profile ? `${plan.profile.profile.name} (${plan.profile.profile.directory})` : "none"} via ${plan.profile.how} start=${plan.start.url ?? "none"} via ${plan.start.how} goal=${plan.goal}${plan.goalConfidence !== null ? `(${plan.goalConfidence.toFixed(2)})` : ""} requests=${plan.jevRequests} engine=fast`);
+      this.log.info(`plan profile=${plan.profile.profile ? `${plan.profile.profile.name} (${plan.profile.profile.directory})` : "none"} via ${plan.profile.how} start=${plan.start.url ?? "none"} via ${plan.start.how} goal=${plan.goal}${plan.goalConfidence !== null ? `(${plan.goalConfidence.toFixed(2)})` : ""} requests=${plan.jevRequests} engine=${this.cfg.engine ?? "cdp"}`);
       if (plan.profile.blocked) { await settle(); this.setBlocked("ambiguous_profile", "Name the profile with --profile <name>", plan.top, null); return this.finalize("blocked"); }
       const current = plan.start.how === "current_page";
       if (plan.start.blocked || !plan.start.url || (current && !this.deps.page)) {
@@ -326,11 +326,13 @@ export class FastRunner {
     if (this.cfg.screenshotDir) await (this._page as Page).screenshot(path.join(this.cfg.screenshotDir, `step-${this.stepNo}.jpg`)).catch(() => undefined);
 
     let reasks = 0;
+    let retryReason: string | undefined;
     let stale = 0;
     for (;;) {
       const input: StepInput = {
         task: this.cfg.task, goal: this.goal, obs, history: this.history, spans: this.spans, keys: this.keys,
         bannedActionIds: this.bannedIds(obs), doneBanned: this.stepNo <= this.doneBannedUntil,
+        ...(retryReason ? { retryReason } : {}),
       };
       let built: ReturnType<typeof buildStep>;
       try { built = buildStep(input); } catch (e) {
@@ -362,12 +364,25 @@ export class FastRunner {
       ctx.doneP = d.operation ? d.pDone : null;
       this.log.info(`step ${this.stepNo}/${this.cfg.maxSteps} ${obs.url} | page=${d.pageKind ?? "?"}(${(d.pageKindConf ?? 0).toFixed(2)}) op=${d.operation ?? "?"}@${d.operationConf.toFixed(2)}${d.target ? ` target=[${d.target.key}]@${d.target.conf.toFixed(2)}` : ""}${d.answerState ? ` answer=${d.answerState.choice}@${d.answerState.conf.toFixed(2)}` : ""}${d.answerVisible !== undefined ? ` visible=${d.answerVisible.toFixed(2)}` : ""} actions=${obs.actions.length} obs=${obs.ms}ms`);
 
+      // A fresh decision must not retain the target or typed value from a stale attempt.
+      ctx.target = null; ctx.targetConf = null; ctx.runnerUp = null;
+      ctx.action = "none"; ctx.value = null; ctx.valueConf = null; ctx.risk = null;
       const r = await this.apply(d, obs, built.meta, ctx);
       if (r.kind === "record") return r.rec;
       if (r.kind === "reask") {
         reasks += 1;
         if (reasks > LIMITS.fastReasks) return this.blocked(ctx, "ambiguous", ctx.gate || "no target passed the gate after a re-ask", d.target ? top3(d.target.probs) : top3(d.operationProbs), obs.url);
-        this.log.info(`step ${this.stepNo} re-ask ${reasks}/${LIMITS.fastReasks}: ${ctx.gate}`);
+        retryReason = `${ctx.operation ?? "action"}${d.target ? ` on "${d.target.label}"` : ""} was not executed: ${ctx.gate}. Check the current page and choose the next useful action. Fill required text before submitting.`;
+        this.log.warn(`step ${this.stepNo} retry ${reasks}/${LIMITS.fastReasks}: ${ctx.gate}; observing again`);
+        try {
+          obs = await this.observeSettled();
+        } catch (e) {
+          if (e instanceof StalePage) return this.blocked(ctx, "ambiguous", "page keeps changing", [], this.lastObs?.url ?? obs.url);
+          throw e;
+        }
+        ctx.url = obs.url; ctx.title = obs.title;
+        ctx.target = null; ctx.targetConf = null; ctx.runnerUp = null;
+        ctx.action = "none"; ctx.value = null; ctx.valueConf = null; ctx.risk = null;
         continue;
       }
       stale += 1;
@@ -441,6 +456,10 @@ export class FastRunner {
     }
     if (d.operation === "CLICK" || d.operation === "TYPE_TEXT" || d.operation === "SELECT") return this.targeted(d, d.operation, obs, meta, ctx);
     if (d.operation === "PRESS_ENTER") {
+      if (!canPressEnter(obs)) {
+        ctx.gate = "Enter unavailable: focus an input and fill required text before submitting";
+        return { kind: "reask" };
+      }
       const label = [obs.focus?.label, obs.focus?.submitLabel].filter(Boolean).join(" | ");
       // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit.
       const risk: RiskClass = riskOf("CLICK", label) === "destructive" ? "destructive" : "submit";
@@ -448,8 +467,10 @@ export class FastRunner {
       ctx.action = "press_key";
       ctx.value = "Enter";
       if (d.operationConf < THRESHOLDS[risk].target) {
-        return rec(this.blocked(ctx, "ambiguous", `Enter confidence below ${THRESHOLDS[risk].target}`, opTop, obs.url));
+        ctx.gate = `Enter confidence ${d.operationConf.toFixed(2)} below ${THRESHOLDS[risk].target}`;
+        return { kind: "reask" };
       }
+      ctx.gate = `ok ${d.operationConf.toFixed(2)} (${risk})`;
       const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url);
       if (denied) return rec(denied);
     }
@@ -544,9 +565,9 @@ export class FastRunner {
     if (op === "SELECT") { ctx.value = action.label.split(" → ").slice(1).join(" → ") || action.label; ctx.valueConf = t.conf; }
 
     const desc = `${ctx.action} ${action.role ?? ""} "${t.label}"`.replace(/\s+/g, " ");
+    ctx.gate = `ok ${t.conf.toFixed(2)} (${risk})`;
     const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), obs.url);
     if (denied) return { kind: "record", rec: denied };
-    if (!ctx.gate) ctx.gate = `ok ${t.conf.toFixed(2)} (${risk})`;
 
     return this.execute(op, action, text, shown, obs, ctx);
   }
@@ -567,7 +588,7 @@ export class FastRunner {
   private async execute(op: string, action: Action | null, text: string | null, shown: string | null, obs: Observation, ctx: StepCtx): Promise<Applied> {
     const page = this._page as Page;
     ctx.action = ACTION_OF[op] ?? "none";
-    if (!ctx.gate) ctx.gate = "ok";
+    if (!ctx.gate || /^(low_|Enter confidence|ambiguous_runner_up|repeat )/.test(ctx.gate)) ctx.gate = "ok";
     if (op === "PRESS_ENTER") ctx.value = "Enter";
     if (this.cfg.dryRun) {
       ctx.gate += " dry_run";

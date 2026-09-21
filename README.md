@@ -10,8 +10,10 @@
 
 ```
 npm install
-echo 'TYPESAFE_API_KEY=...' > .env
+cp .env.example .env
 ```
+
+Set `TYPESAFE_API_KEY` in `.env` before running a one-shot task. [.env.example](.env.example) describes the required key and optional engine, model, profile, binary, and storage settings. Chat can ask for and save a key when the environment key is empty. Existing shell environment values take priority over `.env`.
 
 Node 22 or later. Install Google Chrome for `cdp` or Chromium for `chromium`. `agent-browser` ships with the package for the `vercel` engine.
 
@@ -100,10 +102,12 @@ The engine closes its launched browser at the end of the run, on SIGINT, and aft
 
 Rules for both direct engines:
 
+- A rejected target or uncertain Enter choice gets one retry per step. The engine observes the page again and includes the rejection reason in the next request. A visible retry message explains what happened. Rejected input is not sent; confidence and human confirmation checks still apply.
+
 - `--step-timeout` sets the timeout of every CDP command.
 - A JavaScript dialog (`alert`, `confirm`, `prompt`, `beforeunload`) is answered at once: alerts and `beforeunload` prompts are accepted, `confirm` and `prompt` dialogs are dismissed. The message goes to the log.
 - A copied profile has one owner at a time. A second launch or refresh fails while that profile is in use. The owner holds `<copy>.jev-lock` until the browser exits. After a forced stop, a lock can remain. Check that no browser process uses the copy before you remove the lock. Existing Chrome singleton locks are preserved.
-- Enter uses the submit confirmation rules. If the focused control or its form has a destructive label, Enter uses the destructive confirmation rules. A change to focus or form state cancels the pending key press.
+- Enter is offered only when observed focus can use it. An empty focused editor must be filled first. The snapshot reads native fields and rich-text editors, including their current values. Enter uses the submit confirmation rules. If the focused control or its form has a destructive label, Enter uses the destructive confirmation rules. A change to focus or form state cancels the pending key press.
 - Scroll actions can target a panel inside the page. The engine prefers a scrollable panel with focus, then the largest visible panel.
 - Known secret values are removed from model requests, logs, and result JSON. The browser still receives the original value when it fills a field.
 - The profile copy is complete only when `<copy>/jev-copy.json` exists. The engine copies into a staging directory first and renames it at the end. A copy that ended early is copied again on the next run.

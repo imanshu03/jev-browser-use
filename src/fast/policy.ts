@@ -26,6 +26,7 @@ export const RULES: string[] = [
   "Submit populated search fields before opening a result; a populated field alone is not an applied search. If Search or Submit is visible and the required fields are ready, CLICK it immediately.",
   "Prefer a visible useful control over WAIT. Recent WAIT actions are not evidence of loading. WAIT only when the needed control is absent or disabled, or submitted results are still loading.",
   "PRESS_ENTER submits the focused field. GO_BACK returns to the previous page.",
+  "For a message or query, TYPE_TEXT with the requested text before submitting. An empty editor is not ready to send. Use the field value and focus state to check this.",
   "If the goal asks to check, verify, or find something, navigate to the detailed view where the items are listed with the attribute the goal refers to (such as a date). A dashboard card, sidebar entry, or summary is not that view.",
   "DONE requires visible evidence that ALL requirements are satisfied, or that the detailed view needed to answer the goal's question is visible. If asked to open a result, a matching link is not enough. Selecting or highlighting an item is not required to read it.",
   "BLOCKED means no supported operation can make progress: for example a sign-in, password, or CAPTCHA page, an error page, or a goal that this site cannot fulfil.",
@@ -116,6 +117,17 @@ export interface StepInput {
   keys: { label: string; key: string }[];
   bannedActionIds: Set<string>;
   doneBanned: boolean;
+  /** Rejected decision from this step; no browser input was sent. */
+  retryReason?: string;
+}
+
+/** Enter cannot submit an observed empty editor. Missing focus is tolerated by older adapters. */
+export function canPressEnter(obs: Observation): boolean {
+  if (obs.focus === undefined) return true;
+  if (obs.focus === null) return false;
+  const field = obs.actions.find((a) => a.node === obs.focus?.node && a.kind === "fill");
+  if (obs.focus.editable || field) return Boolean((obs.focus.value ?? field?.value ?? "").trim());
+  return true;
 }
 
 export interface StepMeta {
@@ -227,7 +239,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[]): { state: EntryT
   if (space.controls["SCROLL_DOWN"]) ops["SCROLL_DOWN"] = "Scroll down to reveal more content.";
   if (space.controls["SCROLL_UP"]) ops["SCROLL_UP"] = "Scroll up.";
   ops["WAIT"] = "Wait for the page to finish loading.";
-  ops["PRESS_ENTER"] = "Press Enter to submit the focused field.";
+  if (canPressEnter(obs)) ops["PRESS_ENTER"] = "Press Enter to submit the focused field.";
   ops["GO_BACK"] = "Go back to the previous page.";
   if (!doneBanned) ops["DONE"] = "Every requirement is visibly satisfied, or the detailed view needed to answer the goal is visible.";
   ops["BLOCKED"] = "No supported operation can make progress.";
@@ -278,9 +290,10 @@ function assemble(input: StepInput, trim: Trim, cuts: string[]): { state: EntryT
     goal: task,
     page: { url: cutText(obs.url, LIMITS.urlChars), title: cutText(obs.title, LIMITS.titleChars), text: obs.text.slice(0, trim.textChars) },
     elements: elements.map((e) => e as unknown as JsonValue),
-    focus: obs.focus ? { ...obs.focus, label: cutText(obs.focus.label, LIMITS.nameChars), submitLabel: cutText(obs.focus.submitLabel, LIMITS.nameChars) } : null,
+    focus: obs.focus ? { ...obs.focus, label: cutText(obs.focus.label, LIMITS.nameChars), submitLabel: cutText(obs.focus.submitLabel, LIMITS.nameChars), ...(obs.focus.value !== undefined ? { value: cutText(obs.focus.value, LIMITS.valueChars) } : {}) } : null,
     recent_actions: history.slice(-LIMITS.history).map((h) => ({ action: h.action, kind: h.kind, text: h.text, page_changed: h.page_changed })),
   };
+  if (input.retryReason) state["retry_reason"] = cutText(redact(input.retryReason, spans), LIMITS.textCharsMin);
   if (typedValues.length > 0) state["typed_values"] = typedValues.map((s) => ({ id: s.id, text: spanText(s), secret: s.secret }));
   if (keys.length > 0) state["keys"] = keys.map((k) => ({ label: k.label, key: k.key }));
   return { state, questions, meta };

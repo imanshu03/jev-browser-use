@@ -82,7 +82,7 @@ export interface Observation {
   h: number;
   actions: Action[];
   /** Focus and the form submit controls used to gate Enter. */
-  focus?: { node: number; label: string; role: string | null; submitLabel: string } | null;
+  focus?: { node: number; label: string; role: string | null; submitLabel: string; editable?: boolean; value?: string } | null;
   /** Semantic marker of the whole page. Opaque. Used by `Page.fresh`. */
   marker: unknown;
   /** Page key: URL, scroll, viewport, form values. Opaque. Used by `Page.fresh` for clicks. */
