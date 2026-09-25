@@ -1,10 +1,10 @@
 # jev-browser-use
 
-`jev-browser-use` uses TypeSafe's Jev model to run browser tasks from natural-language instructions. Use the one-shot CLI for one task or `jev-chat` for repeated tasks in the same browser session.
+`jev-browser-use` uses TypeSafe's Jev model to run browser tasks from natural-language instructions. Use the one-shot CLI for one task or `jev-chat` for repeated tasks in the same browser session. The [assistant plugin](#assistant-plugin-claude-code-and-codex) lets Claude Code or Codex run tasks through an MCP server.
 
 Choose `cdp` for direct Chrome control, `chromium` for Chromium through the same CDP code, or `vercel` for Vercel's `agent-browser`. The default is `cdp`.
 
-Jev selects operations, targets, offered text values, and completion answers. Code checks confidence, confirmation, page freshness, retries, and run limits before it acts. Tasks can perform actions, extract visible text, or check a condition.
+Jev selects operations, targets, offered text values, and completion answers. Code checks confidence, confirmation, page freshness, retries, and run limits before it acts. Tasks can perform actions, extract visible text, or check a condition. In plugin runs, the user's assistant can also write new text for a field that Jev chose. Jev never writes text.
 
 The package and repository are named `jev-browser-use`. The commands remain `jev-browser` and `jev-chat`. Saved keys and profile copies continue to use the `jev-browser` configuration directory, and environment variable names remain unchanged.
 
@@ -53,7 +53,7 @@ The result goes to stdout as one JSON document. The trace goes to stderr. The ex
 | 0 | done |
 | 2 | blocked (sign-in wall, captcha, overlay, ambiguous page, loop, max steps, ...) |
 | 3 | failed (browser or API error) |
-| 4 | usage error (missing task, missing key, bad flag, unknown profile) |
+| 4 | usage error (missing task, missing key, bad flag or environment value, unknown profile) |
 | 130 | interrupted |
 
 ## Flags
@@ -69,7 +69,7 @@ The result goes to stdout as one JSON document. The trace goes to stderr. The ex
 | `--headed` | Shows the window and enables the pause hand-off for sign-in walls. |
 | `--cdp <port>` | One-shot attachment to a running browser. `cdp` and `chromium` use its DevTools WebSocket; `vercel` uses `agent-browser`. Launch binary and profile-copy settings do not change the attached browser. |
 | `--var key=value` | A value Jev may type. Repeatable. Keys that contain pass, pin, otp, secret, token, or code are secret and redacted. |
-| `--max-steps <n>` | Default 25, max 100. |
+| `--max-steps <n>` | Default 25, max 100. `JEV_BROWSER_MAX_STEPS` sets the default. Without this flag, a `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 is a usage error. |
 | `--step-timeout <ms>` | Per browser command. Default 30000. |
 | `--run-timeout <ms>` | Default 600000. |
 | `--pause-timeout <ms>` | Default 300000. |
@@ -104,7 +104,9 @@ The engine closes its launched browser at the end of the run, on SIGINT, and aft
 
 Rules for both direct engines:
 
-- A rejected target or uncertain Enter choice gets one retry per step. The engine observes the page again and includes the rejection reason in the next request. A visible retry message explains what happened. Rejected input is not sent; confidence and human confirmation checks still apply.
+- A rejected target or uncertain Enter choice gets one retry per step. The engine observes the page again and includes the rejection reason in the next request. A visible retry message explains what happened. Rejected input is not sent; confidence and human confirmation checks still apply. The retry does not offer the rejected target again, but the next step does. A target that repeats without effect, or that stays covered, is not offered again on that page.
+- When Jev splits between pressing Enter and clicking the form's submit button (for example "Send"), the engine adds the two probabilities and clicks the button when the sum passes the Enter limit. Only the button that Enter would press qualifies: in a single-line field, the default button (the first submit control) of its form; in a textarea or editor, the default button or a send button of its form; for a form without submit controls, a button in the same form or dialog. The click still needs its own target confidence and confirmation, and it keeps the risk of the Enter: a destructive Enter stays a destructive click.
+- In plugin runs, the assistant writes one text per field in a run. A second request for the same field re-asks Jev instead, so a sent message is not written and sent again. When a fill did not stay (the editor dropped the text and the field is empty), the same text goes in one time more, with no new request, if nothing was clicked since. A text that the page moves to a pop-out, or to which it adds a signature, keeps this rule in its new field. A composer that the page replaces with a new element after a send counts as a new field: its text gets a new request and its own dialog.
 - `--step-timeout` sets the timeout of every CDP command.
 - A JavaScript dialog (`alert`, `confirm`, `prompt`, `beforeunload`) is answered at once: alerts and `beforeunload` prompts are accepted, `confirm` and `prompt` dialogs are dismissed. The message goes to the log.
 - A copied profile has one owner at a time. A second launch or refresh fails while that profile is in use. The owner holds `<copy>.jev-lock` until the browser exits. After a forced stop, a lock can remain. Check that no browser process uses the copy before you remove the lock. Existing Chrome singleton locks are preserved.
@@ -186,6 +188,168 @@ time 4.2 s (jev 2.1 s · browser 1.6 s) · input 44,120 tokens · output 61 toke
 
 The numbers are for that task only. `time` is the run time in seconds. `jev` is the time inside Jev requests. `browser` is the time inside browser commands and settle waits. `input` and `output` are the Jev tokens. `requests` is the number of Jev requests. `/stats` and the exit message show the session totals with the same split.
 
+## Assistant plugin (Claude Code and Codex)
+
+The plugin lets Claude Code or Codex run browser tasks with the direct engines. The assistant starts a run with a tool call. Jev chooses every action, as in the CLI. When a form needs new text, such as a reply, the run asks the assistant to write it (see [Assistant-written text](#assistant-written-text-plugin-runs-only)). Before Jev clicks or presses Enter while that text is in a field, the user must allow the action in a dialog.
+
+[plugin/](plugin/) holds the manifests for both clients, the MCP server configuration, and the `jev-browser` skill. The server is one bundled file, `plugin/dist/jev-mcp.mjs`. Git ignores it, so build it after [Install](#install) and after each source change:
+
+```sh
+npm run build:mcp
+```
+
+The MCP server is not a public command. It supports the `cdp` and `chromium` engines.
+
+### Install in Claude Code
+
+```sh
+claude plugin validate ./plugin
+claude plugin marketplace add "$PWD" --scope user
+claude plugin install jev-browser@jev-browser-use
+```
+
+Claude Code loads the plugin from this repository. After a rebuild, start a new session or run `/reload-plugins`. To load the plugin for one session without an install, run `claude --plugin-dir ./plugin`. The tools are named `mcp__plugin_jev-browser_jev__<tool>`. The skill is `/jev-browser:jev-browser`.
+
+### Install in Codex
+
+```sh
+codex plugin marketplace add "$PWD"
+codex plugin add jev-browser@jev-browser-use
+codex mcp list
+```
+
+Codex copies the plugin, with the bundle, to its cache under `$CODEX_HOME/plugins/cache/`. After each rebuild, install the plugin again:
+
+```sh
+codex plugin remove jev-browser@jev-browser-use
+codex plugin add jev-browser@jev-browser-use
+```
+
+The plugin supplies the skill `jev-browser:jev-browser`. Do not also link the skill into the Codex profile, because Codex then shows two copies.
+
+If you do not use the Codex plugin, add the server to the Codex `config.toml`. Replace `<repo>` with the absolute path of this repository:
+
+```toml
+[mcp_servers.jev]
+command = "node"
+args = ["<repo>/plugin/dist/jev-mcp.mjs"]
+env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "JEV_BROWSER_CONFIG", "XDG_CONFIG_HOME",
+  "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_CHROME_BIN", "JEV_CHROMIUM_BIN",
+  "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+```
+
+This setup does not install the skill. Link it into a Codex skill folder, for example `ln -s <repo>/plugin/skills/jev-browser ~/.agents/skills/jev-browser`. With the `agent-skill` tool, run `ln -s <repo>/plugin/skills/jev-browser ~/.agent-skills/skills/jev-browser && agent-skill link jev-browser --to codex-pl`. Do not link it to Claude Code profiles; the Claude Code plugin supplies it there.
+
+### API key
+
+The server reads the key at the first `browse` call, not at startup. It uses the first key that it finds:
+
+1. `TYPESAFE_API_KEY` in the server environment.
+2. `TYPESAFE_API_KEY` in the package `.env`. The server reads `.env` only when it runs from this repository. It sets only the keys that the environment does not set, so `TYPESAFE_API_KEY=""` in the environment stops the `.env` key from loading.
+3. The key that `jev-chat` saved in `~/.config/jev-browser/config.json`, or in the file that `JEV_BROWSER_CONFIG` names.
+
+Claude Code gives the server its full environment and runs the plugin from this repository, so all three sources work. The Codex plugin runs from the Codex cache, so it does not read `.env`. Codex passes only the variables in `env_vars` ([plugin/.codex-mcp.json](plugin/.codex-mcp.json)). The list also holds `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_RUNTIME_DIR`, so that a headed Chrome can start on a Linux desktop. Codex skips a variable that is not set. With the Codex plugin, set the key in the shell that starts Codex, or save it with `jev-chat`. The `config.toml` setup runs from this repository and reads `.env`.
+
+Without a key, `browse` returns an error that tells how to add one. When the server runs from a copy outside this repository, such as the Codex cache, the error does not name the `.env` file.
+
+### Tools
+
+| Tool | Effect |
+|---|---|
+| `browse` | Starts a task. `task` is required. Optional: `url`, `profile` (a name, a directory, or `none`), `headed` (default `true`), `engine` (`cdp` or `chromium`), `goal`, `vars`, `max_steps`, `confirm` (default `auto`), `dry_run`, and `wait_s`. Without `url`, the task continues on the page where the last run ended. A `url` loads the page again. |
+| `wait` | Waits for the run to change, then returns its state. It does not change the run. |
+| `continue` | Gives the text that a run asks for (`values`, field id to text), or declines the request (`decline`, a short reason). |
+| `cancel` | Stops a run. |
+| `close_browser` | Closes the Chrome that the server opened. It returns an error while a run is active. |
+
+`browse`, `wait`, and `continue` wait up to `wait_s` seconds (default 40, maximum 50). They return earlier when the run needs the assistant or ends. Each result holds the run state as text JSON and as `structuredContent`. The field `next` tells the assistant what to do.
+
+`isError` means that the call was wrong: for example, an unknown run, a stale text request, a bad URL, an unknown profile, no key, or a new task while another run is active. The error text states the correct call. `blocked` and `failed` are normal results.
+
+### Run statuses
+
+| Status | Meaning |
+|---|---|
+| `running` | The run is working. The assistant calls `wait`. |
+| `needs_text` | The run needs new text. `text_request` lists the fields. The assistant calls `continue`. |
+| `confirming` | A dialog asks the user. The assistant calls `wait` at once. It cannot answer the dialog. |
+| `paused` | The user must sign in or solve a check in the Chrome window. The run continues when the page is clear. |
+| `stopping` | A cancel is in progress. |
+| `done`, `blocked`, `failed` | The run ended. `result` holds the reason, the answer, the final URL, and the blocked or error details. `result.text_not_typed` lists the fields where the assistant wrote text that Jev did not type, for example an optional Subject that Jev left empty before it sent the form. A field that showed the text one step late counts as typed when a later step shows the text. |
+
+A `blocked` result with the kind `needs_confirmation` has these causes:
+
+- The user saw the dialog and did not allow the action. `next` says that the dialog was declined.
+- The session cannot show a dialog, or the unsent text is too long for one dialog. The hint tells the user to check the text in the Chrome window and do the action there. For a headless run, the hint says to run the task again with `headed: true`, because the user cannot see a headless window.
+- The run has `confirm: "never"`. The hint says to call `browse` again with `confirm: "auto"`.
+- No call opened the dialog in 60 s, or the dialog got no answer in time. The hint says that no one answered, not that the user declined.
+
+### Dialogs
+
+The server asks the user through an MCP form dialog (elicitation). The assistant cannot answer it, and no tool argument can allow an action. A dialog asks:
+
+- To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. Select **Allow** to let Jev continue.
+- To use a Chrome profile when Jev is not sure which profile the task names. If the user does not allow it, the run uses the workspace default.
+
+The server shows dialogs only when all of these conditions are true:
+
+- The client supports form dialogs.
+- The negotiated MCP protocol version is not a 2026 version.
+- `CLAUDE_CODE_SESSION_ATTENDED` is not `0`, or `JEV_MCP_TRUST_ELICITATION=1` is set.
+
+SDK hosts, for example T3 Code, set `CLAUDE_CODE_SESSION_ATTENDED=0`. Without dialogs, an action that needs one blocks with `needs_confirmation`. The assistant text stays in the field, and the Chrome window stays open. Check the text there and do the action yourself. Set `JEV_MCP_TRUST_ELICITATION=1` only when a person answers the dialogs in that client.
+
+Codex with `approval_policy = "never"` declines every dialog, so each action that needs a dialog blocks with `needs_confirmation`. The `codex-pl` profile uses `never`. To get dialogs, start Codex with `-c approval_policy="on-request"`.
+
+### Permissions
+
+In Claude Code, add allow rules only for the three tools that do not act on a page:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_jev-browser_jev__wait",
+      "mcp__plugin_jev-browser_jev__cancel",
+      "mcp__plugin_jev-browser_jev__close_browser"
+    ]
+  }
+}
+```
+
+Keep `browse` and `continue` on prompt. The prompt shows the task, the URL, and the text before a page gets them. In bypass mode, set `JEV_MCP_REVIEW_TEXT=1`. Claude Code then prompts for every `continue` call, also in bypass mode, and shows the values.
+
+In its default approval mode, Codex asks before `browse` and `continue`, because their annotations mark them as destructive. It does not ask before `wait`, `cancel`, and `close_browser`.
+
+### URLs
+
+`browse.url` must be an `http` or `https` URL. Set `JEV_MCP_ALLOW_FILE=1` to allow `file:` URLs, for example for local test pages. Other schemes, such as `javascript:` and `chrome:`, return an error.
+
+### Environment
+
+| Variable | Effect |
+|---|---|
+| `JEV_MCP_LOG_LEVEL` | `debug` adds request states and answers to the server log. The log goes to stderr. |
+| `JEV_MCP_ALLOW_FILE` | `1` lets `browse.url` use `file:` URLs. |
+| `JEV_MCP_TRUST_ELICITATION` | `1` shows dialogs also when `CLAUDE_CODE_SESSION_ATTENDED=0`. |
+| `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for every `continue` call, also in bypass mode. The server reads it at startup. Codex does not use it. |
+
+The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_CHROME_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
+
+### Plugin limits
+
+- The server runs one task at a time. A `browse` call with the same task as the active run returns that run.
+- A run can send 3 text requests. A request has at most 4 fields and 4,000 characters of text in total. The assistant has 300 s to answer. This wait does not count toward the run timeout. After 3 rejected answers to one request, the run blocks with `needs_text`.
+- A dialog opens only in a tool call that started 5 s ago or less. Otherwise the call returns `confirming`, and the next `wait` opens the dialog. If no call opens a dialog in 60 s, Jev does not do the action, and the hint says that no dialog was shown. A dialog stays open for at most 100 s. These times keep each call below the 2-minute point where Claude Code moves a tool call to the background.
+- Unsent text of more than 6,000 characters blocks the action with `needs_confirmation`, because one dialog cannot show it.
+- One result is at most about 7,000 tokens. The server cuts the page text first, then the older step lines (down to 3), then answer strings (to 2,000 characters).
+- The server keeps the last 10 finished runs. A restart forgets them.
+- Chrome stays open between runs, with one tab. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
+- `cancel` waits 5 s for the run to stop, then closes Chrome.
+- After a run ends, the server keeps the Jev connection warm for 10 minutes.
+
 ## Text entry and submission
 
 For an exact message or search query, quote the text in the task or supply a variable:
@@ -203,9 +367,21 @@ Open app.parallelloop.ai with the Parallelloop profile. Start a new chat, type �
 
 The direct engines support native text fields and `contenteditable` editors. Observations include the editor value and focus. An observed empty editor cannot receive Enter through the task loop; fill and submit are separate actions. Rich-text value changes invalidate a pending keyboard action.
 
-Quoted text makes the requested value explicit. The model still needs to select the correct field and pass the action checks. A task instruction does not establish that the task succeeded. Check the trace for a fill action and the result for completion evidence.
+Quoted text makes the requested value explicit. A `--var` value is the most reliable: it skips the value confidence check. Each field gets its own value question that names the field, so every field of a form can take its own value. A message field never takes the whole task or a clause of it: "send hello team, standup moved to 11 am" without quotes blocks with a value hint, so the instruction is not sent as the message. A description of the text ("with a short change note") and the first words of a long unquoted value ("set the subject to Quarterly budget review for Q3 planning") are not typed either: quote the value or pass it with `--var`. An unquoted value ends at "and" before the next step, so "rename it to budget review and save it" types "budget review", and "rename the file to budget and click Save" types "budget". A button name in quotes, backticks, or bold counts as the name ("and click \"Save\""). Only a sentence dot ends a value, so "rename the file to report.pdf" types "report.pdf". A title such as "Show and Tell" or "Media and press releases" stays whole. When the words after "and" can be a step or part of the value ("search for how to install and run Python", "set the title to Weekly sync and open Settings", "type hello and send it to the team"), Jev gets both values and chooses. A field that hides the longer value by its length still offers both. A message after "type" or "write", or a sentence after "reply with", keeps all its words up to the step that sends it or watches the reply: "type hello and press the Enter key" and "type hello and wait for the response" type "hello", and "type we will review and approve it" types all of it. The model still needs to select the correct field and pass the action checks. A task instruction does not establish that the task succeeded. Check the trace for a fill action and the result for completion evidence.
 
-Text values come from task spans or user variables. The `vercel` engine can also select page-derived values. The engines do not generate arbitrary message text. Native password fields are excluded from the direct engines' action snapshots; use headed sign-in when needed.
+Text values come from task spans or user variables. The `vercel` engine can also select page-derived values. The CLI and chat do not generate text. In plugin runs, the user's assistant can write new text for one field at a time, with the rules below. Native password fields are excluded from the direct engines' action snapshots; use headed sign-in when needed.
+
+### Assistant-written text (plugin runs only)
+
+When a form needs new text, such as a reply, Jev can choose `generate` for the field instead of an offered value. The run then gets the status `needs_text`, and the assistant writes the text. Jev still chooses the field and every action.
+
+- **Writable fields.** Only a textarea, a rich-text editor, or an `<input type="text">` with the role `textbox` can take assistant text. Search boxes, comboboxes, number fields, and email, phone, and URL inputs cannot. Fields with an exact-value `autocomplete` token (for example `email`, `tel`, `username`, `cc-number`, or an address token) cannot. Fields with labels such as To, Cc, Bcc, From, recipient, phone, amount, price, card number, IBAN, account number, street, postal code, user name, URL, website, search, API key, token, or a credential label cannot. For such a field, the run blocks with `needs_credential` and a hint to ask the user for the exact text.
+- **One request.** A request holds the field that Jev chose (`f1`, required) and up to 3 other empty writable fields of the same form, in page order. It also holds the task, the page URL and title, the last 5 actions, and up to 6,000 characters of page text.
+- **Checks.** Each text must fit the field's `max_chars`, and all texts of one request together must fit 4,000 characters. A text must not hold a secret `--var` value of 4 or more characters, the API key, or text that looks like a key or token. The run removes control and invisible characters. In a single-line field, a line break becomes a space. An error names the field and the rule, never the text.
+- **Binding and single use.** Each text is bound to the field it was written for, in that document. Jev can type it only into that field, and only one time. If the page changes during the wait, the run observes the page again and asks Jev again; the text stays ready for its field. If a new document loads during the wait, the texts of that request are dropped, and Jev can ask for new text. Jev never sees a text that is bound to another document. When a field of the request is empty again, for example after a send, the unused texts of that request are dropped.
+- **Unsent-text gate.** While a field holds assistant text that no click or Enter has sent, every click and every Enter needs a dialog, whatever the label. This includes "Comment" buttons and icon buttons. The dialog shows each unsent text in full. An allowed action does not end the gate: the next click asks again while the text stays in its field. A native field or rich-text editor out of view still counts. A page can remove the field and show the same text in a new field, for example in a Write and Preview tab pair, a list that loads rows as you scroll, or a pop-out editor. The gate then follows the text to the new field, also when that field changes the text a little (a list, curly quotes, capitals, or a length limit), and also when that field holds another text of the assistant. A field that held the text before Jev typed it does not take the gate while it keeps its value. A search query or another text that Jev typed does not take the gate of a sent short reply that it contains ("Sure" in "sure thing contract"). While no rendered field holds the text, a click does not ask. The gate ends when the field is empty and no other field holds the text, or when a new document loads. When the page writes a moved text over another assistant text, that other text keeps its gate: it gates again when a field shows it. A fill that the field did not show right away still gates the next click, also after a scroll, a dropdown selection, going back, and in the next plugin run: some editors keep the text where the page does not show it. Only an allowed click or Enter ends that: its dialog showed the text. A fill after which the page did not settle gates the same way. A later fill of the field keeps the gate, and the dialog then shows the new value (`<secret>` for a secret value). When the later fill did not show either, the dialog also shows the earlier text, because the page can hold both. Typing, selecting a dropdown option, scrolling, waiting, and going back do not need a dialog.
+- **Later runs.** The server keeps the unsent text with its tab. When a run ends before the text is sent, for example after a declined dialog, the next `browse` call on the same tab has the same gate. The gate ends there by the same rules. `close_browser` and a new tab end it.
+- **Task and vars.** In plugin runs the assistant writes the task and the vars. A non-secret task or var value typed into a multiline field therefore also counts as unsent text. The run removes control and invisible characters from every non-secret task or var value before it types it, so the page gets the text that the dialog shows. A secret value is typed as it is. A credential field never takes a value from the assistant: the user types it in the Chrome window.
 
 ### When a run stops
 
@@ -213,6 +389,7 @@ Text values come from task spans or user variables. The `vercel` engine can also
 - A stale page or changed focus causes a new observation and decision within a separate retry limit. Input is not sent from the stale decision.
 - Enter requires submit checks. Labels such as Send can require human confirmation under the current risk rules. A required prompt without an interactive terminal blocks the action.
 - Repeated actions without a page change can return `loop_detected`. Sign-in walls, confirmation requirements, and run limits also produce blocked results with a reason.
+- In plugin runs, `needs_text` means that the run did not get usable new text: the assistant declined, no text came in 300 s, the text failed its checks, or the run used its 3 text requests. The CLI and chat never return `needs_text`.
 
 Use `--log-level debug` to inspect the request state and decisions. Restart chat after a source update so the process loads the changed code. A successful local editor test does not establish that every site's editor works.
 
@@ -244,9 +421,13 @@ npm run typecheck
 npm test          # offline; Jev, Chrome, and agent-browser are faked
 npm run test:live # launches headless Chrome on a temporary profile with local HTTP/CDP fixtures; no external API or real key
 npm run smoke     # live: the three acceptance runs, prints a pass/fail table (SMOKE_ENGINE selects cdp, chromium, or vercel; default cdp)
+npm run build:mcp # bundles the MCP server into plugin/dist/jev-mcp.mjs, which the plugin runs
+npm run mcp       # runs the MCP server from src/mcp/main.ts through tsx, on stdio, with the package .env
 ```
 
-The live suite launches Chrome. It tests both direct engine names through attachment, native and rich-text entry, editor freshness, browser actions, profiles, and cleanup. It does not establish that a local Chromium binary launches. Verify that separately when changing Chromium launch behavior. Smoke runs use real API access and prepared browser profiles; Chromium needs its own prepared profile.
+The live suite launches Chrome. It tests both direct engine names through attachment, native and rich-text entry, editor freshness, browser actions, profiles, and cleanup. It also runs the MCP server on the [reply fixture](test/fixtures/live/reply.html) with a scripted Jev and an in-memory client that answers the dialogs. It does not establish that a local Chromium binary launches. Verify that separately when changing Chromium launch behavior. Smoke runs use real API access and prepared browser profiles; Chromium needs its own prepared profile.
+
+Run `npm run build:mcp` after each change to `src/`, because the plugin runs the bundle and not the source. Git ignores `plugin/dist/`.
 
 ## Limits
 

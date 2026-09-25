@@ -705,7 +705,9 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
   return 0;
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// In a bundle every module shares the bundle URL. Only a direct run of this file starts chat.
+const entry = fileURLToPath(import.meta.url);
+const isMain = process.argv[1] !== undefined && /^chat\.[cm]?[jt]s$/.test(path.basename(entry)) && path.resolve(process.argv[1]) === entry;
 if (isMain) {
   runChat(process.argv.slice(2)).then((code) => {
     process.stdout.write("", () => process.exit(code));

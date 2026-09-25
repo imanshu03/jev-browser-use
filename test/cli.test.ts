@@ -43,6 +43,11 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["t", "--bogus"], env)).toThrow(UsageError);
     expect(() => parseArgs(["t", "--url"], env)).toThrow(UsageError);
   });
+  it("a JEV_BROWSER_MAX_STEPS value that is not a number gives a UsageError", () => {
+    for (const v of ["abc", "NaN"]) expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: v })).toThrow(/--max-steps must be between 1 and 100/);
+    expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: "abc" })).toThrow(UsageError);
+    expect(parseArgs(["t", "--max-steps", "9"], { ...env, JEV_BROWSER_MAX_STEPS: "abc" }).maxSteps).toBe(9);
+  });
 });
 
 function io(envOver: NodeJS.ProcessEnv = env) {

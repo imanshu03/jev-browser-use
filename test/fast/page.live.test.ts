@@ -18,6 +18,7 @@ import { fakeLogger } from "../fakes.js";
 const FIXTURES = path.resolve(__dirname, "../fixtures/live");
 const formUrl = pathToFileURL(path.join(FIXTURES, "form.html")).href;
 const liveUrl = pathToFileURL(path.join(FIXTURES, "live.html")).href;
+const replyUrl = pathToFileURL(path.join(FIXTURES, "reply.html")).href;
 const NAV_MS = 5000;
 
 function find(obs: Observation, kind: Action["kind"], label: string): Action {
@@ -265,6 +266,124 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): dialo
   });
 });
 
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): field facts for assistant-written text", () => {
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+    await page.navigate(replyUrl, NAV_MS);
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  it("Subject, Reply, and Send share a form; the search box has form null", async () => {
+    const obs = await page.observe();
+    const subject = find(obs, "fill", "Subject");
+    const reply = find(obs, "fill", "Reply");
+    const send = find(obs, "click", "Send");
+    const search = find(obs, "fill", "Search mail");
+    expect(subject.form).toBeTypeOf("number");
+    expect(reply.form).toBe(subject.form);
+    expect(send.form).toBe(subject.form);
+    expect(find(obs, "fill", "Cc").form).toBe(subject.form);
+    expect(search.form).toBeNull();
+    expect(search.role).toBe("searchbox");
+    expect(obs.text).toContain("Can we meet on Tuesday at 10:00?");
+  });
+
+  it("Reply is multiline, Subject has maxLength 120 and inputType text, Cc has inputType email", async () => {
+    const obs = await page.observe();
+    const subject = find(obs, "fill", "Subject");
+    const reply = find(obs, "fill", "Reply");
+    expect(reply.multiline).toBe(true);
+    expect(reply.inputType).toBeUndefined();
+    expect(reply.maxLength).toBeUndefined();
+    expect(subject).toMatchObject({ multiline: false, maxLength: 120, inputType: "text" });
+    expect(find(obs, "fill", "Cc")).toMatchObject({ inputType: "email", role: "textbox" });
+    expect(find(obs, "fill", "Search mail").inputType).toBe("search");
+    expect(find(obs, "click", "Send").inputType).toBeUndefined();
+  });
+
+  it("obs.doc is a number that stays the same across observations and changes with a new document", async () => {
+    const a = await page.observe();
+    const b = await page.observe();
+    expect(a.doc).toBeTypeOf("number");
+    expect(b.doc).toBe(a.doc);
+    expect(b.fingerprint).toBe(a.fingerprint);
+    await page.navigate(replyUrl, NAV_MS);
+    const c = await page.observe();
+    expect(c.doc).toBeTypeOf("number");
+    expect(c.doc).not.toBe(a.doc);
+  });
+
+  it("obs.filled lists a filled field that is out of view, and drops it when the field is empty or gone", async () => {
+    const evaluate = (expression: string) => chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    await page.navigate(replyUrl, NAV_MS);
+    const before = await page.observe();
+    const reply = find(before, "fill", "Reply");
+    expect(before.filled).toEqual([]);
+    await page.act(reply, before, "Tuesday works.");
+    const typed = await page.observe();
+    expect(typed.filled).toEqual([reply.node]);
+    // Move the form below the viewport. Reply is then not an action, but it still holds the text.
+    await evaluate("document.body.insertAdjacentHTML('afterbegin', '<div style=\"height:3000px\"></div>'); scrollTo(0, 0)");
+    const away = await page.observe();
+    expect(away.actions.some((a) => a.node === reply.node)).toBe(false);
+    expect(away.filled).toEqual([reply.node]);
+    await evaluate("document.querySelector('textarea').value = '   '");
+    expect((await page.observe()).filled).toEqual([]);
+    await evaluate("document.querySelector('textarea').value = 'x'");
+    expect((await page.observe()).filled).toEqual([reply.node]);
+    await evaluate("document.getElementById('reply-form').remove()");
+    expect((await page.observe()).filled).toEqual([]);
+    await page.navigate(replyUrl, NAV_MS);
+  });
+
+  it("element node ids stay as in the reference snapshot: forms have their own id counter", async () => {
+    await page.navigate(replyUrl, NAV_MS);
+    const evaluate = (expression: string) => chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    await evaluate("document.querySelector('textarea').focus()");
+    const obs = await page.observe();
+    const nodes = Object.fromEntries(["Search mail", "Cc", "Subject", "Reply"].map((l) => [l, find(obs, "fill", l).node]));
+    expect({ ...nodes, Send: find(obs, "click", "Send").node, focus: obs.focus?.node }).toEqual({ "Search mail": 1, Cc: 2, Subject: 3, Reply: 4, Send: 5, focus: 4 });
+    expect(find(obs, "fill", "Reply").form).toBeTypeOf("number");
+    await page.navigate(replyUrl, NAV_MS);
+  });
+
+  it("obs.texts lists the value of each rendered control, in view or not, and leaves out hidden controls", async () => {
+    const evaluate = (expression: string) => chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    await page.navigate(replyUrl, NAV_MS);
+    const before = await page.observe();
+    const reply = find(before, "fill", "Reply");
+    expect(before.texts).toEqual([]);
+    await page.act(reply, before, "Tuesday works.");
+    expect((await page.observe()).texts).toEqual([[reply.node, "Tuesday works."]]);
+    await evaluate("document.body.insertAdjacentHTML('afterbegin', '<div style=\"height:3000px\"></div>'); scrollTo(0, 0)");
+    expect((await page.observe()).texts).toEqual([[reply.node, "Tuesday works."]]);
+    // A hidden control still holds its value, so `filled` lists it. It is not rendered, so `texts` does not.
+    await evaluate("document.getElementById('reply-form').style.display = 'none'");
+    const hidden = await page.observe();
+    expect(hidden.filled).toEqual([reply.node]);
+    expect(hidden.texts).toEqual([]);
+    await page.navigate(replyUrl, NAV_MS);
+  });
+
+  it("the field facts never reach the Jev request", async () => {
+    const { buildStep } = await import("../../src/fast/policy.js");
+    const obs = await page.observe();
+    const request = JSON.stringify(buildStep({ task: "reply to Ann", goal: "act", obs, history: [], spans: [], keys: [], bannedActionIds: new Set(), doneBanned: false, canGenerate: true }));
+    for (const key of ["maxLength", "inputType", "multiline", "autocomplete", "form", "doc", "filled", "texts"]) expect(request).not.toContain(`"${key}":`);
+    expect(request).toContain("\"generate\"");
+  });
+});
+
 describe.skipIf(process.env["JEV_LIVE"] !== "1")("one-shot CLI (live Chrome)", () => {
   it("SIGINT during the Chrome launch closes Chrome and removes the temporary profile", async () => {
     // A stand-in for the API: it serves the fixture and holds every other request open. The run has the profile,
@@ -357,6 +476,7 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions (live Chrom
     await evaluate(`document.getElementById('editor').addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); window.sent = e.currentTarget.innerText; } }); document.getElementById('editor').focus()`);
     const empty = await page.observe();
     const field = find(empty, "fill", "Message");
+    expect(field).toMatchObject({ multiline: true, form: null });
     expect(empty.focus?.editable).toBe(true);
     expect(canPressEnter(empty)).toBe(false);
     await page.act(field, empty, "List my latest meetings");
@@ -380,6 +500,30 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions (live Chrom
     expect(after.focus?.submitLabel).toBe("Delete account");
     await page.press("Enter", after);
     expect(await evaluate("window.sent")).toBe("b");
+  });
+
+  it("gives the focus form and the form's default button, the same form id as the actions", async () => {
+    await html('<form><input id="t" aria-label="Title"><button type="button">Help</button><button disabled>Save draft</button><button>Submit for review</button></form>'
+      + '<form><input id="n" aria-label="Name"><button>Save draft</button><button>Publish</button></form><div role="dialog"><textarea id="m" aria-label="Message"></textarea><button>Send</button></div>');
+    const focusOn = async (id: string) => { await evaluate(`document.getElementById('${id}').focus()`); return page.observe(); };
+    const t = await focusOn("t");
+    expect(t.focus).toMatchObject({ submitLabel: "Submit for review", submitDefault: "" });
+    expect(t.focus?.form).toBe(t.actions.find((a) => a.label === "Title")?.form);
+    const n = await focusOn("n");
+    expect(n.focus).toMatchObject({ submitLabel: "Save draft | Publish", submitDefault: "Save draft" });
+    expect(n.focus?.form).not.toBe(t.focus?.form);
+    expect(n.focus?.multiline).toBe(false);
+    const m = await focusOn("m");
+    expect(m.focus).toMatchObject({ submitLabel: "", submitDefault: "", multiline: true });
+    expect(m.focus?.form).toBe(m.actions.find((a) => a.label === "Send")?.form);
+    expect(m.focus?.form).not.toBeNull();
+  });
+
+  it("names an image button that comes first as the default button", async () => {
+    await html('<form><input id="q" aria-label="Query"><input type="image" alt="Submit" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><button>Save draft</button></form>');
+    await evaluate("document.getElementById('q').focus()");
+    const o = await page.observe();
+    expect(o.focus).toMatchObject({ submitLabel: "Submit | Save draft", submitDefault: "Submit" });
   });
 
   it("rejects Enter when the submit control changes while focus stays in place", async () => {
@@ -419,8 +563,9 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions (live Chrom
   it("keeps an OTP out of requests after a real fill", async () => {
     const { buildStep } = await import("../../src/fast/policy.js");
     const { varSpans } = await import("../../src/task.js");
-    await html('<label>Verification code<input autocomplete="one-time-code"></label>');
+    await html('<label>Verification code<input autocomplete="One-Time-Code"></label>');
     const obs = await page.observe();
+    expect(obs.actions.find((a) => a.kind === "fill")).toMatchObject({ autocomplete: "one-time-code", inputType: "text", multiline: false });
     await page.act(obs.actions.find((a) => a.kind === "fill")!, obs, "987654");
     const after = await page.observe();
     expect(after.actions.find((a) => a.kind === "fill")?.value).toBe("987654");

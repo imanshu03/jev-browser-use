@@ -239,7 +239,7 @@ export async function resolvePlan(cfg: RunConfig, profiles: ProfileEntry[], span
       if (mentioned < GATES.profileMentioned || !p) profile = { profile: null, how: "none", confidence: mentioned };
       else if (best && p.confidence >= GATES.profileJev) profile = { profile: best, how: "jev", confidence: p.confidence };
       else if (best && p.confidence >= GATES.profileHuman) {
-        const ok = human.interactive && await human.confirm(`Use Chrome profile ${best.name} (${best.directory})? [y/N] `, LIMITS.confirmPromptMs);
+        const ok = human.interactive && await human.confirm(`Use Chrome profile ${best.name} (${best.directory})? [y/N] `, LIMITS.confirmPromptMs, { kind: "profile", name: best.name, directory: best.directory });
         if (ok) profile = { profile: best, how: "human", confidence: p.confidence };
         else { log.warn(`profile ${best.name} at ${p.confidence.toFixed(2)} not confirmed; using the workspace default`); profile = { profile: null, how: "none", confidence: p.confidence }; }
       } else if (mentioned >= GATES.profileJev) {

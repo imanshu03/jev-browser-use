@@ -1,0 +1,9 @@
+{
+  "name": "jev-browser",
+  "displayName": "Jev Browser",
+  "version": "0.1.0",
+  "description": "Run browser tasks in Chrome with TypeSafe Jev. Jev chooses every action. Your assistant writes new text, such as replies, and you allow each send in a dialog.",
+  "author": { "name": "Imanshu Rathore" },
+  "repository": "https://github.com/imanshu03/jev-browser-use",
+  "keywords": ["browser", "chrome", "jev", "typesafe", "mcp"]
+}
