@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TextField } from "../../src/io.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "../../src/fast/generate.js";
 import type { Action } from "../../src/fast/model.js";
-import { actionKey, canWriteInto } from "../../src/fast/policy.js";
+import { actionKey, canWriteInto, cutText } from "../../src/fast/policy.js";
 import { redact, varSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
@@ -137,6 +137,14 @@ describe("buildTextRequest", () => {
   it("cuts the page text to LIMITS.textChars", () => {
     const big = buildTextRequest({ id: "t2", task: "t", obs: obs("https://a.b/", [], "x".repeat(9000)), history: [], fields, redactor: same });
     expect(big.untrusted_page_text.length).toBe(LIMITS.textChars);
+  });
+  it("lists the texts that a send of the run took out of the page before the page text: redacted, flat, and cut", () => {
+    const long = `Tuesday works, token s3cr3t.\u202E\n${"See you then. ".repeat(20)}`;
+    const sent = buildTextRequest({ id: "t2", task: "t", obs: page, history: [], fields, redactor, sent: [{ field: "Reply\u200B s3cr3t", text: long }] });
+    expect(Object.keys(sent)).toEqual(["id", "goal", "page", "fields", "recent_actions", "sent_texts", "untrusted_page_text"]);
+    expect(sent.sent_texts).toEqual([{ field: "Reply ***", text: cutText(flatText(long.replace("s3cr3t", "***")), LIMITS.spanChars) }]);
+    expect(JSON.stringify(sent)).not.toContain("s3cr3t");
+    expect(buildTextRequest({ id: "t2", task: "t", obs: page, history: [], fields, redactor, sent: [] })).not.toHaveProperty("sent_texts");
   });
 });
 

@@ -67,6 +67,16 @@ describe("RunManager: start, busy, get", () => {
     expect(runs.get(run.id).untyped).toEqual(["Subject"]);
   });
 
+  it("hooks.sent records the sent texts on the run", async () => {
+    const { runs, m } = setup();
+    const run = runs.start(input(), { interactive: false });
+    expect(run.sent).toEqual([]);
+    m.last().hooks.sent?.([{ field: "Reply", text: "Tuesday works." }]);
+    m.last().resolve({ ...emptyResult("t", "act"), outcome: "done", reason: "done 0.97" });
+    await flush();
+    expect(runs.get(run.id).sent).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+  });
+
   it("the same task while active gives the same run; another task is BusyError", () => {
     const { runs, m } = setup();
     const run = runs.start(input("a"), { interactive: false });

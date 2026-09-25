@@ -14,7 +14,7 @@ import { fakeHuman, fakeLogger, fakeOracle, fakeText, fakeTransport } from "../f
 import { fakeChrome, fakePage, obs } from "../fast/fakes.js";
 
 // fastStarter builds a FastRunner. This stand-in records its deps and returns a scripted result.
-const runner = vi.hoisted(() => ({ deps: [] as unknown[], result: null as unknown, page: null as unknown, unsent: [] as unknown[], untyped: [] as string[] }));
+const runner = vi.hoisted(() => ({ deps: [] as unknown[], result: null as unknown, page: null as unknown, unsent: [] as unknown[], untyped: [] as string[], sent: [] as { field: string; text: string }[] }));
 vi.mock("../../src/fast/loop.js", () => ({
   FastRunner: class {
     page: unknown;
@@ -22,6 +22,7 @@ vi.mock("../../src/fast/loop.js", () => ({
     async run(): Promise<unknown> { return runner.result; }
     unsentText(): unknown[] { return runner.unsent; }
     untypedText(): string[] { return runner.untyped; }
+    sentTexts(): { field: string; text: string }[] { return runner.sent; }
   },
 }));
 
@@ -226,7 +227,7 @@ describe("createJevLink", () => {
 });
 
 describe("fastStarter", () => {
-  beforeEach(() => { runner.deps.length = 0; runner.page = null; runner.unsent = []; runner.untyped = []; runner.result = emptyResult("t", "act"); });
+  beforeEach(() => { runner.deps.length = 0; runner.page = null; runner.unsent = []; runner.untyped = []; runner.sent = []; runner.result = emptyResult("t", "act"); });
 
   function setup(opts: { page?: boolean } = {}) {
     const log = fakeLogger();
@@ -255,6 +256,14 @@ describe("fastStarter", () => {
     const untyped = vi.fn();
     await t.start(input({ profile: "none" }), { ...t.hooks, untyped });
     expect(untyped).toHaveBeenCalledWith(["Subject"]);
+  });
+
+  it("reports the texts that a send of the run took out of the page through hooks.sent", async () => {
+    const t = setup();
+    runner.sent = [{ field: "Reply", text: "Tuesday works." }];
+    const sent = vi.fn();
+    await t.start(input({ profile: "none" }), { ...t.hooks, sent });
+    expect(sent).toHaveBeenCalledWith([{ field: "Reply", text: "Tuesday works." }]);
   });
 
   it("a task with a profile word closes Chrome first: prepare(null)", async () => {

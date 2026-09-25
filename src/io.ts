@@ -70,6 +70,7 @@ export interface TextRequest {    // key order is fixed; untrusted_page_text is 
   page: { url: string; title: string };
   fields: TextField[];
   recent_actions: { action: string; kind: string; text: string | null }[];
+  sent_texts?: { field: string; text: string }[];   // texts that a send of this run took out of the page; absent when none
   untrusted_page_text: string;    // redacted + sanitizeText(obs.text), <= LIMITS.textChars
 }
 

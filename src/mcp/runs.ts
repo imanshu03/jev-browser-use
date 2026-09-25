@@ -33,6 +33,8 @@ export interface RunHooks {
   attended?: boolean;
   /** The starter reports the fields whose assistant text no fill typed. */
   untyped?: (labels: string[]) => void;
+  /** The starter reports the texts that a send of the run took out of the page. */
+  sent?: (texts: { field: string; text: string }[]) => void;
 }
 export type RunStarter = (input: BrowseInput, hooks: RunHooks) => Promise<RunResult>;
 export interface PendingText { kind: "text"; id: string; req: TextRequest; expiresAt: number; errors: Record<string, string> | null; attempts: number }
@@ -61,6 +63,7 @@ export interface Run {
   confirmEnd: ConfirmEnd | null;  // the last confirmation; null before the first one
   untyped: string[];              // labels of fields whose assistant text no fill typed
   autonomous?: RunAutonomy | null; // set for confirm "autonomous"
+  sent: { field: string; text: string }[]; // texts that a send of the run took out of the page
   redact(s: string): string;      // the runner's redactor, via the per-run logger, plus the API key removal
 }
 
@@ -117,6 +120,7 @@ class RunState implements Run {
   untyped: string[] = [];
   autonomous: RunAutonomy | null = null;
   confirm: BrowseInput["confirm"] = "auto";
+  sent: { field: string; text: string }[] = [];
   /** The runner's redactor followed by the key removal. The per-run logger replaces it. */
   redactor: (s: string) => string;
   readonly controller = new AbortController();
@@ -362,7 +366,7 @@ export class RunManager {
       pause: (_message, timeoutMs, poll, kind) => this.pause(run, timeoutMs, poll, kind),
       confirm: autonomous ? async () => false : (message, timeoutMs, detail) => this.confirm(run, message, timeoutMs, detail),
     };
-    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, attended: interactive, untyped: (labels) => { run.untyped = [...labels]; } };
+    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, attended: interactive, untyped: (labels) => { run.untyped = [...labels]; }, sent: (texts) => { run.sent = texts.map((x) => ({ ...x })); } };
   }
 
   /**

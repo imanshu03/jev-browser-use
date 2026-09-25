@@ -10,7 +10,7 @@
 // name of the form's default button, `submitDefault`, and `multiline`, for the Enter-to-click rule, and
 // `enterOption`, the option that Enter picks. The snapshot also returns `busy`. The settle after a fill, a key, or a
 // click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP.
-import { LIMITS } from "../types.js";
+import { COMPOSER_SEND_WORDS, LIMITS } from "../types.js";
 import type { Action } from "./model.js";
 
 /** Options of a suggestion popup. */
@@ -422,8 +422,8 @@ export const KEY_GUARD_SCRIPT = "(() => { const c=window.__jevFast; return c ? c
  */
 export const EDIT_SETTLE_SCRIPT = "new Promise(r => { const t = window.__jevCausal?.native || setTimeout; t.call(window, r, 50); requestAnimationFrame(() => requestAnimationFrame(() => t.call(window, r, 0))); })";
 
-/** The names of a control that sends a message. The same words as SEND_BUTTON in loop.ts. */
-const SEND_CONTROL = String.raw`\b(?:send|post|reply|comment)\b`;
+/** The names of a control that sends a message from a composer: COMPOSER_SEND_WORDS, as SEND_BUTTON in loop.ts. */
+const SEND_CONTROL = String.raw`\b(?:${COMPOSER_SEND_WORDS.join("|")})\b`;
 
 /** One step of a fill, read in the page. See `editScript`. */
 export interface EditStep {

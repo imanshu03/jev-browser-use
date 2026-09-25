@@ -3,7 +3,7 @@ import { TypeSafeError } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
-import { cutText } from "../../src/fast/policy.js";
+import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
 import type { Action, Observation, Page, UnsentText } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
@@ -1095,9 +1095,13 @@ describe("assistant-written text (generate)", () => {
   const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
   const says = (values: Record<string, string>): TextReply => ({ kind: "text", values });
 
-  function mail(task: string, steps: Decide[], over: Partial<RunConfig> = {}, opts: SetupOpts & { state?: Partial<MailState> } = {}) {
+  /** `values` answers the value requests (the var fallback); without it they get the fake oracle's defaults. */
+  function mail(task: string, steps: Decide[], over: Partial<RunConfig> = {}, opts: SetupOpts & { state?: Partial<MailState>; values?: (q: Questions) => PartialAnswers } = {}) {
     const state: MailState = { doc: DOC, values: {}, sent: null, clicks: 0, extra: [], ...opts.state };
-    const t = setup(task, { pages: { m: mailPage(state) }, start: "m" }, seq(...steps), { url: MAIL, vars: { token: "s3cr3t" }, ...over }, opts);
+    const script = seq(...steps);
+    const values = opts.values;
+    const oracle = values ? (name: string, st: unknown, q: Questions): PartialAnswers => (name === "value" ? values(q) : script(name, st, q)) : script;
+    const t = setup(task, { pages: { m: mailPage(state) }, start: "m" }, oracle, { url: MAIL, vars: { token: "s3cr3t" }, ...over }, opts);
     t.page.observe = async () => { t.page.observes += 1; t.page.stats.browserMs += 2; return mailPage(state); };
     const act = t.page.act.bind(t.page);
     t.page.act = async (a, o, text, edit) => {
@@ -1322,13 +1326,20 @@ describe("assistant-written text (generate)", () => {
     expect(text.requests.map((q) => q.id)).toEqual(["t1"]);
     expect(fills(t).map((c) => c.text)).toEqual(["first"]);
     expect(t.log.lines.some((l) => l.includes('retry 1/1: "Reply" already holds the text written for it'))).toBe(true);
-    // After a send empties the field, the text is not written and sent again.
+    // After a send empties the field, the text is not written and sent again: the run blocks with a hint.
     const sent = mail(TASK, [gen("Reply"), clickOn("Send"), gen("Reply"), giveUp], {}, { text: fakeText([says({ f1: "first" }), says({ f1: "second" })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
     const r2 = await sent.runner.run();
     expect(sent.state.sent).toBe(" | first");
     expect(fills(sent).map((c) => c.text)).toEqual(["first"]);
-    expect(sent.log.lines.some((l) => l.includes('the text written for "Reply" was typed in this run and is not in the field now; a run writes one text per field'))).toBe(true);
-    expect(r2.blocked?.kind).toBe("impossible");
+    expect(r2.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 2; a run writes and sends one text per field. For the next text, call browse again' });
+    // A click that is not a send ("Attach") and that empties the field gives no send record: the generate re-asks.
+    const lost = mail(TASK, [gen("Reply"), clickOn("Attach"), gen("Reply"), giveUp], {}, { text: fakeText([says({ f1: "first" }), says({ f1: "second" })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const act = lost.page.act.bind(lost.page);
+    lost.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Attach") lost.state.values[4] = ""; };
+    const r3 = await lost.runner.run();
+    expect(lost.runner.sentTexts()).toEqual([]);
+    expect(lost.log.lines.some((l) => l.includes('the text written for "Reply" was typed in this run and is not in the field now; a run writes one text per field'))).toBe(true);
+    expect(r3.blocked?.kind).toBe("impossible");
   });
 
   it("13c: a later request for another field does not list a field that already got its text, and its text for that field is never typed", async () => {
@@ -1623,7 +1634,8 @@ describe("assistant-written text (generate)", () => {
     await e.runner.run();
     expect(early.requests).toHaveLength(1);
     expect(e.log.lines.some((l) => l.includes('"Reply (pop-out)" already holds the text written for it'))).toBe(true);
-    // "Pop out" adds a signature to the text. After the send, the pop-out gets no second text: the record went with the text.
+    // "Pop out" adds a signature to the text. After the send, the pop-out gets no second text: the record went with the
+    // text, and the send is on the record.
     const text = fakeText([says({ f1: "Tuesday at 10:00 works for me." }), says({ f1: "Tuesday at 10:00 works for me." })]);
     const h2 = fakeHuman({ interactive: true, confirm: [true, true, true] });
     const t = mail(TASK, [gen("Reply"), clickOn("Pop out"), clickOn("Send"), gen("Reply (pop-out)"), giveUp], {}, { text, human: h2, state: { extra: pop } });
@@ -1633,10 +1645,10 @@ describe("assistant-written text (generate)", () => {
       if (a.label === "Pop out") { t.state.values[11] = `${t.state.values[4] ?? ""}\n\n-- \nAnn Lee, Acme`; t.state.values[4] = ""; }
       if (a.label === "Send") t.state.values[11] = "";
     };
-    await t.runner.run();
+    const r = await t.runner.run();
     expect(text.requests).toHaveLength(1);
     expect(fills(t)).toHaveLength(1);
-    expect(t.log.lines.some((l) => l.includes('the text written for "Reply (pop-out)" was typed in this run and is not in the field now'))).toBe(true);
+    expect(r.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 3; a run writes and sends one text per field. For the next text, call browse again' });
   });
 
   it("13o: a control that held the text before the fill does not take its record: it keeps its own text request", async () => {
@@ -2582,6 +2594,276 @@ describe("assistant-written text (generate)", () => {
     expect(r.blocked?.kind).toBe("captcha");
   });
 
+  describe("25: the var fallback (plugin runs)", () => {
+    const VARS = { message: "Tuesday at 10:00 works for me." };
+    const pick = (id: string, conf: number, p: Record<string, number>) => ({ choice: id, confidence: conf, probabilities: p });
+    const onReply = (value: ReturnType<typeof pick>): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Reply"), confidence: 0.9 }, type_text_value: value });
+    const split = onReply(pick("generate", 0.45, { generate: 0.52, v_message: 0.45, none: 0.03 }));
+    const valueReqs = (t: { oracle: { requests: { name: string; questions: Questions }[] } }) => t.oracle.requests.filter((r) => r.name === "value").map((r) => r.questions["value_4"] as ChoiceQuestion);
+
+    it("a head that splits between generate and a var asks the vars alone; a var at 0.75 or above is typed, with no text request", async () => {
+      const text = fakeText([says({ f1: "written" })]);
+      const t = mail("reply to Ann with my message", [split, finish], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: () => ({ value_4: pick("v_message", 0.85, { v_message: 0.92, none: 0.08 }) }) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: VARS.message }]);
+      expect(text.requests).toHaveLength(0);
+      const [only] = valueReqs(t);
+      expect(criteriaKeys(only)).toEqual(["v_message", "none"]);
+      expect((only?.instructions as { question: string }).question).toBe(VALUE_Q);
+      expect(r.steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.85, result: "ok", jev_requests: 2 });
+      expect(t.log.lines).toContain("INFO step 1 var fallback: [4] answered generate@0.45; the vars alone -> v_message@0.85");
+    });
+
+    it("the vars alone at none or below 0.75: the head without the vars decides, and a confident generate asks the assistant", async () => {
+      for (const only of [pick("none", 0.9, { none: 0.95, v_message: 0.05 }), pick("v_message", 0.74, { v_message: 0.86, none: 0.14 })]) {
+        const text = fakeText([says({ f1: "Tuesday works." })]);
+        const t = mail("reply to Ann", [split, finish], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: (q) => (criteriaKeys(q["value_4"]).includes("generate") ? { value_4: pick("generate", 0.9, { generate: 0.95, none: 0.05 }) } : { value_4: only }) });
+        const r = await t.runner.run();
+        expect(r.outcome).toBe("done");
+        const [a, b] = valueReqs(t);
+        expect(criteriaKeys(a)).toEqual(["v_message", "none"]);
+        expect(criteriaKeys(b)).not.toContain("v_message");
+        expect(b?.criteria["generate"]).toBe(GENERATE);
+        expect(text.requests).toHaveLength(1);
+        expect(fills(t).map((f) => f.text)).toEqual(["Tuesday works."]);
+        const shown = only.choice === "none" ? "none" : `${only.choice}@${only.confidence.toFixed(2)}`;
+        expect(t.log.lines).toContain(`INFO step 1 var fallback: [4] answered generate@0.45; the vars alone -> ${shown}; without the vars -> generate@0.90`);
+      }
+    });
+
+    it("none from the head without the vars keeps the first answer: low_value, a ban, and a re-ask", async () => {
+      const text = fakeText([says({ f1: "x" })]);
+      const t = mail("reply to Ann", [split, giveUp], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: () => ({ value_4: "none" }) });
+      const r = await t.runner.run();
+      expect(valueReqs(t)).toHaveLength(2);
+      expect(r.steps[0]?.gate).toBe("low_value 0.45 < 0.55 (data_entry)");
+      expect(text.requests).toHaveLength(0);
+      expect(fills(t)).toEqual([]);
+    });
+
+    it("an assistant's var uses its own confidence: below the gate it goes to the fallback, at the gate it is typed; the CLI types a var at 1", async () => {
+      const low = mail("reply to Ann with my message", [onReply(pick("v_message", 0.3, { v_message: 0.48, generate: 0.47, none: 0.05 })), finish], { vars: VARS }, { text: fakeText(), fromAssistant: true, values: () => ({ value_4: pick("v_message", 0.9, { v_message: 0.95, none: 0.05 }) }) });
+      const r = await low.runner.run();
+      expect(r.steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.9 });
+      expect(valueReqs(low)).toHaveLength(1);
+      const ok = mail("reply to Ann with my message", [onReply(pick("v_message", 0.6, { v_message: 0.7, generate: 0.25, none: 0.05 })), finish], { vars: VARS }, { text: fakeText(), fromAssistant: true });
+      expect((await ok.runner.run()).steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.6 });
+      expect(valueReqs(ok)).toHaveLength(0);
+      // The vars alone and the head without them do not help: the low var stays, and it is low_value.
+      const alone = mail("reply to Ann with my message", [onReply(pick("v_message", 0.3, { v_message: 0.5, none: 0.5 })), giveUp], { vars: VARS }, { fromAssistant: true });
+      expect((await alone.runner.run()).steps[0]?.gate).toBe("low_value 0.30 < 0.55 (data_entry)");
+      const cli = mail("reply to Ann with my message", [onReply(pick("v_message", 0.2, { v_message: 0.2, none: 0.8 })), finish], { vars: VARS });
+      expect((await cli.runner.run()).steps[0]).toMatchObject({ value: VARS.message, value_conf: 1 });
+      expect(valueReqs(cli)).toHaveLength(0);
+    });
+
+    it("a var that a fill of this run typed, and a secret var, start no fallback", async () => {
+      const onSubject: Decide = (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Subject"), confidence: 0.9 }, type_text_value: pick("generate", 0.45, { generate: 0.5, v_message: 0.45, none: 0.05 }) });
+      const t = mail("reply to Ann with my message and a subject", [onReply(pick("v_message", 0.9, { v_message: 0.95, none: 0.05 })), onSubject, giveUp], { vars: { token: "s3cr3t", ...VARS } }, { text: fakeText(), fromAssistant: true });
+      const r = await t.runner.run();
+      expect(fills(t).map((f) => f.text)).toEqual([VARS.message]);
+      expect(r.steps[1]?.gate).toBe("low_value 0.45 < 0.55 (data_entry)");
+      expect(t.oracle.requests.filter((x) => x.name === "value")).toHaveLength(0);
+    });
+  });
+
+  describe("26: sends of assistant text", () => {
+    const opCriteria = (q: Questions) => (q["operation"] as ChoiceQuestion).criteria;
+    const sentState = (t: ReturnType<typeof mail>, i: number) => (stepReqs(t)[i]?.state as Record<string, unknown> | undefined)?.["sent_texts"];
+
+    it("a Send click that empties the field records a send: the next state has sent_texts and the DONE_SENT text", async () => {
+      const human = fakeHuman({ interactive: true, confirm: [true] });
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(t.log.lines).toContain('INFO step 2 sent: the text for "Reply" left the page after step 2 (click "Send")');
+      expect(opCriteria(stepReqs(t)[1]?.questions ?? {})["DONE"]).toBe(DONE_TEXT);
+      expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"]).toBe(DONE_SENT);
+      expect(sentState(t, 2)).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+    });
+
+    it("no send record for a text that stays, a Delete draft click, a click that is not a send, or a fill that did not stay", async () => {
+      const cases: { name: string; steps: Decide[]; clear?: string; drop?: boolean; extra?: Action[] }[] = [
+        // The send failed: the page keeps the text.
+        { name: "kept", steps: [gen("Reply"), clickOn("Send"), finish] },
+        // A destructive word that is not a send word.
+        { name: "delete", steps: [gen("Reply"), clickOn("Delete draft"), finish], clear: "Delete draft", extra: [el("e10", "click", "Delete draft", "button", { form: 7 })] },
+        { name: "attach", steps: [gen("Reply"), clickOn("Attach"), finish], clear: "Attach" },
+        // The editor dropped the insert: nothing showed that the page had the text.
+        { name: "dropped", steps: [gen("Reply"), clickOn("Send"), finish], drop: true },
+      ];
+      for (const c of cases) {
+        const t = mail(TASK, c.steps, {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }), state: { extra: c.extra ?? [] } });
+        const act = t.page.act.bind(t.page);
+        t.page.act = async (a, o, value) => {
+          const before = t.state.values[4];
+          await act(a, o, value);
+          if (c.drop && a.kind === "fill") t.state.values[4] = "";
+          if (a.label === "Send" && !c.drop) t.state.values[4] = before ?? "";
+          if (a.label === c.clear) t.state.values[4] = "";
+        };
+        const r = await t.runner.run();
+        expect(r.outcome, c.name).toBe("done");
+        expect(t.runner.sentTexts(), c.name).toEqual([]);
+        expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"], c.name).toBe(DONE_TEXT);
+        expect(sentState(t, 2), c.name).toBeUndefined();
+      }
+    });
+
+    it("a Comment click and an Enter record a send when the text leaves; so does a task value in a plugin run, and the CLI records none", async () => {
+      const comment = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act = comment.page.act.bind(comment.page);
+      comment.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Comment") comment.state.values[4] = ""; };
+      await comment.runner.run();
+      expect(comment.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      const enter = mail(TASK, [gen("Reply"), enterKey, finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      enter.page.press = async (key) => { enter.page.calls.push({ op: "press", key }); enter.state.values[4] = ""; };
+      await enter.runner.run();
+      expect(enter.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(enter.log.lines).toContain('INFO step 2 sent: the text for "Reply" left the page after step 2 (Enter)');
+      // A task value typed into a multiline field is unsent text in a plugin run, and its send is recorded too.
+      const quoted = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), finish], {}, { fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      await quoted.runner.run();
+      expect(quoted.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      // The CLI has no unsent text, so no send record and no change to its requests.
+      const cli = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), finish], {}, { human: fakeHuman({ interactive: true, confirm: [true] }) });
+      await cli.runner.run();
+      expect(cli.runner.sentTexts()).toEqual([]);
+      expect(opCriteria(stepReqs(cli)[2]?.questions ?? {})["DONE"]).toBe(DONE_TEXT);
+    });
+
+    it("an Enter that picks an option records a send only when the option has a send word", async () => {
+      for (const [option, sends] of [["Open Q3 Roadmap", false], ["Send to #general", true]] as const) {
+        const t = mail(TASK, [gen("Reply"), enterKey, finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+        const observe = t.page.observe;
+        t.page.observe = async () => {
+          const o = await observe();
+          const v = o.actions.find((a) => a.node === 4)?.value ?? "";
+          return { ...o, focus: { node: 4, label: "Reply", role: "textbox", submitLabel: "Send", editable: true, value: v, form: 7, multiline: true, enterOption: { node: 20, label: option } } };
+        };
+        // The pick takes the text out of the field, as a command bar that opens an item does.
+        t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); t.state.values[4] = ""; };
+        const r = await t.runner.run();
+        expect(r.outcome, option).toBe("done");
+        expect(t.page.calls, option).toContainEqual({ op: "press", key: "Enter" });
+        expect(t.runner.sentTexts(), option).toEqual(sends ? [{ field: "Reply", text: "Tuesday works." }] : []);
+        expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"], option).toBe(sends ? DONE_SENT : DONE_TEXT);
+      }
+    });
+
+    it("a text that the send moved into another field in view is no send: no control may hold it", async () => {
+      // An older adapter without `texts`: only the fields in view show where the text is.
+      const t = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }), state: { extra: [el("e10", "fill", "Reply (pop-out)", "textbox", { form: 8, multiline: true })] } });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Comment") { t.state.values[10] = t.state.values[4] ?? ""; t.state.values[4] = ""; } };
+      const observe = t.page.observe;
+      t.page.observe = async () => { const { texts: _texts, ...o } = await observe(); return o; };
+      await t.runner.run();
+      expect(t.runner.sentTexts()).toEqual([]);
+    });
+
+    it("the step after a send waits while the page still shows the text, and decides on the page without it", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act = t.page.act.bind(t.page);
+      let sending = 0;
+      t.page.act = async (a, o, value) => { const before = t.state.values[4]; await act(a, o, value); if (a.label === "Send") { t.state.values[4] = before ?? ""; sending = 4; } };
+      const observe = t.page.observe.bind(t.page);
+      t.page.observe = async () => { if (sending > 0 && --sending === 0) t.state.values[4] = ""; return observe(); };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.log.lines).toContain('INFO step 3 sent: the text for "Reply" left the page after step 2 (click "Send")');
+      expect(sentState(t, 2)).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"]).toBe(DONE_SENT);
+      // A text that never leaves: the wait ends after fastWaitMs worth of polls, and the step decides with no record.
+      const kept = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act2 = kept.page.act.bind(kept.page);
+      kept.page.act = async (a, o, value) => { const before = kept.state.values[4]; await act2(a, o, value); if (a.label === "Send") kept.state.values[4] = before ?? ""; };
+      await kept.runner.run();
+      expect(kept.page.observes).toBe(4 + Math.ceil(LIMITS.fastWaitMs / LIMITS.waitPollMs));
+      expect(kept.runner.sentTexts()).toEqual([]);
+      // A form that the page hides after the send keeps its value in a hidden control: no send record (the control still
+      // holds the text), and no wait, because no rendered control shows the text.
+      const hid = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act3 = hid.page.act.bind(hid.page);
+      hid.page.act = async (a, o, value) => { const before = hid.state.values[4]; await act3(a, o, value); if (a.label === "Send") { hid.state.values[4] = before ?? ""; hid.state.hidden = [4]; } };
+      const observe3 = hid.page.observe.bind(hid.page);
+      hid.page.observe = async () => { const o = await observe3(); return { ...o, texts: (o.texts ?? []).filter(([n]) => !(hid.state.hidden ?? []).includes(n)) }; };
+      expect((await hid.runner.run()).outcome).toBe("done");
+      expect(hid.page.observes).toBe(4);
+      expect(hid.runner.sentTexts()).toEqual([]);
+    });
+
+    it("a later action other than WAIT ends the watch: a text that it takes out of the page is no send", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), clickOn("Attach"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true, true] }) });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => { const before = t.state.values[4]; await act(a, o, value); if (a.label === "Send") t.state.values[4] = before ?? ""; if (a.label === "Attach") t.state.values[4] = ""; };
+      await t.runner.run();
+      expect(t.state.clicks).toBe(2);
+      expect(t.runner.sentTexts()).toEqual([]);
+    });
+
+    it("a text request after a send lists the sent texts and never the sent field; a field with a sent task value blocks a generate", async () => {
+      const text = fakeText([says({ f1: "Re: Tuesday" })]);
+      const t = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), gen("Subject"), gen("Reply"), giveUp], {}, { text, fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const r = await t.runner.run();
+      expect(text.requests.map((q) => q.fields.map((f) => f.label))).toEqual([["Subject"]]);
+      expect(text.requests[0]?.sent_texts).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(r.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 2; a run writes and sends one text per field. For the next text, call browse again' });
+    });
+
+    it("after a send, a generate needs TYPE_TEXT at 0.50 or above", async () => {
+      const weak: Decide = (q) => ({ page_kind: "task_page", operation: { choice: "TYPE_TEXT", confidence: 0.4, probabilities: { TYPE_TEXT: 0.4, DONE: 0.35, CLICK: 0.25 } }, type_text_target: { choice: idx(q, "type_text_target", "Subject"), confidence: 0.9 }, type_text_value: { choice: "generate", confidence: 0.9 } });
+      const text = fakeText([says({ f1: "Tuesday works." }), says({ f1: "Re: Tuesday" })]);
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), weak, finish], {}, { text, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(text.requests).toHaveLength(1);
+      expect(t.log.lines.some((l) => l.includes("retry 1/1: text after a send: TYPE_TEXT 0.40 < 0.5"))).toBe(true);
+      expect(fills(t)).toHaveLength(1);
+    });
+  });
+
+  describe("27: the send gate in the form of unsent text", () => {
+    const clickAt = (label: string, conf: number): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: conf } });
+
+    it("a Send button in the form of a field with unsent text needs only the submit target gate, and the dialog still asks", async () => {
+      const human = fakeHuman({ interactive: true, confirm: [true] });
+      const t = mail(TASK, [gen("Reply"), clickAt("Send", 0.55), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.state.sent).toBe(" | Tuesday works.");
+      expect(human.details).toEqual([{ kind: "action", action: 'click button "Send"', host: "mail.example", typed: [{ label: "Reply", text: "Tuesday works." }] }]);
+      expect(t.log.lines).toContain("INFO step 2 send in the form of unsent text: target 0.55 passes the submit gate 0.5; the click needs the user's OK");
+      expect(r.steps[1]).toMatchObject({ risk: "destructive", target_conf: 0.55, result: "ok" });
+    });
+
+    it("a run without a dialog blocks needs_confirmation at that click, and never clicks", async () => {
+      const human = fakeHuman({ interactive: false });
+      const t = mail(TASK, [gen("Reply"), clickAt("Send", 0.55)], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human, hints: { noConfirm: "NO DIALOG" } });
+      const r = await t.runner.run();
+      expect(r.blocked).toMatchObject({ kind: "needs_confirmation", hint: 'destructive action click button "Send": NO DIALOG' });
+      expect(t.state.clicks).toBe(0);
+    });
+
+    it("the destructive gate stays for a send button in another form, with no unsent text, and with confirm never", async () => {
+      const other = [el("e10", "click", "Send now", "button", { form: 8 })];
+      const runs: { name: string; steps: Decide[]; over?: Partial<RunConfig>; human: ReturnType<typeof fakeHuman>; extra?: Action[] }[] = [
+        { name: "another form", steps: [gen("Reply"), clickAt("Send now", 0.55), giveUp], human: fakeHuman({ interactive: true, confirm: [true] }), extra: other },
+        { name: "no unsent text", steps: [clickAt("Send", 0.55), giveUp], human: fakeHuman({ interactive: true, confirm: [true] }) },
+        { name: "confirm never", steps: [gen("Reply"), clickAt("Send", 0.55), giveUp], over: { confirm: "never" }, human: fakeHuman({ interactive: true, confirm: [true] }) },
+      ];
+      for (const c of runs) {
+        const t = mail(TASK, c.steps, c.over ?? {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: c.human, state: { extra: c.extra ?? [] } });
+        await t.runner.run();
+        expect(t.log.lines.some((l) => l.includes("retry 1/1: low_target 0.55 < 0.7 (destructive)")), c.name).toBe(true);
+        expect(t.state.clicks, c.name).toBe(0);
+        expect(c.human.prompts, c.name).toEqual([]);
+      }
+    });
+  });
+
   it("24: the RunResult keys equal those of emptyResult", async () => {
     const r = await mail(TASK, [gen("Reply"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]) }).runner.run();
     const empty = emptyResult("t", "act");
@@ -3145,6 +3427,23 @@ describe("fills that keep a field's text, refused fills, and a step that a submi
     expect(t.log.lines.some((l) => /step 1 edit append 0\.97 for \[e1\]/.test(l))).toBe(true);
     // After Save the page has no held field: no mode head.
     expect(Object.keys(steps(t)[2]?.questions ?? {}).some((k) => k.startsWith("mode_"))).toBe(false);
+  });
+
+  it("the var fallback on a held field keeps the mode of the first answer; its value requests carry no mode head", async () => {
+    const vars = { note: LINE };
+    const script = seq(fill("append", 0.97, { choice: "generate", confidence: 0.45, probabilities: { generate: 0.52, v_note: 0.45, none: 0.03 } }), click("Save"), finish);
+    const oracle = (name: string, state: unknown, q: Questions): PartialAnswers =>
+      (name === "value" ? { type_text_value: { choice: "v_note", confidence: 0.85, probabilities: { v_note: 0.92, none: 0.08 } } } : script(name, state, q));
+    const t = setup(TASK, { pages: { d: docPage(DOC), after: docPage(`${DOC}\n${LINE}`), saved: SAVED }, start: "d", edits: (c) => appended(DOC, c.text ?? ""),
+      transitions: (c) => (c.op === "act" && c.kind === "fill" ? "after" : c.op === "act" && c.id === "e2" ? "saved" : undefined) }, oracle, { url: URL, vars }, { text: fakeText(), fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const values = t.oracle.requests.filter((x) => x.name === "value");
+    expect(values).toHaveLength(1);
+    expect(Object.keys(values[0]?.questions ?? {})).toEqual(["value_1"]);
+    expect(criteriaKeys(values[0]?.questions["value_1"])).toEqual(["v_note", "none"]);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "append" } }]);
+    expect(t.log.lines).toContain("INFO step 1 var fallback: [1] answered generate@0.45; the vars alone -> v_note@0.85");
   });
 
   it("a mode below 0.6 asks again one time, then blocks with the hint; nothing is typed", async () => {

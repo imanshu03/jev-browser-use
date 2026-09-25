@@ -233,6 +233,8 @@ export const GATES = {
   extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,
   done: 0.50, answerLine: 0.20,       // fast engine: P(DONE) for act goals; answer_line confidence for extract goals
   editMode: 0.60, editReplace: 0.80,  // fast engine: the mode head of a field that holds text the run did not type; a replace of that text
+  varOnly: 0.75,                      // fast engine, plugin runs: a var chosen by the var fallback's vars-only value request
+  textAfterSend: 0.50,                // fast engine, plugin runs: TYPE_TEXT confidence of a generate after a send of this run
 } as const;
 
 export const LIMITS = {
@@ -302,6 +304,15 @@ export const KEY_CATALOG: Record<string, string> = {
 export const DESTRUCTIVE_WORDS = ["delete", "remove", "pay", "buy", "purchase", "checkout", "place order",
   "send", "post", "publish", "transfer", "unsubscribe", "cancel subscription", "confirm order",
   "submit order", "archive", "reply", "tweet", "share", "deactivate", "close account"];
+
+/**
+ * Labels of controls that send a message from a composer. A new line in an editor near one can send (the composer shape
+ * of a fill), and in a multiline field Enter stands for one. "Share" and "Publish" buttons are also on document editors.
+ */
+export const COMPOSER_SEND_WORDS = ["send", "post", "reply", "comment"];
+
+/** Labels of controls that send a text. A click on one, or an Enter, with unsent assistant text in a field can be a send. */
+export const SEND_WORDS = [...COMPOSER_SEND_WORDS, "publish", "share", "tweet", "queue"];
 
 export const SUBMIT_WORDS = ["submit", "save", "apply", "sign in", "log in", "login", "register", "sign up",
   "continue", "next", "create", "update", "add to cart", "confirm"];
