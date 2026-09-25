@@ -36,11 +36,39 @@ export const RULES: string[] = [
 /** Extra rule for extract goals. */
 export const EXTRACT_RULE = "The answer must be visible on screen; SCROLL_DOWN when it is not.";
 
+/**
+ * Extra rule for a task that asks to mention someone (a `mention` span). With the field facts (`mentions`, option
+ * `checked`, no "on" checkbox rows) and this rule, Jev clicked Mention 5 of 5 times after the text (0.79), "Done (1)" with
+ * a staged option 5 of 5 times (0.90-0.96), and Send after the chip (0.96). The facts alone made Jev type the text again
+ * (TYPE_TEXT 0.66), and without the facts Jev sent a staged option with no chip.
+ */
+export const MENTION_RULE = "To mention or tag someone, add the person with the message field's mention picker: click the field's Mention or @ button, choose the name, and confirm the choice with the picker's Done or Add button when it has one. A checked item in an open picker is not added yet. The field's mentions list shows each added mention; typed text such as a name or \"@name\" is not a mention. Send only when the field lists every requested mention.";
+
 export const TARGET_RULES = "Choose the best observed element if the next operation is the one named in this question. Another question decides which operation runs. Do not choose a field that already contains the requested value. Choose only an offered element.";
 
-/** The rules for one goal kind. */
-export function rulesFor(goal: Goal): string[] {
-  return goal === "extract" ? [...RULES, EXTRACT_RULE] : RULES;
+/** The rules for one goal kind. `mention`: the task asks to mention someone. */
+export function rulesFor(goal: Goal, mention = false): string[] {
+  const rules = goal === "extract" ? [...RULES, EXTRACT_RULE] : RULES;
+  return mention ? [...rules, MENTION_RULE] : rules;
+}
+
+/** The task asks to mention someone: a span has the source `mention`. */
+export function mentionIntent(spans: Span[]): boolean {
+  return spans.some((s) => s.source === "mention");
+}
+
+/** Lower-case words of a name, without "@" and marks: "@ann.lee" and "Ann Lee" both give ["ann", "lee"]. */
+const nameWords = (s: string): string[] => s.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+/**
+ * A mention in a field (a chip name) is the one a task name asks for: the same words, or every word of the task name
+ * ("Ann" asks for "Ann Lee", "@ann.lee" asks for "Ann Lee").
+ */
+export function mentionMatches(chip: string, name: string): boolean {
+  const want = nameWords(name);
+  const have = nameWords(chip);
+  if (want.length === 0 || have.length === 0) return false;
+  return want.join("") === have.join("") || want.every((w) => have.includes(w));
 }
 
 export type TargetOp = "CLICK" | "TYPE_TEXT" | "SELECT";
@@ -54,7 +82,10 @@ export interface ElementRow {
   value?: string;
   checked?: string;
   selected?: string;
+  highlighted?: string;
   expanded?: string;
+  /** The mention chips of an editor, or "none" for an empty message field in a task that asks to mention someone. */
+  mentions?: string[] | "none";
   operations: string[];
   options?: { index: string; label: string; value: string }[];
 }
@@ -82,10 +113,19 @@ export function cutLines(s: string, max: number): string {
 /**
  * The stable identity of an action for bans and repeat counts. Action ids are per-snapshot ordinals
  * ("e1".."e250"), so the same id can name another element after the page changed. The node id and the
- * label stay with the element; the label separates the options of one select.
+ * label stay with the element; the label separates the options of one select. A message field (a multiline textbox)
+ * also adds its text: its name no longer comes from its text, and a fill of new text into it is not a repeat.
  */
 export function actionKey(action: Action): string {
-  return action.node === null ? action.id : `n:${action.node}|${action.label}`;
+  if (action.node === null) return action.id;
+  const text = action.multiline === true && action.role === "textbox" ? `|${action.value ?? ""}` : "";
+  return `n:${action.node}|${action.label}${text}`;
+}
+
+/** The names of the mention chips of a field, or "none" for a message field without chips when the task asks to mention someone. */
+function mentionsOf(a: Action, intent: boolean): string[] | "none" | undefined {
+  if (a.mentions && a.mentions.length > 0) return a.mentions.map((m) => cutText(m, LIMITS.nameChars));
+  return intent && a.multiline === true && a.role === "textbox" ? "none" : undefined;
 }
 
 /**
@@ -101,8 +141,11 @@ export function canWriteInto(a: Action): boolean {
   return !CREDENTIAL_NAME.test(label) && !EXACT_VALUE_NAME.test(label);
 }
 
-/** Port of jev-ultrafast `action_space`: one index per node; each operation has its own target keys. */
-export function actionSpace(actions: Action[]): ActionSpace {
+/**
+ * Port of jev-ultrafast `action_space`: one index per node; each operation has its own target keys. `mention`: the task
+ * asks to mention someone, so a message field without chips shows `mentions: "none"`.
+ */
+export function actionSpace(actions: Action[], mention = false): ActionSpace {
   const elements: ElementRow[] = [];
   const indices = new Map<string, string>();
   const targets: Record<TargetOp, Record<string, Action>> = { CLICK: {}, TYPE_TEXT: {}, SELECT: {} };
@@ -120,7 +163,10 @@ export function actionSpace(actions: Action[]): ActionSpace {
       if (action.value !== undefined) row.value = cutText(action.value, LIMITS.valueChars);
       if (action.checked !== undefined) row.checked = action.checked;
       if (action.selected !== undefined) row.selected = action.selected;
+      if (action.highlighted !== undefined) row.highlighted = action.highlighted;
       if (action.expanded !== undefined) row.expanded = action.expanded;
+      const mentions = mentionsOf(action, mention);
+      if (mentions !== undefined) row.mentions = mentions;
       if (action.kind === "select") { row.value = cutText(action.current_value ?? "", LIMITS.valueChars); row.options = []; }
       elements.push(row);
     }
@@ -316,6 +362,8 @@ const same = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
  * - In both runs, the two values of a maybe cut show together when one of them passes (`withCuts`).
  * - Every other field offers every task and --var span.
  * - Text written for another field is never offered: it can go only into its own field.
+ * - A message field (multiline) never offers a name to mention: typed "@Ann Lee" text is not a mention, and the name
+ *   alone is not the message. A single-line field, such as the search box of a mention picker, offers it.
  */
 function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canGenerate: boolean): { question: ChoiceQuestion; head: ValueHead } | null {
   const c: ChoiceCriteria = {};
@@ -344,7 +392,8 @@ function offeredSpans(a: Action, obs: Observation, spans: Span[], canGenerate: b
   const repeats = new Set(written.map((s) => same(s.text)));
   const repeat = (s: Span): boolean => gen && repeats.has(same(s.text));
   const hidden = !writable ? null : withCuts(gen ? hiddenWhileGenerate : hiddenWithoutGenerate, spans, repeat);
-  const others = spans.filter((s) => s.source !== "generated" && !hidden?.(s) && !repeat(s));
+  const named = (s: Span): boolean => s.source === "mention" && a.multiline === true;
+  const others = spans.filter((s) => s.source !== "generated" && !hidden?.(s) && !repeat(s) && !named(s));
   return [...written, ...others];
 }
 
@@ -376,6 +425,7 @@ function targetCriteria(op: TargetOp, group: Record<string, Action>, banned: Set
     if (a.role !== undefined) row["role"] = a.role;
     if (a.checked !== undefined) row["checked"] = a.checked;
     if (a.selected !== undefined) row["selected"] = a.selected;
+    if (a.highlighted !== undefined) row["highlighted"] = a.highlighted;
     if (a.expanded !== undefined) row["expanded"] = a.expanded;
     criteria[key] = row;
     ids[key] = a.id;
@@ -386,23 +436,29 @@ function targetCriteria(op: TargetOp, group: Record<string, Action>, banned: Set
   return { criteria, ids, labels };
 }
 
-/** The focus in the state, with its texts cut. The form facts (`form`, `submitDefault`, `multiline`) are for the loop only. */
-function focusState(f: NonNullable<Observation["focus"]>): Record<string, JsonValue> {
+/**
+ * The focus in the state, with its texts cut. The form facts (`form`, `submitDefault`, `multiline`, `popup`) are for the
+ * loop only. A focused message field shows its mention chips, or "none" when the task asks to mention someone.
+ */
+function focusState(f: NonNullable<Observation["focus"]>, mention: boolean): Record<string, JsonValue> {
   const out: Record<string, JsonValue> = {};
   for (const [k, v] of Object.entries(f)) {
-    if (k === "form" || k === "submitDefault" || k === "multiline" || v === undefined) continue;
+    if (k === "form" || k === "submitDefault" || k === "multiline" || k === "popup" || k === "mentions" || v === undefined) continue;
     if (k === "label" || k === "submitLabel") out[k] = cutText(String(v), LIMITS.nameChars);
     else if (k === "value") out[k] = cutText(String(v), LIMITS.valueChars);
     else out[k] = v as JsonValue;
   }
+  if (f.mentions && f.mentions.length > 0) out["mentions"] = f.mentions.map((m) => cutText(m, LIMITS.nameChars));
+  else if (mention && f.editable === true && f.multiline === true && f.role === "textbox") out["mentions"] = "none";
   return out;
 }
 
 /** `only`: build the state and the value head of that TYPE_TEXT key, and no other head (the value request of a fill). */
 function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): { state: EntryType; questions: Questions; meta: StepMeta } {
   const { task, goal, obs, history, spans, keys, bannedActionIds, doneBanned } = input;
-  const space = actionSpace(obs.actions);
-  const rules = rulesFor(goal);
+  const mention = mentionIntent(spans);
+  const space = actionSpace(obs.actions, mention);
+  const rules = rulesFor(goal, mention);
   const meta: StepMeta = { targets: { CLICK: {}, TYPE_TEXT: {}, SELECT: {} }, values: {}, lines: {}, labels: {}, cuts, offered: [], generate: false };
 
   const elements = trim.maxElements === null ? space.elements : space.elements.slice(0, trim.maxElements);
@@ -495,7 +551,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
     goal: task,
     page: { url: cutText(obs.url, LIMITS.urlChars), title: cutText(obs.title, LIMITS.titleChars), text: obs.text.slice(0, trim.textChars) },
     elements: elements.map((e) => e as unknown as JsonValue),
-    focus: obs.focus ? focusState(obs.focus) : null,
+    focus: obs.focus ? focusState(obs.focus, mention) : null,
     recent_actions: history.slice(-LIMITS.history).map((h) => ({ action: h.action, kind: h.kind, text: h.text, page_changed: h.page_changed })),
   };
   if (input.retryReason) state["retry_reason"] = cutText(redact(input.retryReason, spans), LIMITS.textCharsMin);

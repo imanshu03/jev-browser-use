@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
 import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, caretEndScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -203,7 +203,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       return JSON.stringify(r.value) === JSON.stringify(obs.marker);
     },
 
-    async act(action, obs, text) {
+    async act(action, obs, text, fill) {
       // A wait has no target and changes nothing. A page that keeps updating must not turn it into stale retries.
       if (action.kind === "wait") {
         await settleSleep(100);
@@ -222,7 +222,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
       if (typeof action.node !== "number") throw new StalePage("Invalid observed node");
       if (action.kind === "fill" && typeof text !== "string") throw new Error("a fill needs text");
-      const r = await evaluate(actScript(action));
+      const append = action.kind === "fill" && fill?.append === true;
+      const r = await evaluate(actScript(action, append));
       if (r.exception) {
         if (action.kind === "select") throw new Error("Dropdown execution was interrupted; observe before retrying.");
         throw new StalePage("Document changed during evaluation");
@@ -234,7 +235,15 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         await mouse("mouseMoved", x, y);
         await mouse("mousePressed", x, y, { button: "left", clickCount: 1 });
         await mouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
-        if (action.kind === "fill") {
+        if (append) {
+          // Add at the end: no select-all, so the field keeps its mention chips. One space goes between the field text
+          // and the new text. The click only focused the field; nothing is typed when focus is not in it.
+          const end = await evaluate(caretEndScript(action.node));
+          const before = (end.value as { before?: unknown } | null)?.before;
+          if (end.exception || typeof before !== "string") throw new StalePage("Focus is not in the field. Observe again.");
+          const gap = before !== "" && !/\s$/.test(before) ? " " : "";
+          await call("Input.insertText", { text: gap + (text as string) });
+        } else if (action.kind === "fill") {
           await call("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers, commands: ["selectAll"] });
           await call("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers });
           await call("Input.insertText", { text: text as string });

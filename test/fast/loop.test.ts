@@ -2751,3 +2751,198 @@ describe("value requests", () => {
     expect(r.outcome).toBe("done");
   });
 });
+
+describe("mention pickers", () => {
+  const CHAT = "https://chat.example/c/1";
+  const DOC = 1727000000001.5;
+  const PLACEHOLDER = "Type a message — use @ to tag agents, sources & artifacts";
+  type StepState = { retry_reason?: string; elements: { label: string; mentions?: unknown }[] };
+  type Decide = (q: Questions, state: StepState) => PartialAnswers;
+  /** The composer holds `text` and then its chips. `open`: the picker shows; `staged`: its checked users. `inline`: focus stays in the composer while the picker is open. */
+  interface ChatState { node: number; text: string; chips: string[]; open: boolean; staged: string[]; inline?: boolean; sent: { text: string; chips: string[] }[] }
+
+  /**
+   * A chat composer (form 1) with a Mention button and a Send button, and a picker in a portal popup (popup 2, list 4):
+   * a single-select agent, multi-select users with a checked state, "Done (N)" when a user is checked, and a search box.
+   */
+  function chatPage(s: ChatState): Observation {
+    const value = [s.text, ...s.chips.map((c) => `@${c}`)].filter(Boolean).join(" ");
+    const chips = s.chips.length > 0 ? { mentions: [...s.chips], bareText: s.text } : {};
+    const actions: Action[] = [
+      el("e1", "fill", PLACEHOLDER, "textbox", { node: s.node, value, form: 1, multiline: true, ...chips }),
+      el("e2", "click", `Open ${PLACEHOLDER}`, "textbox", { node: s.node, value, form: 1, multiline: true }),
+      el("e3", "click", "Mention", "button", { node: 2, form: 1 }),
+      el("e4", "click", "Send message", "button", { node: 3, form: 1 }),
+    ];
+    if (s.open) {
+      actions.push(
+        el("e5", "fill", "Search sources, artifacts, agents...", "combobox", { node: 14, value: "", form: 2, popup: [2] }),
+        el("e6", "click", "Research Agent Finds and summarises project context", "option", { node: 10, form: 2, highlighted: "true", popup: [4, 2] }),
+        el("e7", "click", "Ann Lee", "option", { node: 11, form: 2, checked: String(s.staged.includes("Ann Lee")), highlighted: "false", popup: [4, 2] }),
+        el("e8", "click", "Bob Roy", "option", { node: 12, form: 2, checked: String(s.staged.includes("Bob Roy")), highlighted: "false", popup: [4, 2] }),
+      );
+      if (s.staged.length > 0) actions.push(el("e9", "click", `Done (${s.staged.length})`, "button", { node: 13, form: 2, popup: [2] }));
+    }
+    const inPicker = s.open && !s.inline;
+    const focus = inPicker
+      ? { node: 14, label: "Search sources, artifacts, agents...", role: "combobox", submitLabel: "", editable: true, value: "", form: 2, submitDefault: "", multiline: false, popup: [2] }
+      : { node: s.node, label: PLACEHOLDER, role: "textbox", submitLabel: "", editable: true, value, form: 1, submitDefault: "", multiline: true, ...(s.chips.length > 0 ? { mentions: [...s.chips] } : {}) };
+    return obs(CHAT, actions, `Website Redesign chat\n${s.sent.map((m) => `You: ${m.text} ${m.chips.map((c) => `@${c}`).join(" ")}`).join("\n")}`, {
+      doc: DOC, focus, filled: value ? [s.node] : [], texts: value ? [[s.node, value]] : [],
+    });
+  }
+
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as StepState) : {});
+  };
+  const clickOn = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const typeInto = (id: string): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", PLACEHOLDER), confidence: 0.9 }, type_text_value: { choice: id, confidence: 0.9 } });
+  const enterKey: Decide = () => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.9, probabilities: { PRESS_ENTER: 0.9, CLICK: 0.1 } } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
+
+  function chat(task: string, steps: Decide[], state: Partial<ChatState> = {}, opts: SetupOpts = {}, over: Partial<RunConfig> = {}) {
+    const s: ChatState = { node: 1, text: "", chips: [], open: false, staged: [], sent: [], ...state };
+    const send = () => { s.sent.push({ text: s.text, chips: [...s.chips] }); s.text = ""; s.chips = []; s.open = false; s.staged = []; };
+    const human = opts.human ?? fakeHuman({ interactive: true, confirm: [true, true, true, true] });
+    const t = setup(task, { pages: { c: chatPage(s) }, start: "c" }, seq(...steps), { url: CHAT, ...over }, { ...opts, human });
+    t.page.observe = async () => { t.page.observes += 1; return chatPage(s); };
+    const act = t.page.act.bind(t.page);
+    t.page.act = async (a, o, text, fill) => {
+      await act(a, o, text, fill);
+      if (a.kind === "fill" && a.node === s.node) {
+        // A select-all fill replaces the chips too; an append fill keeps them.
+        if (fill?.append) s.text = [s.text, text ?? ""].filter(Boolean).join(" ");
+        else { s.text = text ?? ""; s.chips = []; }
+        s.open = false; s.staged = [];
+        return;
+      }
+      if (a.kind !== "click") return;
+      const name = a.label.split(" Finds")[0] ?? a.label;
+      if (a.label === "Mention") { s.open = !s.open; s.staged = []; }
+      else if (a.label === "Send message") send();
+      else if (a.role === "option" && name === "Research Agent") { s.chips.push(name); s.open = false; }
+      else if (a.role === "option") s.staged = s.staged.includes(name) ? s.staged.filter((x) => x !== name) : [...s.staged, name];
+      else if (/^Done/.test(a.label)) { s.chips.push(...s.staged); s.staged = []; s.open = false; }
+      else if (a.node === s.node) { s.open = false; s.staged = []; }
+    };
+    t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); if (key === "Enter" && (!s.open || s.inline)) send(); };
+    return { ...t, s };
+  }
+  const MENTION_TASK = "mention Ann Lee and ask her for the report status";
+  const clicks = (t: { page: { calls: { op: string; kind?: string; id?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "click").map((c) => c.id);
+  const reasons = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((r) => r.name === "step").map((r) => (r.state as StepState).retry_reason ?? "");
+
+  it("D1: Send with a checked option that is not added re-asks and names Done; Done, then Send, sends the chip", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Send message"), clickOn("Done (1)"), clickOn("Send message"), finish], { text: "Hi Ann, could you share the report status?", open: true, staged: ["Ann Lee"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(reasons(t)[1]).toContain('the open picker holds 1 checked item that is not added yet (Ann Lee); click "Done (1)" first');
+    expect(t.s.sent).toEqual([{ text: "Hi Ann, could you share the report status?", chips: ["Ann Lee"] }]);
+    expect(clicks(t)).toEqual(["e9", "e4"]);
+    expect(t.log.lines.some((l) => l.includes('mention @Ann Lee added to "Type a message'))).toBe(true);
+  });
+
+  it("D1: Send is banned for the re-ask; a send that stays chosen (Enter) blocks, and nothing is sent", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Send message"), enterKey], { text: "Hi Ann", open: true, staged: ["Ann Lee"], inline: true });
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain('click "Done (1)" first');
+    expect(t.s.sent).toEqual([]);
+    expect(clicks(t)).toEqual([]);
+  });
+
+  it("D1: a click outside that does not send re-asks one time, then runs", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Mention"), giveUp], { text: "Hi Ann", open: true, staged: ["Ann Lee"] });
+    await t.runner.run();
+    expect(reasons(t)[1]).toContain('click "Done (1)" first');
+    expect(clicks(t)).toEqual(["e3"]);
+  });
+
+  it("D1: Enter outside the picker re-asks; clicks inside the picker run", async () => {
+    const t = chat(MENTION_TASK, [enterKey, clickOn("Done (1)"), finish], { text: "Hi Ann", open: true, staged: ["Ann Lee"], inline: true });
+    await t.runner.run();
+    expect(reasons(t)[1]).toContain('click "Done (1)" first');
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(clicks(t)).toEqual(["e9"]);
+    expect(t.s.chips).toEqual(["Ann Lee"]);
+  });
+
+  it("D1 applies only to a task that asks to mention someone", async () => {
+    const t = chat('Send "Hi Ann" in the chat', [clickOn("Send message"), finish], { text: "Hi Ann", open: true, staged: ["Ann Lee"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.s.sent).toEqual([{ text: "Hi Ann", chips: [] }]);
+  });
+
+  it("D4b (r93): a chip that the run added and no task name asks for blocks the send; the message typed again replaces it", async () => {
+    const task = 'Send "Deploy is done, please verify on staging" in the chat';
+    const t = chat(task, [clickOn("Research Agent"), clickOn("Send message"), typeInto("s1"), clickOn("Send message"), finish], { open: true });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(reasons(t)[2]).toContain("holds the mention @Research Agent, which the task does not ask for");
+    expect(t.s.sent).toEqual([{ text: "Deploy is done, please verify on staging", chips: [] }]);
+    // The retype is a plain fill: a select-all removes the chip that no name asks for.
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "Deploy is done, please verify on staging" }]);
+
+    const stays = chat(task, [clickOn("Research Agent"), clickOn("Send message"), enterKey], { open: true });
+    const r2 = await stays.runner.run();
+    expect(r2.blocked?.kind).toBe("ambiguous");
+    expect(r2.blocked?.hint).toContain("@Research Agent");
+    expect(stays.s.sent).toEqual([]);
+  });
+
+  it("D4b: Enter is gated too, and a chip from a draft that was there before the run is not the run's", async () => {
+    const task = 'Send "Deploy is done" in the chat';
+    const enter = chat(task, [clickOn("Research Agent"), enterKey, enterKey], { open: true, inline: true, text: "Deploy is done" });
+    const r = await enter.runner.run();
+    expect(r.blocked?.hint).toContain("@Research Agent");
+    expect(enter.s.sent).toEqual([]);
+
+    const draft = chat(task, [clickOn("Send message"), finish], { text: "Deploy is done", chips: ["Bob Roy"] });
+    const r2 = await draft.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(draft.s.sent).toEqual([{ text: "Deploy is done", chips: ["Bob Roy"] }]);
+  });
+
+  it("D5: after the chip, the fill of the text goes at the end with no select-all, and the chip stays; D6: the dialog shows it", async () => {
+    const human = fakeHuman({ interactive: true, confirm: [true] });
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), typeInto("v_message"), clickOn("Send message"), finish], {}, { human }, { vars: { message: "could you share the report status?" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "could you share the report status?", append: true }]);
+    expect(r.steps[3]?.gate).toMatch(/ append$/);
+    expect(t.s.sent).toEqual([{ text: "could you share the report status?", chips: ["Ann Lee"] }]);
+    expect(human.details).toEqual([{ kind: "action", action: 'click button "Send message"', host: "chat.example", typed: [],
+      sends: [{ label: cutText(PLACEHOLDER, LIMITS.nameChars), text: "could you share the report status? @Ann Lee", mentions: ["Ann Lee"] }] }]);
+  });
+
+  it("D5: with text and the chip, a new fill would remove the chip: it re-asks and types nothing", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), typeInto("v_message"), giveUp], { text: "Hi Ann" }, {}, { vars: { message: "could you share the report status?" } });
+    await t.runner.run();
+    expect(reasons(t)[4]).toContain('a fill would remove the mention @Ann Lee from "Type a message');
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([]);
+    expect(t.s.chips).toEqual(["Ann Lee"]);
+  });
+
+  it("D6: a send with no assistant text shows what the field sends; text that the dialog already shows is not repeated", async () => {
+    const human = fakeHuman({ interactive: true, confirm: [true] });
+    const t = chat('Send "Deploy is done" in the chat', [clickOn("Send message"), finish], { text: "Deploy is done" }, { human });
+    await t.runner.run();
+    expect((human.details[0] as { sends?: unknown }).sends).toEqual([{ label: cutText(PLACEHOLDER, LIMITS.nameChars), text: "Deploy is done", mentions: [] }]);
+
+    const h2 = fakeHuman({ interactive: true, confirm: [true] });
+    const mcp = chat('Send "Deploy is done" in the chat', [typeInto("s1"), clickOn("Send message"), finish], {}, { human: h2, fromAssistant: true });
+    await mcp.runner.run();
+    expect(h2.details[0]).toMatchObject({ typed: [{ text: "Deploy is done" }] });
+    expect((h2.details[0] as { sends?: unknown }).sends).toBeUndefined();
+  });
+
+  it("a message field whose label stays the placeholder: fills of new text are not repeats", async () => {
+    const t = chat('Type "one" then "two" then "three" in the chat', [typeInto("s1"), typeInto("s2"), typeInto("s3"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.kind === "fill").map((c) => c.text)).toEqual(["one", "two", "three"]);
+  });
+});

@@ -87,6 +87,17 @@ export function confirmMessage(c: PendingConfirm): string {
         for (const line of text.split("\n")) lines.push(`> ${line}`);
       }
     }
+    // What the action sends, also text that no assistant wrote and mention chips: each chip notifies a person.
+    if (d.sends && d.sends.length > 0) {
+      lines.push("This action sends:");
+      for (const s of d.sends) {
+        const text = sanitizeText(s.text).split("\n").map((l) => l.trimEnd());
+        while (text.length > 0 && text.at(-1) === "") text.pop();
+        lines.push(`${flatText(s.label)}:`);
+        for (const line of text) lines.push(`> ${line}`);
+        if (s.mentions.length > 0) lines.push(`Mentions, each notifies that person: ${s.mentions.map((m) => `@${flatText(m)} (mention)`).join(", ")}`);
+      }
+    }
     lines.push("Allow this action?");
     return lines.join("\n");
   }
@@ -98,7 +109,8 @@ function confirmSummary(c: PendingConfirm): string {
   const d = c.detail;
   if (d?.kind === "action") {
     const labels = d.typed.map((t) => `"${flatText(t.label)}"`).join(", ");
-    return `Jev wants to ${flatText(d.action)} on ${flatText(d.host) || "this page"}.${labels ? ` Unsent text in ${labels}.` : ""} The user decides in a dialog.`;
+    const mentions = (d.sends ?? []).flatMap((s) => s.mentions.map((m) => `@${flatText(m)}`));
+    return `Jev wants to ${flatText(d.action)} on ${flatText(d.host) || "this page"}.${labels ? ` Unsent text in ${labels}.` : ""}${mentions.length > 0 ? ` Mentions: ${mentions.join(", ")}.` : ""} The user decides in a dialog.`;
   }
   return confirmMessage(c);
 }

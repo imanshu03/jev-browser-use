@@ -220,6 +220,25 @@ describe("confirmMessage", () => {
   it("an action with no typed text asks only for the action", () => {
     expect(confirmMessage(confirm({ detail: { kind: "action", action: 'click button "Delete"', host: "", typed: [] } }))).toBe('Jev wants to click button "Delete" on this page.\nAllow this action?');
   });
+
+  it("shows what a send sends: each field's text and its mention chips, marked as mentions", () => {
+    const sends = [{ label: "Type a\nmessage", text: "Hi Ann, could you share the report?\n@Ann Lee\n ", mentions: ["Ann Lee", `Bob${RLO}`] }];
+    const m = confirmMessage(confirm({ detail: { kind: "action", action: 'click button "Send message"', host: "chat.example", typed: [{ label: "Type a message", text: "Hi Ann, could you share the report?" }], sends } }));
+    expect(m).toBe([
+      'Jev wants to click button "Send message" on chat.example.',
+      "Text your assistant wrote, not sent yet:",
+      "Type a message (35 characters):",
+      "> Hi Ann, could you share the report?",
+      "This action sends:",
+      "Type a message:",
+      "> Hi Ann, could you share the report?",
+      "> @Ann Lee",
+      "Mentions, each notifies that person: @Ann Lee (mention), @Bob (mention)",
+      "Allow this action?",
+    ].join("\n"));
+    const r = run("confirming", { pending: confirm({ detail: { kind: "action", action: 'click button "Send message"', host: "chat.example", typed: [], sends } }) });
+    expect(viewOf(r, NOW, () => KEY).confirmation?.summary).toBe('Jev wants to click button "Send message" on chat.example. Mentions: @Ann Lee, @Bob. The user decides in a dialog.');
+  });
 });
 
 describe("contract constants", () => {

@@ -233,6 +233,37 @@ const SECRET_LEAD = /password|passcode|pin|otp|secret/i;
 /** A URL or a domain that starts a value, and "and" after it: the value is the site ("Go to amazon.com and search for shoes"). */
 const SITE_AND = new RegExp(`^(?:https?:\\/\\/[^\\s"'<>)]+|${DOMAIN_RE.source})(?=\\s+(?:and|&)\\s)`, "i");
 
+/** One word of a person's name: a capital letter, then lower-case letters ("Ann", "O'Brien", "McKay", "Mary-Jane"). "Q3" and "AI" are not. */
+const NAME_WORD = String.raw`(?:[A-Z]['’])?[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:-[A-Z]?[a-z]+)*(?![\p{L}\p{N}])`;
+/**
+ * An @handle that is not part of an email address or a URL: "@ann.lee", or "@" before one to three name words ("@Research
+ * Agent").
+ */
+const HANDLE = String.raw`(?<![\p{L}\p{N}_.+/-])@(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:\s${NAME_WORD}){0,2}(?![\p{L}\p{N}_.@-])|[\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)`;
+/** One name after a mention verb: an @handle, a quoted name, or one to three name words. */
+const MENTION_ITEM = String.raw`(?:${HANDLE}|"[^"]{1,60}"|“[^”]{1,60}”|${NAME_WORD}(?:\s${NAME_WORD}){0,2})`;
+/** A mention verb and its list of names: "mention Ann Lee", "Tag @ann.lee and Bob Roy", "ping Ann, Bob and Cleo". */
+const MENTION_LIST = new RegExp(String.raw`(?<![\p{L}\p{N}@-])(?:[Mm]ention|[Tt]ag|[Pp]ing|@-?[Mm]ention|[Aa]t-[Mm]ention)\s+(${MENTION_ITEM}(?:(?:\s*,\s*(?:and\s+)?|\s+(?:and|&)\s+)${MENTION_ITEM})*)`, "gu");
+const MENTION_ONE = new RegExp(MENTION_ITEM, "gu");
+const HANDLE_RE = new RegExp(HANDLE, "gu");
+
+/**
+ * The names that the task asks to mention, in task order: the names after a mention verb (mention, tag, ping, @-mention,
+ * at-mention), and every @handle. A handle keeps its "@" ("@ann.lee", "@Research Agent"); a quoted name loses its quote
+ * marks. "mention the delay to Ann" and "tag it with urgent" have none: a lower-case word follows the verb.
+ */
+export function mentionNames(task: string): { text: string; at: number }[] {
+  const found: { text: string; at: number }[] = [];
+  for (const m of task.matchAll(MENTION_LIST)) {
+    const list = m[1] ?? "";
+    const start = (m.index ?? 0) + m[0].length - list.length;
+    for (const item of list.matchAll(MENTION_ONE)) found.push({ text: item[0].replace(/^["“]|["”]$/g, ""), at: start + (item.index ?? 0) });
+  }
+  for (const m of task.matchAll(HANDLE_RE)) if (!/^@-?mention$/i.test(m[0])) found.push({ text: m[0], at: m.index ?? 0 });
+  found.sort((a, b) => a.at - b.at);
+  return found.filter((f, i) => f.text.trim() !== "" && found.findIndex((g) => g.text.toLowerCase() === f.text.toLowerCase()) === i);
+}
+
 function stripTrailing(s: string): string {
   return s.replace(/[.,;:!?)'"]+$/, "");
 }
@@ -295,6 +326,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
     out.push(span);
     return span.id;
   };
+  // R0 mentions. They come first, so a name to mention keeps the source "mention" when it is also quoted or a proper noun.
+  for (const m of mentionNames(task)) add(m.text, "mention", m.at);
   // R1 quoted. A single quote mark next to a letter is an apostrophe (it's, O'Brien); inside the quote it can be one
   // when a letter follows it (‘Macy’s’).
   for (const m of task.matchAll(/"([^"]{1,120})"|(?<![\p{L}\p{N}])'((?:[^']|'(?=\p{L})){1,120})'(?![\p{L}\p{N}])|“([^”]{1,120})”|‘((?:[^’]|’(?=\p{L})){1,120})’(?!\p{L})/gu)) {

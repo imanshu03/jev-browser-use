@@ -384,6 +384,85 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): field
   });
 });
 
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): names, pickers, and mention chips", () => {
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+  const mentionUrl = pathToFileURL(path.join(FIXTURES, "mention.html")).href;
+  const evaluate = async (expression: string): Promise<unknown> =>
+    ((await chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId))["result"] as { value?: unknown } | undefined)?.value;
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+    await page.navigate(mentionUrl, NAV_MS);
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  it("a textbox never takes its name from its content; only an input button is named by its value", async () => {
+    const obs = await page.observe();
+    expect(find(obs, "fill", "Type a message").value).toBe("Hi Ann @Ann Lee");
+    expect(find(obs, "fill", "Notes").value).toBe("default text");
+    expect(find(obs, "click", "Post").role).toBe("button");
+    expect(obs.actions.some((a) => a.label === "on" || a.label.startsWith("on "))).toBe(false);
+    expect(obs.actions.filter((a) => a.role === "checkbox").map((a) => a.label)).toEqual(["checkbox"]);
+  });
+
+  it("an option takes checked from its checkbox, which is not an action; aria-selected in a combobox list is highlighted", async () => {
+    const obs = await page.observe();
+    expect(find(obs, "click", "Ann Lee")).toMatchObject({ role: "option", checked: "true", highlighted: "false" });
+    expect(find(obs, "click", "Ann Lee").selected).toBeUndefined();
+    expect(find(obs, "click", "Research Agent")).toMatchObject({ highlighted: "true" });
+    expect(find(obs, "click", "Chosen")).toMatchObject({ selected: "true" });
+    expect(find(obs, "click", "Chosen").highlighted).toBeUndefined();
+    expect(find(obs, "click", "Multi chosen")).toMatchObject({ selected: "true" });
+  });
+
+  it("each action in a popup has the popups around it, innermost first; the dialog id is the form id of its controls", async () => {
+    const obs = await page.observe();
+    const option = find(obs, "click", "Ann Lee");
+    const done = find(obs, "click", "Done (1)");
+    expect(option.popup).toHaveLength(2);
+    expect(done.popup).toEqual([option.popup?.[1]]);
+    expect(done.form).toBe(done.popup?.[0]);
+    expect(find(obs, "fill", "Search people").popup).toEqual(done.popup);
+    expect(find(obs, "fill", "Type a message").popup).toBeUndefined();
+  });
+
+  it("an editor lists its mention chips, the text outside its atoms, and its other atoms; focus lists the chips", async () => {
+    const obs = await page.observe();
+    expect(find(obs, "fill", "Type a message")).toMatchObject({ mentions: ["Ann Lee"], bareText: "Hi Ann" });
+    expect(find(obs, "fill", "Type a message").otherAtoms).toBeUndefined();
+    expect(find(obs, "fill", "Doc")).toMatchObject({ mentions: ["Bob Roy"], bareText: "Intro", otherAtoms: 1 });
+    expect(find(obs, "fill", "Notes").mentions).toBeUndefined();
+    await evaluate("document.getElementById('composer').focus()");
+    expect((await page.observe()).focus).toMatchObject({ label: "Type a message", mentions: ["Ann Lee"], multiline: true });
+  });
+
+  it("an append fill types at the end with no select-all, keeps the chip, and does not click it", async () => {
+    const obs = await page.observe();
+    await page.act(find(obs, "fill", "Type a message"), obs, "could you share the report?", { append: true });
+    const after = await page.observe();
+    expect(find(after, "fill", "Type a message")).toMatchObject({ mentions: ["Ann Lee"], bareText: "Hi Ann could you share the report?" });
+    expect(await evaluate("document.querySelectorAll('#composer [data-mention-id]').length")).toBe(1);
+    expect(await evaluate("window.chipDowns")).toBe(0);
+  });
+
+  it("a field that is all chip: an append fill never clicks the chip, and a plain fill replaces it, as before", async () => {
+    const obs = await page.observe();
+    await expect(page.act(find(obs, "fill", "Big chip"), obs, "hello", { append: true })).rejects.toBeInstanceOf(StalePage);
+    expect(await evaluate("window.chipDowns")).toBe(0);
+    await page.act(find(obs, "fill", "Big chip"), obs, "hello");
+    expect(find(await page.observe(), "fill", "Big chip").value).toBe("hello");
+    await page.navigate(mentionUrl, NAV_MS);
+  });
+});
+
 describe.skipIf(process.env["JEV_LIVE"] !== "1")("one-shot CLI (live Chrome)", () => {
   it("SIGINT during the Chrome launch closes Chrome and removes the temporary profile", async () => {
     // A stand-in for the API: it serves the fixture and holds every other request open. The run has the profile,

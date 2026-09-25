@@ -65,9 +65,13 @@ export interface Action {
   label: string;                      // accessible name, or "<name> → <option>" for a select option
   value?: string;                     // current field value or the option value for a select action
   current_value?: string;             // selected option labels for a select action
-  checked?: string;
+  checked?: string;                   // aria-checked, a native checkbox, or for an option its checkbox or data-state="checked"
   selected?: string;
+  /** aria-selected of an option in a combobox or cmdk list: the option that Enter picks, not a chosen one. */
+  highlighted?: string;
   expanded?: string;
+  /** Names of the mention chips in an editor, in order. Absent when it has none. Jev sees them on the field row. */
+  mentions?: string[];
   delta?: number;                     // scroll pixels
   rect?: { x: number; y: number; w: number; h: number };
   // Field facts for assistant-written text. Set by the snapshot; never sent to Jev.
@@ -76,7 +80,16 @@ export interface Action {
   maxLength?: number;                 // INPUT/TEXTAREA maxLength when > 0
   inputType?: string;                 // INPUT type, lowercased; absent for other tags
   autocomplete?: string;              // autocomplete attribute, lowercased, when set
+  /** The popups around the element, innermost first: dialog, alertdialog, listbox, and menu roles, <dialog>, and Radix popper wrappers. Absent outside a popup. */
+  popup?: number[];
+  /** The text of an editor with mention chips outside its chips (textContent, whitespace squashed). Set only with `mentions`. */
+  bareText?: string;
+  /** Atomic inline elements of an editor that are not mention chips (images, embeds, variables). Absent when 0. */
+  otherAtoms?: number;
 }
+
+/** How a fill types. `append`: put the text at the end of the field, with no select-all; the field keeps its mention chips. */
+export interface FillOptions { append?: boolean }
 
 export interface Observation {
   url: string;
@@ -96,6 +109,10 @@ export interface Observation {
     submitDefault?: string;
     /** The focused element is a textarea, a contenteditable, or aria-multiline. Never sent to Jev. */
     multiline?: boolean;
+    /** The mention chips of the focused editor. Absent when it has none. */
+    mentions?: string[];
+    /** The popups around the focused element, as `Action.popup`. Never sent to Jev. */
+    popup?: number[];
   } | null;
   /** Semantic marker of the whole page. Opaque. Used by `Page.fresh`. */
   marker: unknown;
@@ -165,8 +182,13 @@ export interface Page {
   observe(): Promise<Observation>;
   /** True when the page still matches `obs`. With a click, fill, or select action, compares the page key and that node's guard only. With a scroll action, the page key only. Without an action, the whole marker. */
   fresh(obs: Observation, action?: Action): Promise<boolean>;
-  /** Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws StalePage when anything changed; nothing is executed then. `text` is required for a fill. */
-  act(action: Action, obs: Observation, text?: string): Promise<void>;
+  /**
+   * Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws
+   * StalePage when anything changed; nothing is executed then. `text` is required for a fill. A fill clicks a point that
+   * is not on a mention chip or another atom of an editor when the field has one. With `fill.append` it types at the end
+   * of the field with no select-all, and never clicks an atom.
+   */
+  act(action: Action, obs: Observation, text?: string, fill?: FillOptions): Promise<void>;
   /** Press one key on the focused element (for example "Enter", "Escape"). With `obs`, throws StalePage when the page key no longer matches the observation; nothing is pressed then. */
   press(key: string, obs?: Observation): Promise<void>;
   /** Navigate the tab and wait for document.readyState === "complete", polling every 20 ms, up to `timeoutMs`. */

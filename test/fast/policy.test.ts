@@ -6,7 +6,7 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, GENERATE, MENTION_RULE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, cutText, mentionMatches, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Observation } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
@@ -557,5 +557,93 @@ describe("value heads: one per TYPE_TEXT field", () => {
     };
     expect(readStep(answers, b.meta, inp).click).toMatchObject({ actionId: "e2", key: "2", label: "Send", conf: 0.9 });
     expect(readStep({ ...answers, operation: { type: "choice", choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9 } } }, b.meta, inp).click).toBeUndefined();
+  });
+});
+
+describe("mention facts", () => {
+  const TASK = "mention Ann Lee and ask her for the report status";
+  const PLACEHOLDER = "Type a message — use @ to tag agents, sources & artifacts";
+  const composer = (value = "", over: Record<string, unknown> = {}) => [
+    el("e1", "fill", PLACEHOLDER, "textbox", { node: 1, value, form: 1, multiline: true, ...over }),
+    el("e2", "click", `Open ${PLACEHOLDER}`, "textbox", { node: 1, value, form: 1, multiline: true }),
+    el("e3", "click", "Mention", "button", { node: 2, form: 1 }),
+    el("e4", "click", "Send message", "button", { node: 3, form: 1 }),
+  ];
+  const focusOn = (value: string, mentions?: string[]) => ({ node: 1, label: PLACEHOLDER, role: "textbox", submitLabel: "Send message", editable: true, value, form: 1, multiline: true, popup: [9], ...(mentions ? { mentions } : {}) });
+  const rulesOf = (q: unknown): unknown => (q as ChoiceQuestion).instructions;
+
+  it("adds the mention rule, and mentions: none on an empty message field, only when the task asks to mention someone", () => {
+    const page = obs("https://chat.example/", composer("Hi Ann"), "chat", { focus: focusOn("Hi Ann") });
+    const b = buildStep(input({ task: TASK, obs: page, spans: extractSpans(TASK) }));
+    const state = b.state as { elements: { label: string; mentions?: unknown }[]; focus: Record<string, unknown> };
+    expect(state.elements[0]).toMatchObject({ label: PLACEHOLDER, mentions: "none" });
+    expect(state.elements.slice(1).some((e) => "mentions" in e)).toBe(false);
+    expect(state.focus).toEqual({ node: 1, label: PLACEHOLDER, role: "textbox", submitLabel: "Send message", editable: true, value: "Hi Ann", mentions: "none" });
+    const rule = JSON.stringify(MENTION_RULE).slice(1, -1);
+    expect(JSON.stringify(rulesOf(b.questions["operation"]))).toContain(rule);
+    expect(JSON.stringify(rulesOf(b.questions["click_target"]))).toContain(rule);
+    expect(rulesFor("act", true)).toEqual([...RULES, MENTION_RULE]);
+
+    const plain = 'Send "Hi team" in the chat';
+    const q = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
+    expect(JSON.stringify(q.state)).not.toContain("mentions");
+    expect(JSON.stringify(q.questions)).not.toContain(rule);
+  });
+
+  it("shows the chips of a field on its row and in focus in any task, and never the code facts", () => {
+    const page = obs("https://chat.example/", composer("Hi Ann @Ann Lee", { mentions: ["Ann Lee"], bareText: "Hi Ann", otherAtoms: 1, popup: [4] }), "chat", { focus: focusOn("Hi Ann @Ann Lee", ["Ann Lee"]) });
+    const plain = 'Send "Hi team" in the chat';
+    const b = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
+    const state = b.state as { elements: Record<string, unknown>[]; focus: Record<string, unknown> };
+    expect(state.elements[0]?.["mentions"]).toEqual(["Ann Lee"]);
+    expect(state.focus["mentions"]).toEqual(["Ann Lee"]);
+    const request = JSON.stringify(b);
+    for (const key of ["bareText", "otherAtoms", "popup"]) expect(request).not.toContain(`"${key}":`);
+  });
+
+  it("an option in a combobox list shows highlighted, not selected, in its row and in the click head", () => {
+    const page = obs("https://chat.example/", [
+      el("e1", "click", "Research Agent", "option", { node: 5, highlighted: "true", popup: [4, 2] }),
+      el("e2", "click", "Ann Lee", "option", { node: 6, highlighted: "false", checked: "true", popup: [4, 2] }),
+      el("e3", "click", "Done (1)", "button", { node: 7, popup: [2] }),
+    ]);
+    const b = buildStep(input({ task: TASK, obs: page, spans: extractSpans(TASK) }));
+    const rows = (b.state as { elements: Record<string, unknown>[] }).elements;
+    expect(rows[0]).toMatchObject({ label: "Research Agent", highlighted: "true" });
+    expect(rows[1]).toMatchObject({ label: "Ann Lee", highlighted: "false", checked: "true" });
+    expect(rows.some((r) => "selected" in r)).toBe(false);
+    const criteria = (b.questions["click_target"] as ChoiceQuestion).criteria as Record<string, Record<string, unknown>>;
+    expect(criteria["1"]).toMatchObject({ element: "[1] Research Agent", highlighted: "true" });
+    expect(criteria["2"]).toMatchObject({ checked: "true", highlighted: "false" });
+  });
+
+  it("a message field never offers a name to mention; a single-line field, such as the picker search, offers it", () => {
+    const spans = extractSpans(TASK);
+    const page = obs("https://chat.example/", [...composer(), el("e5", "fill", "Search sources", "combobox", { node: 8, value: "", form: 2 })], "chat", { doc: 1 });
+    for (const canGenerate of [false, true]) {
+      const b = buildStep(input({ task: TASK, obs: page, spans, canGenerate }));
+      expect(criteriaKeys(b.questions["value_1"])).not.toContain("s1");
+      expect(criteriaKeys(b.questions["value_4"])).toContain("s1");
+    }
+    expect(spans[0]).toMatchObject({ id: "s1", text: "Ann Lee", source: "mention" });
+  });
+
+  it("the key of a message field holds its text: the label no longer changes with it", () => {
+    const [fill, open, button] = composer("Hi Ann");
+    expect(actionKey(fill!)).toBe(`n:1|${PLACEHOLDER}|Hi Ann`);
+    expect(actionKey(open!)).toBe(`n:1|Open ${PLACEHOLDER}|Hi Ann`);
+    expect(actionKey({ ...fill!, value: "" })).not.toBe(actionKey(fill!));
+    expect(actionKey(button!)).toBe("n:2|Mention");
+    expect(actionKey(el("e9", "fill", "Name", "textbox", { node: 9, value: "Ada", multiline: false }))).toBe("n:9|Name");
+  });
+
+  it("mentionMatches: the same words, or every word of the task name", () => {
+    expect(mentionMatches("Ann Lee", "Ann Lee")).toBe(true);
+    expect(mentionMatches("Ann Lee", "@ann.lee")).toBe(true);
+    expect(mentionMatches("Ann Lee", "Ann")).toBe(true);
+    expect(mentionMatches("Research Agent", "@Research Agent")).toBe(true);
+    expect(mentionMatches("Research Agent", "Ann Lee")).toBe(false);
+    expect(mentionMatches("Ann", "Ann Lee")).toBe(false);
+    expect(mentionMatches("", "Ann")).toBe(false);
   });
 });
