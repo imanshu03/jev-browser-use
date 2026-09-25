@@ -109,6 +109,7 @@ export interface RunnerHints {
   confirmNever?: string; // used when the run's confirm setting is "never"; absent uses `noConfirm`, then the CLI text
   value?: string;       // replaces "pass --var key=value (or /var key=value in chat)" for other fields
   credential?: string;  // used for credential fields; absent uses `value`, then the CLI text
+  unattendedWall?: string; // a sign-in wall or captcha in an autonomous run that no person attends; absent uses the CLI text
 }
 
 export function createHuman(opts: { stdin: NodeJS.ReadStream; stderr: NodeJS.WritableStream; forceNonInteractive: boolean; pollMs?: number }): Human {

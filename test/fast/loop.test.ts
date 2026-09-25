@@ -52,7 +52,7 @@ const byUrl = (map: Record<string, PartialAnswers | ((q: Questions, state: unkno
     return other[name] ?? {};
   };
 
-interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[] }
+interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[]; attended?: boolean }
 
 function setup(task: string, script: PageScript, oracle: OracleScript, over: Partial<RunConfig> = {}, opts: SetupOpts = {}) {
   const page = fakePage(script);
@@ -68,7 +68,7 @@ function setup(task: string, script: PageScript, oracle: OracleScript, over: Par
     openPage: async () => { opened += 1; return page; },
     oracle: o, human, log, sleep: async () => undefined, ...(opts.now ? { now: opts.now } : {}), ...(opts.providePage ? { page } : {}), ...(opts.warm ? { warm: opts.warm } : {}),
     ...(opts.text ? { text: opts.text } : {}), ...(opts.signal ? { signal: opts.signal } : {}), ...(opts.hints ? { hints: opts.hints } : {}), ...(opts.fromAssistant ? { fromAssistant: true } : {}),
-    ...(opts.unsent ? { unsent: opts.unsent } : {}),
+    ...(opts.unsent ? { unsent: opts.unsent } : {}), ...(opts.attended !== undefined ? { attended: opts.attended } : {}),
   };
   const runner = new FastRunner(deps);
   return { runner, page, chrome, oracle: o, log, human, counts: () => ({ launches, opened }) };
@@ -2577,6 +2577,196 @@ describe("assistant-written text (generate)", () => {
     expect(Object.keys(r)).toEqual(Object.keys(empty));
     expect(Object.keys(r.stats)).toEqual(Object.keys(empty.stats));
     expect(Object.keys(r.steps[0] ?? {}).sort()).toEqual(Object.keys((await setup("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" }, byUrl({ [HOME.url]: { page_kind: "task_page", operation: "WAIT" } }), { maxSteps: 1 }).runner.run()).steps[0] ?? {}).sort());
+  });
+  describe("25: autonomous runs (confirm autonomous)", () => {
+    /** A Human that fails the test if the loop asks it anything. */
+    const noDialog = (interactive = true): ReturnType<typeof fakeHuman> => {
+      const h = fakeHuman({ interactive });
+      h.confirm = async () => { throw new Error("an autonomous run opened a dialog"); };
+      return h;
+    };
+    const AUTO = { confirm: "autonomous" } as const;
+    const waitOp: Decide = () => ({ page_kind: "task_page", operation: "WAIT" });
+
+    it("a destructive Send with no unsent text runs with no dialog; the record holds the audit and the other fields of the form", async () => {
+      const human = noDialog();
+      const t = mail("send the reply", [clickOn("Send"), finish], AUTO, { human, state: { values: { 1: "q3", 3: "Re: Meeting" } } });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(human.prompts).toEqual([]);
+      expect(t.state.sent).toBe("Re: Meeting | ");
+      expect(r.steps[0]).toMatchObject({ gate: "autonomous", risk: "destructive", result: "ok" });
+      // The search box is outside form 7, so the audit does not list it.
+      expect(r.steps[0]?.unattended).toEqual({ action: 'click button "Send"', host: "mail.example", why: ["destructive"], texts: [], fields: [{ label: "Subject", value: "Re: Meeting" }] });
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(t.log.lines.some((l) => l.startsWith("WARN") && l.includes('step 1 unattended: click button "Send" (destructive)'))).toBe(true);
+    });
+
+    it("a click that is not a risk word runs while unsent text is in a field: the text stays (left false); the Send after it takes it out (left true)", async () => {
+      const human = noDialog();
+      const t = mail(TASK, [gen("Reply"), clickOn("Comment"), clickOn("Send"), finish], AUTO, { human, text: fakeText([says({ f1: "Tuesday works." })]) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(human.prompts).toEqual([]);
+      expect(t.state.sent).toBe(" | Tuesday works.");
+      expect(r.steps.map((s) => s.gate)).toEqual([expect.stringMatching(/^generated g1 t1/), "autonomous", "autonomous", "done"]);
+      expect(r.steps[0]?.unattended).toBeUndefined();
+      expect(r.steps[1]?.unattended).toMatchObject({ action: 'click button "Comment"', why: ["unsent_text"], texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: false }] });
+      expect(r.steps[2]?.unattended).toMatchObject({ action: 'click button "Send"', why: ["destructive", "unsent_text"], texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: true }] });
+    });
+
+    it("Enter with unsent text runs and records the audit; the fields come from the focused field's form", async () => {
+      const t = mail(TASK, [gen("Reply"), enterKey, finish], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]), state: { values: { 1: "q3", 3: "Re: Tuesday" } } });
+      const observe = t.page.observe;
+      t.page.observe = async () => {
+        const o = await observe();
+        const v = o.actions.find((a) => a.node === 4)?.value ?? "";
+        return { ...o, focus: { node: 4, label: "Reply", role: "textbox", submitLabel: "Send", editable: true, value: v, form: 7, multiline: true } };
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls).toContainEqual({ op: "press", key: "Enter" });
+      expect(r.steps[1]).toMatchObject({ action: "press_key", gate: "autonomous" });
+      expect(r.steps[1]?.unattended).toEqual({
+        action: 'press Enter on "Reply | Send"', host: "mail.example", why: ["destructive", "unsent_text"],
+        texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: false }], fields: [{ label: "Subject", value: "Re: Tuesday" }],
+      });
+    });
+
+    it("a field that a popover hides after the click keeps its text (left false) while filled lists it; gone from filled, the text left", async () => {
+      for (const [filled, left] of [[true, false], [false, true]] as const) {
+        const t = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]) });
+        const observe = t.page.observe;
+        // After the Comment click, a modal popover hides the form: Reply is not in actions or texts.
+        t.page.observe = async () => {
+          const o = await observe();
+          if (t.state.clicks === 0) return o;
+          return { ...o, actions: o.actions.filter((a) => a.node !== 4), texts: (o.texts ?? []).filter(([n]) => n !== 4), filled: filled ? o.filled ?? [] : (o.filled ?? []).filter((n) => n !== 4) };
+        };
+        const r = await t.runner.run();
+        expect(r.steps[1]?.unattended?.texts, `filled ${filled}`).toEqual([{ label: "Reply", text: "Tuesday works.", chars: 14, left }]);
+      }
+    });
+
+    it("unsent text over 6000 characters does not block; the record keeps the full text", async () => {
+      const note = "word ".repeat(1220).trim();
+      const t = mail("reply to Ann with the note", [typeValue("Reply", "v_note"), clickOn("Comment"), finish], { ...AUTO, vars: { note } }, { fromAssistant: true, human: noDialog() });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(note.length).toBeGreaterThan(LIMITS.confirmTextChars);
+      expect(r.steps[1]?.unattended?.texts).toEqual([{ label: "Reply", text: note, chars: note.length, left: false }]);
+    });
+
+    it.each([
+      ["autonomous", AUTO, () => noDialog()],
+      ["confirmed", {}, () => fakeHuman({ interactive: true, confirm: [true, true] })],
+    ] as const)("a stale %s click writes no audit, and its gate does not go to the WAIT that the next decision takes", async (gate, over, human) => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), waitOp, clickOn("Send"), finish], over, { human: human(), text: fakeText([says({ f1: "Tuesday works." })]) });
+      const act = t.page.act.bind(t.page);
+      let stale = true;
+      t.page.act = async (a, o, value) => {
+        if (a.label === "Send" && stale) { stale = false; throw new StalePage("the page changed"); }
+        await act(a, o, value);
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(r.steps.map((s) => `${s.action}:${s.gate}`)).toEqual([expect.stringMatching(/^fill:generated g1/), "wait:ok", `click:${gate}`, "none:done"]);
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(r.steps.filter((s) => s.unattended).map((s) => s.step)).toEqual(gate === "autonomous" ? [3] : []);
+      expect(t.state.sent).toBe(" | Tuesday works.");
+    });
+
+    it("a dry run writes no audit", async () => {
+      const r = await mail("send the reply", [clickOn("Send")], { ...AUTO, dryRun: true, maxSteps: 1 }, { human: noDialog(), state: { values: { 3: "Re: Meeting" } } }).runner.run();
+      expect(r.steps[0]).toMatchObject({ result: "skipped", error: "dry_run" });
+      expect(r.steps.some((s) => s.unattended)).toBe(false);
+    });
+
+    it("text that an earlier run left is marked earlier_run; the flag does not go back to the session", async () => {
+      const seed = [{ doc: DOC, node: 4, label: "Reply", text: "Tuesday works.", request: "t1" }];
+      const t = mail("click the Comment button", [clickOn("Comment"), finish], AUTO, { human: noDialog(), state: { values: { 4: "Tuesday works." } }, unsent: seed });
+      const r = await t.runner.run();
+      expect(r.steps[0]?.unattended?.texts).toEqual([{ label: "Reply", text: "Tuesday works.", chars: 14, left: false, earlier_run: true }]);
+      expect(t.runner.unsentText()).toEqual([{ ...seed[0], request: null }]);
+    });
+
+    it("a submit with no unsent text is in the audit; under confirm auto it has no audit and no dialog", async () => {
+      const extra = [el("e12", "click", "Save draft", "button", { form: 7 })];
+      const auto = await mail("save the draft", [clickOn("Save draft"), finish], AUTO, { human: noDialog(), state: { extra } }).runner.run();
+      expect(auto.steps[0]).toMatchObject({ risk: "submit", gate: "autonomous", unattended: { action: 'click button "Save draft"', why: ["submit"], texts: [] } });
+      const human = fakeHuman({ interactive: true });
+      const plain = await mail("save the draft", [clickOn("Save draft"), finish], {}, { human, state: { extra } }).runner.run();
+      expect(plain.steps[0]).toMatchObject({ risk: "submit", gate: "ok 0.90 (submit)" });
+      expect(plain.steps[0]?.unattended).toBeUndefined();
+      expect(human.prompts).toEqual([]);
+    });
+
+    it("a fill that replaces text that the run did not type records replaced_chars; a fill of an empty field or over its own text does not", async () => {
+      const t = mail("set the subject and the reply", [typeValue("Subject", "v_subj"), typeValue("Subject", "v_subj2"), typeValue("Reply", "v_r"), finish],
+        { ...AUTO, vars: { subj: "New subject", subj2: "Newer subject", r: "Fine." } }, { human: noDialog(), state: { values: { 3: "Old subject line" } } });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(r.steps[0]?.unattended).toEqual({ action: 'fill textbox "Subject"', host: "mail.example", why: ["replaced"], texts: [{ label: "Subject", text: "New subject", chars: 11, left: false }], fields: [], replaced_chars: 16 });
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(r.steps[2]?.unattended).toBeUndefined();
+      // Only an autonomous run keeps this audit.
+      const plain = await mail("set the subject", [typeValue("Subject", "v_subj"), finish], { vars: { subj: "New subject" } }, { state: { values: { 3: "Old subject line" } } }).runner.run();
+      expect(plain.steps[0]?.unattended).toBeUndefined();
+    });
+
+    it("the audit fields leave out credential, secret, payment, and one-time-code fields", async () => {
+      const extra = [
+        el("e20", "fill", "Card number", "textbox", { form: 7 }), el("e21", "fill", "Billing", "textbox", { form: 7, autocomplete: "cc-number" }),
+        el("e22", "fill", "Verification code", "textbox", { form: 7 }), el("e23", "fill", "API token", "textbox", { form: 7 }),
+        el("e24", "fill", "Enter it", "textbox", { form: 7, autocomplete: "one-time-code" }), el("e25", "fill", "Notes", "textbox", { form: 7 }),
+      ];
+      const values = { 3: "Re: Meeting", 20: "4111 1111 1111 1111", 21: "4111", 22: "123456", 23: "tok-1", 24: "654321", 25: "call me" };
+      const r = await mail("send the reply", [clickOn("Send"), finish], AUTO, { human: noDialog(), state: { extra, values } }).runner.run();
+      expect(r.steps[0]?.unattended?.fields).toEqual([{ label: "Subject", value: "Re: Meeting" }, { label: "Notes", value: "call me" }]);
+      expect(JSON.stringify(r.steps)).not.toMatch(/4111|123456|654321|tok-1/);
+    });
+
+    it("an audited click whose input throws keeps a failed record with the audit: it may have run", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send")], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]) });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => {
+        if (a.label === "Send") throw Object.assign(new Error("the target closed"), { name: "CdpError" });
+        await act(a, o, value);
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("failed");
+      expect(r.error?.kind).toBe("browser");
+      expect(r.steps[1]).toMatchObject({ result: "failed", gate: "autonomous", error: "may have run: the target closed", unattended: { why: ["destructive", "unsent_text"], texts: [{ label: "Reply", left: null }] } });
+    });
+
+    it("a one-time-code or password field with a plain label never takes a task or var value; a secret var in the CLI still can", async () => {
+      const extra = [el("e10", "fill", "Enter it", "textbox", { form: 7, inputType: "text", autocomplete: "one-time-code" }), el("e11", "fill", "Key", "textbox", { form: 7, inputType: "text", autocomplete: "new-password" })];
+      for (const fromAssistant of [true, false]) {
+        const r = await mail("enter the code", [typeValue("Enter it", "v_num")], { ...AUTO, vars: { num: "123456" } }, { human: noDialog(), fromAssistant, state: { extra } }).runner.run();
+        expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: 'field "Enter it" is a credential and needs a value: pass --var key=value (or /var key=value in chat)' });
+      }
+      const gen2 = await mail("set a key", [gen("Key")], AUTO, { human: noDialog(), text: fakeText([says({ f1: "x" })]), state: { extra } }).runner.run();
+      expect(gen2.blocked?.kind).toBe("needs_credential");
+      const cli = mail("enter the code", [typeValue("Enter it", "v_otp"), finish], { vars: { otp: "123456" } }, { state: { extra } });
+      expect((await cli.runner.run()).outcome).toBe("done");
+      expect(fills(cli)).toEqual([{ op: "act", id: "e10", kind: "fill", text: "123456" }]);
+    });
+  });
+
+  it("26: an autonomous run with no person blocks at once on a sign-in wall; with a person the headed run pauses", async () => {
+    const script = byUrl({ [LOGIN.url]: { page_kind: "sign_in_wall", operation: "BLOCKED", blocked_reason: "needs_sign_in" } }, { wall: { wall: { choice: "signin_wall", confidence: 0.9 } } });
+    const hints: RunnerHints = { unattendedWall: "NO PERSON" };
+    const alone = setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { headed: true, confirm: "autonomous" }, { human: fakeHuman({ interactive: false }), hints });
+    const r = await alone.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_sign_in", hint: "NO PERSON" });
+    expect(alone.human.prompts).toEqual([]);
+    const cli = await setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { confirm: "autonomous" }).runner.run();
+    expect(cli.blocked?.hint).toBe("an autonomous run with no person at a TTY does not wait for a sign-in; sign in first (run with --headed on a TTY), then run again");
+    // The MCP Human of an autonomous run is never interactive; `attended` says that a person can sign in.
+    const person = setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { headed: true, confirm: "autonomous" }, { human: fakeHuman({ interactive: false }), attended: true });
+    const r2 = await person.runner.run();
+    expect(person.human.prompts.filter((p) => p.startsWith("pause:"))).toHaveLength(1);
+    expect(r2.blocked?.hint).toContain("pause used up or timed out");
   });
 });
 

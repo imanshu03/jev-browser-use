@@ -36,7 +36,9 @@ Options:
   --step-timeout <ms>        Per browser command. Default 30000.
   --run-timeout <ms>         Default 600000.
   --pause-timeout <ms>       Default 300000.
-  --confirm <auto|always|never>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+  --confirm <auto|always|never|autonomous>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+                             autonomous: no action asks or blocks for a person; each step record of such an action
+                             holds an "unattended" audit. cdp and chromium only.
   --dry-run                  Decide and log; never act.
   --session <name>           Default jev-<8 hex>.
   --model <name>             Default jev-latest.
@@ -107,7 +109,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       case "--pause-timeout": cfg.pauseTimeoutMs = num(next(i, a), a, 1000, 86_400_000); i++; break;
       case "--confirm": {
         const c = next(i, a); i++;
-        if (c !== "auto" && c !== "always" && c !== "never") throw new UsageError("--confirm must be auto, always, or never");
+        if (c !== "auto" && c !== "always" && c !== "never" && c !== "autonomous") throw new UsageError("--confirm must be auto, always, never, or autonomous");
         cfg.confirm = c; break;
       }
       case "--dry-run": cfg.dryRun = true; break;
@@ -125,6 +127,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       default: throw new UsageError(`unknown flag ${a}`);
     }
   }
+  // The vercel engine has no audit of the actions that a run does with no dialog.
+  if (cfg.confirm === "autonomous" && cfg.engine === "vercel") throw new UsageError("--confirm autonomous needs --engine cdp or chromium");
   // An env value such as "abc" gives NaN, which the old range check let through.
   if (!Number.isFinite(cfg.maxSteps) || cfg.maxSteps > 100 || cfg.maxSteps < 1) throw new UsageError("--max-steps must be between 1 and 100");
   cfg.task = positional.join(" ").trim();
