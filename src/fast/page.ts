@@ -4,9 +4,9 @@
 // Copyright (c) 2026 Browser Use.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
+import type { Action, Chrome, Observation, Page, PageOptions, Popup } from "./model.js";
 import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, commitScript, pageKeyGuardScript, popupScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -257,6 +257,21 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       await call("Input.dispatchKeyEvent", { ...base, type: "keyDown", ...(def.text !== undefined ? { text: def.text, unmodifiedText: def.text } : {}) });
       await call("Input.dispatchKeyEvent", { ...base, type: "keyUp" });
       pendingSettle = null;
+    },
+
+    async popup(action, focus) {
+      if (typeof action.node !== "number") return null;
+      const r = await evaluate(popupScript(action, focus === true));
+      return r.exception || r.value === null ? null : (r.value as Popup);
+    },
+
+    async commit(action, obs) {
+      // The key goes to the field the decision saw: same document, URL, values, and the same field guard.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Field changed since this decision. Observe again.");
+      const r = await evaluate(commitScript(action));
+      if (r.exception || r.value === null || typeof r.value !== "object") throw new StalePage("Document changed during evaluation");
+      pendingSettle = null;
+      return r.value as { prevented: boolean } | { skipped: "gone" | "focus" };
     },
 
     async back(timeoutMs) {

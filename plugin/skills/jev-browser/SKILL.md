@@ -23,6 +23,8 @@ TypeSafe Jev drives Chrome and chooses every browser action. You start the run, 
 
 If `result.blocked.kind` is `needs_confirmation`, the text that you wrote can still be in the field. You cannot do the action yourself, so do not offer to. Follow `result.blocked.hint`: it tells the user to check the text in the Chrome window and do the action there, or, for a headless run, to run the task again with `headed: true`. A new `browse` call on the same page also asks the user before each click or Enter while that text is in the field.
 
+If `result.blocked.hint` starts with `typed value not added`, the form was not sent. A recipients, participants, or tags field still holds a value that it did not add as a chip. Tell the user the field and the value from the hint. Put each recipient, participant, or tag in quotes in the task: Jev types them. You do not write them.
+
 ## Write text
 
 - Write the text that the task asks for, as the user would write it. Write only the field text, with no notes and no placeholders.

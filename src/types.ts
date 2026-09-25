@@ -230,6 +230,7 @@ export const LIMITS = {
   fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,
   fastElementsTrimmed: 150, answerLines: 254, answerLineChars: 160,
   valueHeads: 8,                  // fields with a value head in the step request; a fill of another field asks in a second request
+  tokenSettleMs: 1_500, tokenPollMs: 150, // chip-field gate: poll the field's popup until it is the same two times in a row, at most tokenSettleMs
   // Assistant-written text (MCP runs only).
   textRequests: 3,                // text requests per run
   textFields: 4,                  // target + up to 3 same-form fields

@@ -6,9 +6,9 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
-import type { Observation } from "../../src/fast/model.js";
+import type { Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
 
 const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
@@ -557,5 +557,40 @@ describe("value heads: one per TYPE_TEXT field", () => {
     };
     expect(readStep(answers, b.meta, inp).click).toMatchObject({ actionId: "e2", key: "2", label: "Send", conf: 0.9 });
     expect(readStep({ ...answers, operation: { type: "choice", choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9 } } }, b.meta, inp).click).toBeUndefined();
+  });
+});
+
+describe("chip (token) fields", () => {
+  const facts = (over: Partial<TokenFacts> = {}): TokenFacts => ({ items: [[1, "Meeting Participants (Optional)", 0]], chips: [], ...over });
+  const field = (token?: TokenFacts) => el("e1", "fill", "textbox", "textbox", { node: 1, value: "", inputType: "text", ...(token ? { token } : {}) });
+
+  it("tokenEvidence: strong for a learned field or a multiselect listbox, weak for the chip shape, null otherwise", () => {
+    expect(tokenEvidence(field(facts({ learned: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ multi: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ chips: ["ann@example.com Remove participant"] })))).toBe("weak");
+    // An open popup alone is not evidence here: the loop counts only a popup that opened with a fill.
+    expect(tokenEvidence(field(facts({ popup: true })))).toBeNull();
+    expect(tokenEvidence(field(facts()))).toBeNull();
+    expect(tokenEvidence(field())).toBeNull();
+    expect(tokenEvidence({ ...field(facts({ learned: true })), kind: "click" })).toBeNull();
+  });
+
+  it("canWriteInto: false only on strong evidence; the chip shape alone keeps a text field writable", () => {
+    expect(canWriteInto(field(facts({ learned: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ multi: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ chips: ["Default branch"] })))).toBe(true);
+    expect(canWriteInto(field(facts({ popup: true })))).toBe(true);
+  });
+
+  it("the chip facts never reach the request; a strong field's value head offers no generate", () => {
+    const page = obs("https://a.b/upload", [
+      field(facts({ learned: true, chips: ["ann@example.com Remove participant"], popup: true })),
+      el("e2", "fill", "Title", "textbox", { node: 2, value: "", inputType: "text", token: facts() }),
+    ]);
+    const b = buildStep(input({ obs: page, canGenerate: true, spans: [span("s1", "bob@example.com")] }));
+    const request = JSON.stringify([b.state, b.questions]);
+    for (const key of ["token", "items", "chips", "learned", "multi", "popup"]) expect(request).not.toContain(`"${key}":`);
+    expect(criteriaKeys(b.questions["value_1"])).not.toContain("generate");
+    expect(criteriaKeys(b.questions["value_2"])).toContain("generate");
   });
 });

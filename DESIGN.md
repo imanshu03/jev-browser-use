@@ -129,6 +129,7 @@ In MCP runs, the assistant can add generated spans. A generated span has the id 
 - An input has no type or the type `text`. This excludes email, phone, and URL inputs, which the snapshot maps to `textbox`.
 - The `autocomplete` token does not match `EXACT_AUTOCOMPLETE` (for example `email`, `tel`, `username`, `one-time-code`, `cc-*`, and address tokens).
 - The label matches neither `CREDENTIAL_NAME` nor `EXACT_VALUE_NAME` (recipients, amounts, prices, card and account numbers, address parts, user names, URLs, keys, tokens, and search).
+- The field is not a chip field with strong evidence (section 5.1, chip-field gate). Recipients, participants, and tags take exact values. The chip shape alone (weak evidence) does not change this rule.
 
 With `fromAssistant`, the assistant wrote the task and the vars, so code does not treat them as the user's own words. A credential field never takes a value, secret or not; the hint tells the user to type it in the Chrome window. A non-secret task or var value that fills a multiline field counts as unsent assistant text (section 5.1). Every non-secret task or var value goes through `sanitizeText` before it is typed, as generated text does, so the page gets the text that the dialog shows. A secret value is typed as it is. Step records and history keep at most 120 characters of a typed value; the page gets the full text. The value is redacted before it is cut, so a cut never keeps part of a secret.
 
@@ -329,6 +330,37 @@ The MCP server keeps the entries with its tab (section 7). `FastRunnerDeps.unsen
 
 Known limits of the gate: TYPE_TEXT, SELECT, scroll, WAIT, and GO_BACK are not gated. A `div[role=textbox]` that is not contenteditable is not in `filled` or `texts`, so its entry does not gate while it is out of view. While no rendered control holds the text, for example while a Preview tab shows it, a click does not ask; a page that sends the text from its own state then sends it without a dialog. In one document, a later click asks again while a field out of view still holds the text. A control that the page fills with a word of a sent short reply, or a query that an earlier run typed, still takes the sent entry: the next click shows the sent text again, and an unattended run blocks.
 
+**Chip-field gate.** A chip (token) field adds each typed value as a chip: recipients, participants, and tags. Many of these fields add a chip only on Enter or on a click on a suggestion. A fill types the value into the draft of the field, and a submit then sends the form without the value. In the bench, Jev pressed Enter after the first email, but after the second email it went to the next field in every run. The gate stops a submit while a value is in a draft. The loop code is `tokenGate` and the functions near it in `src/fast/loop.ts`.
+
+Evidence. The snapshot gives each single-line text input its chip facts (section 7.1). The loop reads two levels:
+
+- Strong. This run saw the field add a value as a chip: a trusted Enter in the field, or a click, cleared the draft, and a new element with text and a named remove control appeared before the field in its own box. The document and the URL did not change. A combobox whose controlled listbox is `aria-multiselectable` is also strong evidence. The loop keeps both kinds for the rest of the run, because react-select links its listbox only while the menu is open. A chat that sends its message to a list outside the box, an inline editor whose input goes away, and a search box that keeps its query do not qualify.
+- Weak. The chip shape (elements with a remove control before the field in its box), or a popup that opened next to the field with the fill.
+
+Only strong evidence changes `canWriteInto` (section 3.3) or lets code send a key. A textarea, a contenteditable, an aria-multiline field, and a field whose parent holds a send or submit control have no facts. A chip that holds a label, or whose text is the name of the field, does not count. The box does not go past a table cell.
+
+Draft record. After a fill of a task or `--var` value into a field with evidence, the loop records the value in `typedToken`. It never records a secret or a generated value. `observe()` does not end a record: a draft that the page cleared on blur is lost, not added. The value is pending while the draft holds it and no chip holds it, or while the draft is empty and no element before the field holds it. A record ends when a chip holds the value, when a new fill of the field replaces it, when the field holds another value or is gone, on another document, and after a click on an element that holds the value (a suggestion). Enter in a field with weak evidence also ends it: the value went with the Enter.
+
+Gates:
+
+- Leave gate: before a fill of another field, and before a fill that replaces a pending draft with another value.
+- Submit gate: before a click with submit or destructive risk in the same form or dialog (every form when the button has no form), before Enter in another field of the focused form, and before DONE of an act goal.
+
+Each gate does these steps:
+
+1. Wait for the popup of the field to settle (`settlePopup`). Read the popup every `LIMITS.tokenPollMs` (150 ms) until two reads show the same text and options and nothing loads, at most `LIMITS.tokenSettleMs` (1.5 s). A debounced search fills its list late. Without the wait, the hint came while the member list loaded, Jev pressed Enter on the name, and the page added the name instead of the member. `settlePopup` is one small function, so a causal settle can replace it.
+2. If the evidence is strong, the draft holds the value, the popup shows no options, and the popup did not open and close again, a script Enter adds the value. The gate focuses the field first. The loop observes again and checks the result. When a chip was added, the step asks Jev again on the new page, with no retry reason; the history shows `Enter in "<label>"` with the value. When the page did not take the key, the hint follows.
+3. Otherwise the step asks again with a hint: `"<label>" holds "<value>", which is not added yet. If it belongs there, click its matching suggestion or press Enter in that field`. A lost value gets `"<label>" lost "<value>": the field is empty, and no chip holds it` and "type it again". On strong evidence the hint bans the gated action for the re-ask (for DONE, DONE). A weak value gets its hint one time, and the action then goes on, so a search box with suggestions keeps working. The hint does not tell Jev to add the value: a fill into the wrong field must not be added because of it.
+4. A strong value that is still pending after its hint: a leave gate lets the fill go on, and a submit gate blocks `ambiguous` with `typed value not added: <hint>. The form is not sent without it`. The form is never sent without the value.
+
+Code never presses Enter while options show. With options, Enter can add the active option instead of the typed text: a react-select field made "debug" from "bug", and on macOS react-select does not set `aria-activedescendant`. When an option list showed for a value, code never presses Enter for that value later, also when the popup closed.
+
+Script Enter. A script key event is not trusted, so it has no default action. It cannot submit a form; only the page's own key handler can act on it. `Page.commit` checks the page key and the field guard, then sends keydown, keypress when the keydown was not handled, and keyup to the focused field only. The check after it reads the new chip with its title, aria-label, and value-like data-* values, so a chip that shows "Bob Stone" for `bob@example.com` matches. With no option list, any new chip counts: a free-text commit cannot pick another value. With options, the new chip must hold the value. When the draft lost the value and no chip holds it, or the field or the document went away, the run blocks `ambiguous`.
+
+Jev's Enter in a chip field with strong evidence and a draft sends the script Enter first, with the `data_entry` risk. When the page handled it (preventDefault, or a change of the draft or the box), the step ends there, and a wrong or lost value blocks as above. When the page did not handle it, the trusted Enter follows with its own risk and gates. This keeps Enter-to-search in a search box with filter chips. Unsent assistant text keeps the trusted path, because its dialog shows the text.
+
+Known limits: before the first chip, a field without ARIA has no strong evidence, so the first value depends on Jev's Enter (Jev pressed it in every bench run since round 1) and on one weak hint. Jev's own Enter adds the typed text also when a matching suggestion shows. A page that reads only trusted keys, or keys on keyup, ignores the script Enter; the hint and the block then apply. An unnamed field shows as "textbox" after its first chip: the label fallback is a separate change. DONE can come while the page still shows "Finalizing..."; that is a separate fix.
+
 ### 5.2 Direct iteration
 
 1. Check the cancel signal and the step and run limits, then use the held post-action observation or observe the page. The run time does not include time spent waiting for assistant text.
@@ -447,6 +479,16 @@ Before a targeted action, compare the page key and target guard. The page key in
 Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change, form change, or rich-text editor value change invalidates a pending Enter action. Native inputs, textareas, and contenteditable editors expose their values; contenteditable editors support true, empty, and plaintext-only attribute forms. Text changes elsewhere need not invalidate an unrelated targeted click or fill.
 
 Document scrolling and panel scrolling are separate actions. A panel action retains its node identity and scroll position. Prefer a scrollable panel with focus, then the largest visible panel. Clip observations to the panel viewport and check that the panel is still usable before scrolling.
+
+A single-line text input also has its chip facts, `Action.token` (`TokenFacts` in `src/fast/model.ts`). They never reach Jev. The own box of the field is the highest ancestor, up to 3 levels up, that holds no other field and no send or submit control. It does not go past a table cell or row. The facts are:
+
+- `items`: the elements before the field in its box, nearest last, at most 20. Each item has an id from its own counter, so element node ids do not change. It also has its text, at most 200 characters: the text nodes without the remove control, then the title, aria-label, and value-like data-* values. The snapshot does not use innerText, because CSS text-transform changes it. Last, the remove control: 2 for a remove name (remove, delete, clear, deselect, unselect, dismiss, or an x) or a library tag marker (`data-tag-index`), 1 for an icon-only button, and 0 for none. A label, a legend, or an element whose text is the name of the field gets 0.
+- `chips`: the texts of the items with a named remove control, or with an icon-only one on a combobox or an `aria-haspopup` field.
+- `multi`: a combobox whose controlled listbox is aria-multiselectable.
+- `popup`: a popup next to the field is open, or the field is `aria-expanded`. The popup is an element that the field controls. Only while the field has focus, it can also be a listbox, menu, dialog, or Radix popper within 48 px of the box, or a positioned element with text after the field in its box. A popup found by its place belongs to the focused field, because a list under one field also lies next to the field below it. A popup in its closing state (`data-state="closed"` during the exit animation) is not open: right after a fill of Title, the closing member list of the participants field lay next to Title, and Title got a false hint.
+- `learned`: the loop sets it, never the page, for a field with strong evidence that this run learned.
+
+`Page.popup` reads the popup of a field: open, text, options (at most 20), and busy (aria-busy, a progress bar, a spinner class, or the words "loading" and "searching"). An `aria-expanded` field whose popup the script cannot find reads as busy, because its options are unknown; code then does not press Enter. It can focus the field first. `Page.commit` sends the script Enter of the chip-field gate (section 5.1).
 
 After input, use bounded readiness and render checks. Editable-combobox fills can wait briefly for options. A document that never reaches `readyState=complete` is accepted after the cap instead of paying the full wait on every observation. Navigation-context loss is a stale-page condition; a closed transport or command timeout is a browser failure.
 
@@ -570,6 +612,7 @@ Maintain coverage for these behaviors:
 | Decisions | Every goal, supported action, completion hold, block reason, risk band, runner-up rejection, missing value, dry run, repeat and wait cap |
 | Vercel execution | Tournament, dependent CONFIRM, select options, page-derived values, covered-click retry, Escape and RECOVER, extraction and VERIFY |
 | Direct execution | Fresh and stale targets, focus changes, form changes, covered geometry, dynamic text, native select, document and panel scrolling |
+| Chip fields | Facts of the shapes S1-S6 and the participants copy in [test/fixtures/live/chips.html](test/fixtures/live/chips.html), learned and multiselect evidence, the leave and submit gates, the popup settle, the script Enter and its check, a lost value, weak hints, Jev's Enter, and the blocks |
 | Secrets | Real fill followed by another request, quotes and backslashes, newlines, nested log data, long values before trimming, final results, unchanged browser input |
 | Human interaction | Headless block, headed polling without a TTY, TTY resume and abort, prompt refusal, exhausted pause budget |
 | Ownership | Concurrent profile launch and refresh rejected, existing locks retained, lock release after exit, temporary cleanup, attached tab preservation |
@@ -587,6 +630,7 @@ The main risks and controls are:
 - Similar targets: retain role and row context, apply confidence thresholds, and report ambiguity with leading probabilities.
 - Premature completion: require detailed evidence, apply goal-specific completion checks, and suppress rejected DONE choices.
 - Wrong field or value: restrict candidates, check current values, apply credential rules, and use dependent questions where the engine supports them.
+- A typed value that a chip field did not add: gate each fill of another field, submit, Enter, and DONE; add the value with a script Enter only on strong evidence and with no options shown; block the submit when the value is still pending after its hint.
 - Slow or changing pages: use bounded settling, fresh observations, and stable target identities before retrying.
 - False stalls: include field and scroll state in fingerprints and count action signatures.
 - Excessive requests: cap candidates and history, apply ordered trimming, and block after budget exhaustion.

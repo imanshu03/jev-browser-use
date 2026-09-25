@@ -18,11 +18,11 @@ import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
 import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord } from "../types.js";
 import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
-import type { Action, Chrome, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
+import type { Action, Chrome, FastHistoryEntry, Observation, Page, Popup, UnsentText } from "./model.js";
 import { StalePage } from "./model.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
 import type { Decision, StepInput, StepMeta, Target, TargetOp } from "./policy.js";
-import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, readStep, readValue, top3 } from "./policy.js";
+import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, readStep, readValue, tokenEvidence, top3 } from "./policy.js";
 
 export { actionKey };
 
@@ -99,6 +99,29 @@ interface TypedText {
   /** A click, Enter, select, or back ran after the fill. The text can have gone out with it. */
   acted: boolean;
 }
+
+/** A value that a fill of this run typed into a chip (token) field. It is pending until a chip holds it. */
+interface TypedToken {
+  doc: number | undefined;
+  node: number;
+  /** The field label as a hint gives it: redacted, flat, cut. */
+  label: string;
+  text: string;
+  /** The form or dialog of the field at the fill. */
+  form: number | null;
+  /** A popup was open next to the field after the fill or at a gate: the field can offer options for the value. */
+  popup: boolean;
+  /** The popup listed options for this value: Enter can pick one of them instead of the typed value. */
+  picks: boolean;
+  /** A gate gave the hint for this value. */
+  hinted: boolean;
+}
+
+/** A pending chip value on one observation: its draft holds it, or the draft lost it and nothing before the field holds it. */
+interface PendingToken { key: string; e: TypedToken; state: "draft" | "lost"; field: Action | undefined; strong: boolean }
+
+/** The result of a script Enter in a chip field (`commitToken`). */
+type TokenCommit = { result: "added" | "ignored" | "kept" | "wrong" | "cleared"; next: Observation | null; hint: string };
 
 /** Whitespace runs become one space. A page can change the line breaks of a text that it shows in a field. */
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -259,6 +282,13 @@ export class FastRunner {
   private readonly typedText = new Map<string, TypedText>();
   /** Ids of the spans that type a text again after a fill that did not stay. */
   private readonly retypes = new Set<string>();
+  /** `<doc>|<node>` of the fields that this run saw add a value as a chip, or that showed a multiselect listbox (strong evidence). */
+  private readonly tokenFields = new Set<string>();
+  /**
+   * `<doc>|<node>` -> the value that a fill of this run typed into a chip field (see `tokenTyped`). observe() does not end
+   * an entry, as it ends a `typedInto` entry: a draft that the page cleared on blur is lost, not added.
+   */
+  private readonly typedToken = new Map<string, TypedToken>();
 
   constructor(deps: FastRunnerDeps) {
     this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => redact(s, this.spans)) };
@@ -416,7 +446,7 @@ export class FastRunner {
   }
 
   private async observe(): Promise<Observation> {
-    const obs = await (this._page as Page).observe();
+    const obs = this.markTokens(await (this._page as Page).observe());
     this.lastObs = obs;
     // A text that its field showed late counts as typed when this observation shows it.
     this.seeTyped(obs);
@@ -676,7 +706,14 @@ export class FastRunner {
     }
     if (d.operation === null || !(d.operation in ACTION_OF)) return rec(this.blocked(ctx, "ambiguous", `no usable operation answer (${d.operation ?? "missing"})`, opTop, obs.url));
 
-    if (d.operation === "DONE") return rec(await this.finish(d, obs, ctx));
+    if (d.operation === "DONE") {
+      // A value typed into a chip field that is not added yet: DONE asks first (tokenGate).
+      if (this.goal === "act") {
+        const gated = await this.tokenGate(true, this.pendingTokens(obs, null), obs, ctx, () => { this.doneBannedUntil = Math.max(this.doneBannedUntil, this.stepNo); });
+        if (gated) return gated;
+      }
+      return rec(await this.finish(d, obs, ctx));
+    }
     if (d.operation === "BLOCKED") {
       const kind = BLOCKED_OF[d.blockedReason ?? "other"] ?? "ambiguous";
       const hint = kind === "needs_credential" ? this.credentialHint("the field") : kind === "overlay" ? "a dialog or overlay covers the page; dismiss it with --headed" : kind === "impossible" ? "the goal cannot be done on this page" : `Jev reported BLOCKED (${d.blockedReason ?? "no reason"})`;
@@ -688,6 +725,17 @@ export class FastRunner {
         ctx.gate = "Enter unavailable: focus an input and fill required text before submitting";
         return { kind: "reask" };
       }
+      const focusNode = obs.focus?.node ?? null;
+      const focused = focusNode === null ? undefined : obs.actions.find((a) => a.kind === "fill" && a.node === focusNode);
+      // Enter in a chip field with strong evidence: a script Enter first (enterToken).
+      if (focused && tokenEvidence(focused) === "strong" && (focused.value ?? "").trim() !== "") {
+        const added = await this.enterToken(d, focused, obs, ctx);
+        if (added) return added;
+      }
+      // Enter in another field can send the form: a value typed into a chip field of that form and not added yet asks first.
+      const focusForm = obs.focus?.form !== undefined ? obs.focus.form : focused?.form ?? null;
+      const gated = await this.tokenGate(true, this.pendingTokens(obs, focusForm, focusNode), obs, ctx, () => undefined);
+      if (gated) return gated;
       const label = [obs.focus?.label, obs.focus?.submitLabel].filter(Boolean).join(" | ");
       // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit.
       const risk: RiskClass = riskOf("CLICK", label) === "destructive" ? "destructive" : "submit";
@@ -787,6 +835,13 @@ export class FastRunner {
       bans.add(key);
       return { kind: "reask" };
     }
+    // A value typed into a chip field that is not added yet: a fill of another field or a submit asks first (tokenGate).
+    const leaving = op === "TYPE_TEXT";
+    if (leaving || (op === "CLICK" && (risk === "submit" || risk === "destructive"))) {
+      const pend = this.pendingTokens(obs, leaving ? null : action.form ?? null, leaving ? action.node : null);
+      const gated = await this.tokenGate(!leaving, pend, obs, ctx, () => this.stepBans.add(key));
+      if (gated) return gated;
+    }
 
     let text: string | null = null;
     let shown: string | null = null;
@@ -800,6 +855,12 @@ export class FastRunner {
       if (typed.kind === "applied") return typed.applied;
       ({ span: used, obs: at, action: target } = typed);
       if (typed.gate !== null) gate = typed.gate;
+      // A fill that replaces a value not added yet with another value asks first.
+      const mine = this.typedToken.get(`${at.doc}|${target.node}`);
+      if (mine && !holdsText(used.text, mine.text)) {
+        const gated = await this.tokenGate(false, this.pendingTokens(at, null).filter((p) => p.e === mine && p.state === "draft"), at, ctx, () => this.stepBans.add(key));
+        if (gated) return gated;
+      }
       // An assistant wrote the task and the vars of an MCP run. Its text loses hidden characters, as generated text
       // does, so the page gets the text that the dialog shows. A secret value is typed exactly.
       text = this.deps.fromAssistant && !used.secret ? sanitizeText(used.text) : used.text;
@@ -826,6 +887,7 @@ export class FastRunner {
     // A fill whose next observation did not settle ran too: its text is in the page, and a later run must not send it
     // unseen.
     if (used && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true);
+    if (used && text !== null && r.kind === "record" && r.rec.result === "ok") this.tokenTyped(used, text, target, at);
     return r;
   }
 
@@ -1211,6 +1273,266 @@ export class FastRunner {
     this.typedText.set(to, r);
   }
 
+  /**
+   * Marks the chip fields of this run (`TokenFacts.learned`) on a copy of `obs`. A multiselect listbox counts for the
+   * rest of the run: react-select links its listbox only while the menu is open.
+   */
+  private markTokens(obs: Observation): Observation {
+    let marked = false;
+    const actions = obs.actions.map((a) => {
+      if (!a.token || a.node === null) return a;
+      const key = `${obs.doc}|${a.node}`;
+      if (a.token.multi) this.tokenFields.add(key);
+      if (!this.tokenFields.has(key) || a.token.learned) return a;
+      marked = true;
+      return { ...a, token: { ...a.token, learned: true as const } };
+    });
+    return marked ? { ...obs, actions } : obs;
+  }
+
+  /**
+   * After a click or Enter on the same document and URL:
+   * - A field whose draft the action cleared, with a new chip before it in its box (an element with text and a named
+   *   remove control), is a chip field for the rest of the run: strong evidence. Enter counts only in the focused field.
+   *   A chat that sends its message to a list outside the box, an inline editor whose input goes away, and a search box
+   *   that keeps its query do not qualify.
+   * - A click on an element that holds a pending value, after which the draft no longer holds it, picked that value:
+   *   the entry ends.
+   * - Enter in a field with weak evidence used its value: the entry ends.
+   */
+  private learnTokens(obs: Observation, next: Observation, clicked: Action | null): void {
+    if (next.doc !== obs.doc || next.url !== obs.url) return;
+    for (const a of obs.actions) {
+      if (a.kind !== "fill" || !a.token || a.node === null || (a.value ?? "").trim() === "" || (!clicked && a.node !== obs.focus?.node)) continue;
+      const b = next.actions.find((x) => x.kind === "fill" && x.node === a.node);
+      if (!b?.token || (b.value ?? "").trim() !== "") continue;
+      const had = new Set(a.token.items.map(([id]) => id));
+      if (!b.token.items.some(([id, text, kind]) => !had.has(id) && kind === 2 && text !== "")) continue;
+      const key = `${obs.doc}|${a.node}`;
+      if (!this.tokenFields.has(key)) this.log.info(`step ${this.stepNo} chip field: "${cutText(this.log.redactor(a.label), LIMITS.nameChars)}" added a value as a chip`);
+      this.tokenFields.add(key);
+    }
+    for (const [key, e] of this.typedToken) {
+      if (e.doc !== obs.doc) continue;
+      const b = next.actions.find((x) => x.kind === "fill" && x.node === e.node);
+      if (clicked) {
+        if (holdsText(clicked.label, e.text) && !holdsText(b?.value ?? "", e.text)) this.typedToken.delete(key);
+      } else if (obs.focus?.node === e.node && !this.tokenFields.has(key) && !(b && tokenEvidence(b) === "strong")) this.typedToken.delete(key);
+    }
+  }
+
+  /**
+   * After a fill: record a typed value in a chip field. The field has evidence on the observation after the fill, or a
+   * popup opened next to it with the fill (weak evidence). A popup that another field showed before the fill can still
+   * lie next to this field: it did not open with the fill. A secret or assistant-written value is never recorded. A fill
+   * ends the earlier entry of its field.
+   */
+  private tokenTyped(span: Span, typed: string, action: Action, obs: Observation): void {
+    if (action.node === null) return;
+    const key = `${obs.doc}|${action.node}`;
+    this.typedToken.delete(key);
+    const after = this.held;
+    if (span.secret || span.source === "generated" || typed.trim() === "" || !after || after.doc !== obs.doc) return;
+    const now = after.actions.find((a) => a.kind === "fill" && a.node === action.node);
+    if (!now?.token) return;
+    const opened = now.token.popup === true && !obs.actions.some((a) => a.token?.popup === true);
+    if (tokenEvidence(now) === null && !opened) return;
+    this.typedToken.set(key, {
+      doc: obs.doc, node: action.node, label: cutText(flatText(this.log.redactor(action.label)), LIMITS.nameChars), text: typed,
+      form: action.form ?? null, popup: now.token.popup === true, picks: false, hinted: false,
+    });
+  }
+
+  /**
+   * Where the value of a chip-field entry is on `obs`:
+   * - added: a chip before the field holds it; or the draft is blank and any element before the field holds it.
+   * - draft: the draft holds it, and no chip does.
+   * - lost: the draft is blank, and nothing before the field holds it (react-select clears the draft on blur).
+   * - gone: another document, the field is gone, or the field holds another value.
+   * A field out of view shows only its value: its draft holds the value, or the entry is gone.
+   */
+  private tokenState(e: TypedToken, obs: Observation): { state: "draft" | "lost" | "added" | "gone"; field?: Action } {
+    if (obs.doc !== e.doc) return { state: "gone" };
+    const field = obs.actions.find((a) => a.kind === "fill" && a.node === e.node);
+    if (!field) {
+      const value = obs.texts?.find(([n]) => n === e.node)?.[1];
+      return { state: value !== undefined && holdsText(value, e.text) ? "draft" : "gone" };
+    }
+    const items = field.token?.items ?? [];
+    const draft = field.value ?? "";
+    if (holdsText(draft, e.text)) return { state: items.some(([, t, k]) => k > 0 && holdsText(t, e.text)) ? "added" : "draft", field };
+    if (draft.trim() !== "") return { state: "gone", field };
+    return { state: items.some(([, t]) => holdsText(t, e.text)) ? "added" : "lost", field };
+  }
+
+  /**
+   * The pending chip-field entries of `obs` in `form` (every form when null), other than the field `except`. An entry
+   * that is added or gone ends here.
+   */
+  private pendingTokens(obs: Observation, form: number | null, except: number | null = null): PendingToken[] {
+    const out: PendingToken[] = [];
+    for (const [key, e] of this.typedToken) {
+      const s = this.tokenState(e, obs);
+      if (s.state === "added" || s.state === "gone") { this.typedToken.delete(key); continue; }
+      if (e.node === except || (form !== null && e.form !== form)) continue;
+      const strong = this.tokenFields.has(key) || (s.field !== undefined && tokenEvidence(s.field) === "strong");
+      out.push({ key, e, state: s.state, field: s.field, strong });
+    }
+    return out;
+  }
+
+  /**
+   * The chip-field gate before a fill of another field (`submit` false), or before a submit click, Enter in another
+   * field, or DONE (`submit` true). `pend`: the pending values in scope. Null when none of them gates the action.
+   * 1. Wait for the popup of the field to settle (`settlePopup`).
+   * 2. A strong value in its draft, with no option in the popup and no popup that opened and closed again: a script
+   *    Enter adds it, and the step asks again on the new page. With options, Enter can pick an option instead of the
+   *    typed value ("bug" became "debug"), so code never presses it then.
+   * 3. Else ask again with a hint that names the field and the value. The hint bans the gated action for the re-ask on
+   *    strong evidence only. A weak value gets its hint one time; then the action goes on, so a search box with
+   *    suggestions keeps working.
+   * 4. A strong value still pending after its hint: a fill of another field goes on, and a submit, Enter, or DONE
+   *    blocks. The form is never sent without the value.
+   */
+  private async tokenGate(submit: boolean, pend: PendingToken[], obs: Observation, ctx: StepCtx, ban: () => void): Promise<Applied | null> {
+    const p = pend.find((x) => !x.e.hinted || (x.strong && submit));
+    if (!p) return null;
+    const label = p.field ? cutText(flatText(this.log.redactor(p.field.label)), LIMITS.nameChars) : p.e.label;
+    const value = cutText(this.log.redactor(p.e.text), LIMITS.spanChars);
+    const holds = p.state === "draft" ? `"${label}" holds "${value}", which is not added yet` : `"${label}" lost "${value}": the field is empty, and no chip holds it`;
+    if (p.e.hinted) return { kind: "record", rec: this.blocked(ctx, "ambiguous", `typed value not added: ${holds}. The form is not sent without it`, [], obs.url) };
+    if (p.field) {
+      const may = p.strong && p.state === "draft" && !p.e.picks && !this.cfg.dryRun;
+      const pop = await this.settlePopup(p.field, may);
+      if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
+      if (pop?.open) p.e.popup = true;
+      if (pop && pop.picks.length > 0) p.e.picks = true;
+      if (may && pop !== null && pop.picks.length === 0 && !pop.busy && (pop.open || !p.e.popup)) {
+        const added = await this.gateCommit(p, label, value, obs, ctx);
+        if (added) return added;
+      }
+    }
+    p.e.hinted = true;
+    if (p.strong) ban();
+    ctx.gate = `${holds}. If it belongs there, ${p.state === "lost" ? "type it again, then " : ""}click its matching suggestion or press Enter in that field`;
+    this.log.info(`step ${this.stepNo} chip gate (${p.strong ? "strong" : "weak"}): ${ctx.gate}`);
+    return { kind: "reask" };
+  }
+
+  /**
+   * The gate's script Enter, on a new observation. Added: the step asks again on the new page. Wrong or cleared: blocked.
+   * Null when the page ignored the key or kept the value: the hint follows.
+   */
+  private async gateCommit(p: PendingToken, label: string, value: string, obs: Observation, ctx: StepCtx): Promise<Applied | null> {
+    let now: Observation;
+    try {
+      now = await this.observeSettled();
+    } catch (e) {
+      if (e instanceof StalePage) return { kind: "record", rec: this.blocked(ctx, "ambiguous", "page keeps changing", [], obs.url) };
+      throw e;
+    }
+    const s = this.tokenState(p.e, now);
+    if (s.state !== "draft" || !s.field) return { kind: "stale", message: `the page changed while the popup of "${label}" settled` };
+    const c = await this.commitToken(s.field, p.e.text, now, false, label, `Enter in "${label}"`, value);
+    if (c.result === "added") {
+      this.typedToken.delete(p.key);
+      this.log.info(`step ${this.stepNo} chip gate: a script Enter added "${value}" to "${label}"`);
+      return { kind: "stale", message: `"${label}" held "${value}"; a script Enter added it as a chip` };
+    }
+    if (c.result === "wrong" || c.result === "cleared") return { kind: "record", rec: this.blocked(ctx, "ambiguous", c.hint, [], now.url) };
+    return null;
+  }
+
+  /**
+   * Wait for the popup next to a chip field to settle: read it every tokenPollMs until two reads in a row show the same
+   * text and options and it is not busy, at most tokenSettleMs. A debounced search fills its list late: a hint on a list
+   * that still loaded made Jev press Enter on the typed name instead of clicking the member. Null when the field is gone.
+   * `focus`: focus the field at the first read. One small function, so that a causal settle can take its place.
+   */
+  private async settlePopup(field: Action, focus: boolean): Promise<Popup | null> {
+    const page = this._page as Page;
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const t0 = Date.now();
+    let last = await page.popup(field, focus);
+    for (let i = 0; last !== null && i < Math.ceil(LIMITS.tokenSettleMs / LIMITS.tokenPollMs) && Date.now() - t0 < LIMITS.tokenSettleMs; i++) {
+      await sleep(LIMITS.tokenPollMs);
+      const next = await page.popup(field);
+      const same = next !== null && !next.busy && next.text === last.text && next.picks.join("\n") === last.picks.join("\n");
+      last = next;
+      if (same) break;
+    }
+    return last;
+  }
+
+  /**
+   * A script Enter on a chip field (`Page.commit`), then the check on the next observation. `list`: the popup listed
+   * options, so Enter can have picked one, and a new chip must hold the value. With no list, any new chip counts: a
+   * free-text commit cannot pick another value. The new chip is read with its title, aria-label, and data-* values, so a
+   * chip that shows a display name for an email address still matches.
+   * - added: the draft no longer holds the value, and a new element with text appeared before the field in its box; or
+   *   a chip already held the value and the page cleared the repeat.
+   * - ignored: the key did not reach the field (the page changed first, or the field lost focus), or the page did not
+   *   handle it: not prevented, and the draft and the box stayed the same.
+   * - kept: the page handled the key and kept the value in the draft (it refused the value).
+   * - wrong: an option list was open, and the new chip does not hold the value.
+   * - cleared: the value left the draft and no chip holds it, or the field or the document went away.
+   * A handled key adds the history entry `action` with the text `text`.
+   */
+  private async commitToken(field: Action, value: string, obs: Observation, list: boolean, label: string, action: string, text: string | null): Promise<TokenCommit> {
+    const page = this._page as Page;
+    let res: Awaited<ReturnType<Page["commit"]>>;
+    try {
+      res = await page.commit(field, obs);
+    } catch (e) {
+      if (e instanceof StalePage) return { result: "ignored", next: null, hint: "" };
+      throw e;
+    }
+    if ("skipped" in res) return { result: "ignored", next: null, hint: "" };
+    const shown = cutText(this.log.redactor(value), LIMITS.spanChars);
+    let next: Observation;
+    try {
+      next = await this.observeSettled();
+    } catch (e) {
+      if (e instanceof StalePage) return { result: "cleared", next: null, hint: `page keeps changing after Enter in "${label}"` };
+      throw e;
+    }
+    const now = next.doc === obs.doc && next.url === obs.url ? next.actions.find((a) => a.kind === "fill" && a.node === field.node) : undefined;
+    const had = new Set((field.token?.items ?? []).map(([id]) => id));
+    const fresh = (now?.token?.items ?? []).filter(([id, t]) => !had.has(id) && t !== "");
+    if (!res.prevented && now && squash(now.value ?? "") === squash(field.value ?? "") && fresh.length === 0) return { result: "ignored", next, hint: "" };
+    this.history.push({ action, kind: "key", text, page_changed: next.fingerprint !== obs.fingerprint, step: this.stepNo, url: next.url, operation: "PRESS_ENTER" });
+    if (!now) return { result: "cleared", next, hint: `Enter in "${label}" changed the page, and no chip holds "${shown}"` };
+    const hit = fresh.some(([, t]) => holdsText(t, value));
+    const wrong = { result: "wrong" as const, next, hint: `Enter in "${label}" added "${cutText(this.log.redactor(fresh[0]?.[1] ?? ""), LIMITS.nameChars)}", not "${shown}"` };
+    if (holdsText(now.value ?? "", value)) return fresh.length > 0 && list && !hit ? wrong : { result: "kept", next, hint: "" };
+    if (fresh.length > 0) return list && !hit ? wrong : { result: "added", next, hint: "" };
+    if ((now.token?.items ?? []).some(([, t]) => holdsText(t, value))) return { result: "added", next, hint: "" };
+    return { result: "cleared", next, hint: `Enter in "${label}" took "${shown}" out of the field, and no chip holds it` };
+  }
+
+  /**
+   * Jev's Enter in a chip field with strong evidence and a draft: a script Enter first. It cannot submit the form, so it
+   * has the data_entry risk. When the page handled it, the step ends there, and a wrong or lost value blocks. Null when
+   * the page did not handle it: the trusted Enter follows with its own risk and gates, so Enter-to-search still works.
+   * Unsent assistant text keeps the trusted path, whose dialog shows the text.
+   */
+  private async enterToken(d: Decision, field: Action, obs: Observation, ctx: StepCtx): Promise<Applied | null> {
+    if (d.operationConf < THRESHOLDS.data_entry.target || this.unsent.length > 0 || this.cfg.dryRun || field.node === null) return null;
+    const key = `${obs.doc}|${field.node}`;
+    const value = this.typedToken.get(key)?.text ?? field.value ?? "";
+    const label = cutText(flatText(this.log.redactor(field.label)), LIMITS.nameChars);
+    const pop = await (this._page as Page).popup(field);
+    const c = await this.commitToken(field, value, obs, pop !== null && pop.picks.length > 0, label, "PRESS_ENTER", null);
+    if (c.result === "ignored") return null;
+    ctx.action = "press_key"; ctx.value = "Enter"; ctx.risk = "data_entry";
+    ctx.gate = `ok ${d.operationConf.toFixed(2)} (data_entry) script Enter ${c.result}`;
+    for (const r of this.typedText.values()) r.acted = true;
+    if (c.next) this.held = c.next;
+    if (c.result === "wrong" || c.result === "cleared") return { kind: "record", rec: this.blocked(ctx, "ambiguous", c.hint, top3(d.operationProbs), obs.url) };
+    if (c.result === "added") this.typedToken.delete(key);
+    return { kind: "record", rec: this.record(ctx, "ok", null) };
+  }
+
   /** Restores the unsent entries, the generated spans, and the record keys that `pruneUnsent` changes. */
   private unsentUndo(): () => void {
     const unsent = this.unsent;
@@ -1303,6 +1625,10 @@ export class FastRunner {
         if (e instanceof StalePage) return { kind: "record", rec: this.blocked(ctx, "ambiguous", "page keeps changing", [], obs.url), ran: true };
         throw e;
       }
+    }
+    if (op === "CLICK" || op === "PRESS_ENTER") {
+      this.learnTokens(obs, next, op === "CLICK" ? action : null);
+      next = this.markTokens(next);
     }
     entry.page_changed = next.fingerprint !== obs.fingerprint;
     entry.url = next.url;

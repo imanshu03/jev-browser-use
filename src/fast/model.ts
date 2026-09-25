@@ -76,6 +76,45 @@ export interface Action {
   maxLength?: number;                 // INPUT/TEXTAREA maxLength when > 0
   inputType?: string;                 // INPUT type, lowercased; absent for other tags
   autocomplete?: string;              // autocomplete attribute, lowercased, when set
+  token?: TokenFacts;                 // chip facts of a single-line text input; fill actions only
+}
+
+/**
+ * The chip (token) facts of a single-line text input: a recipients, participants, or tags field that adds each typed
+ * value as a chip. Set by the snapshot; never sent to Jev. The field's own box is the highest ancestor, up to 3 levels
+ * up, that holds no other field and no send or submit control, and that does not go past a table cell. A textarea, a
+ * contenteditable, an aria-multiline field, and a field without such a box have no facts.
+ */
+export interface TokenFacts {
+  /**
+   * The elements before the field in its box, nearest last, at most 20: the item id (items have their own counter), the
+   * text (text nodes without the remove control, then title, aria-label, and value-like data-* attributes; at most 200
+   * characters), and the remove control: 2 for a remove name or a library tag marker, 1 for an icon-only button, 0 for
+   * none, a label, or the field's own name.
+   */
+  items: [number, string, number][];
+  /** The chip shape (weak evidence): the texts of the items with a named remove control, or an icon-only one on a combobox. */
+  chips: string[];
+  /** A combobox whose controlled listbox is aria-multiselectable (strong evidence). */
+  multi?: true;
+  /** A popup next to the field is open (the element that it controls, a listbox, menu, or dialog at its box, or a positioned list after it in its box), or the field is aria-expanded. */
+  popup?: true;
+  /** Set by the loop, never by the page: this run saw the field add a value as a chip (strong evidence). */
+  learned?: true;
+}
+
+/** The popup next to a chip field, as `Page.popup` reads it. */
+export interface Popup {
+  open: boolean;
+  /** The popup text, at most 2000 characters. The settle compares it. */
+  text: string;
+  /** The texts of the clickable options in the popup, at most 20 of 200 characters. */
+  picks: string[];
+  /**
+   * The field or the popup shows that it loads: aria-busy, a progress bar or spinner, or "loading" or "searching". An
+   * aria-expanded field whose popup the script cannot find is busy too: its options are unknown.
+   */
+  busy: boolean;
 }
 
 export interface Observation {
@@ -169,6 +208,15 @@ export interface Page {
   act(action: Action, obs: Observation, text?: string): Promise<void>;
   /** Press one key on the focused element (for example "Enter", "Escape"). With `obs`, throws StalePage when the page key no longer matches the observation; nothing is pressed then. */
   press(key: string, obs?: Observation): Promise<void>;
+  /** Chip fields: read the popup next to a fill field. With `focus`, focus the field first. Null when the node is gone. */
+  popup(action: Action, focus?: boolean): Promise<Popup | null>;
+  /**
+   * Chip fields: a script Enter on the focused field (keydown, then keypress when keydown was not handled, then keyup).
+   * A script key event has no default action, so it never submits a form: only the page's own key handler can act on
+   * it. Throws StalePage when the page no longer matches `obs`; nothing is sent then. `skipped` when the field is gone
+   * or does not have focus.
+   */
+  commit(action: Action, obs: Observation): Promise<{ prevented: boolean } | { skipped: "gone" | "focus" }>;
   /** Navigate the tab and wait for document.readyState === "complete", polling every 20 ms, up to `timeoutMs`. */
   navigate(url: string, timeoutMs: number): Promise<void>;
   /** History back, then the same readiness wait. */

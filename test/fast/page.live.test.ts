@@ -9,16 +9,20 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChrome, launchChrome } from "../../src/fast/chrome.js";
-import type { Action, Chrome, Observation, Page } from "../../src/fast/model.js";
+import type { Action, Chrome, Observation, Page, Popup } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
-import { canPressEnter } from "../../src/fast/policy.js";
-import { fakeLogger } from "../fakes.js";
+import { canPressEnter, canWriteInto } from "../../src/fast/policy.js";
+import { FastRunner } from "../../src/fast/loop.js";
+import type { RunConfig } from "../../src/types.js";
+import type { ChoiceQuestion, Questions } from "@typesafe-ai/sdk";
+import { fakeHuman, fakeLogger, fakeOracle, type PartialAnswers } from "../fakes.js";
 
 const FIXTURES = path.resolve(__dirname, "../fixtures/live");
 const formUrl = pathToFileURL(path.join(FIXTURES, "form.html")).href;
 const liveUrl = pathToFileURL(path.join(FIXTURES, "live.html")).href;
 const replyUrl = pathToFileURL(path.join(FIXTURES, "reply.html")).href;
+const chipsUrl = pathToFileURL(path.join(FIXTURES, "chips.html")).href;
 const NAV_MS = 5000;
 
 function find(obs: Observation, kind: Action["kind"], label: string): Action {
@@ -379,8 +383,224 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): field
     const { buildStep } = await import("../../src/fast/policy.js");
     const obs = await page.observe();
     const request = JSON.stringify(buildStep({ task: "reply to Ann", goal: "act", obs, history: [], spans: [], keys: [], bannedActionIds: new Set(), doneBanned: false, canGenerate: true }));
-    for (const key of ["maxLength", "inputType", "multiline", "autocomplete", "form", "doc", "filled", "texts"]) expect(request).not.toContain(`"${key}":`);
+    for (const key of ["maxLength", "inputType", "multiline", "autocomplete", "form", "doc", "filled", "texts", "token"]) expect(request).not.toContain(`"${key}":`);
     expect(request).toContain("\"generate\"");
+  });
+});
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): chip fields", () => {
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+  const events = async (): Promise<string[]> => {
+    const r = await chrome.client.send("Runtime.evaluate", { expression: "window.__ev", returnByValue: true }, page.sessionId);
+    return ((r["result"] as { value?: string[] })?.value) ?? [];
+  };
+  const byNode = (obs: Observation, node: number | null): Action | undefined => obs.actions.find((a) => a.kind === "fill" && a.node === node);
+  const texts = (a: Action | undefined): string[] => (a?.token?.items ?? []).map(([, t]) => t);
+  const fresh = async (): Promise<Observation> => { await page.navigate(chipsUrl, NAV_MS); return page.observe(); };
+  /** Fill a field, then read the popup until `ok` holds. */
+  async function fillAndRead(label: string, text: string, ok: (p: Popup | null) => boolean = () => true): Promise<{ field: Action; popup: Popup | null }> {
+    const before = await page.observe();
+    const field = find(before, "fill", label);
+    await page.act(field, before, text);
+    let popup = await page.popup(field);
+    for (let i = 0; i < 20 && !ok(popup); i++) { await new Promise((r) => setTimeout(r, 50)); popup = await page.popup(field); }
+    return { field, popup };
+  }
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  it("facts: S1 (a label row with a Remove button) and S4 (a table row) get no chips; S3 (a composer) gets no facts; S2, S5, and S6 get the chip shape", async () => {
+    const obs = await fresh();
+    const s1 = find(obs, "fill", "Default branch");
+    expect(s1.token?.chips).toEqual([]);
+    expect(s1.token?.items.every(([, , kind]) => kind === 0)).toBe(true);
+    expect(find(obs, "fill", "Notes").token).toMatchObject({ items: [[expect.any(Number), "Notes", 0]], chips: [] });
+    expect(find(obs, "fill", "Role").token).toEqual({ items: [], chips: [] });
+    expect(find(obs, "fill", "Message").token).toBeUndefined();
+    expect(find(obs, "fill", "Filter issues").token?.chips).toEqual(["is:open Remove filter is:open"]);
+    // S5: the chip text holds the title, so an email address matches a chip that shows a display name.
+    expect(find(obs, "fill", "Recipients").token?.chips).toEqual(["Ann Stone ann@example.com Remove"]);
+    const s6 = find(obs, "fill", "Labels");
+    expect(s6.token?.chips).toEqual(["frontend Remove frontend"]);
+    expect(s6.token?.multi).toBeUndefined();
+    // P before its first chip: only the label is before the field, and nothing is open.
+    const p = find(obs, "fill", "Search org members or type a name...");
+    expect(p.token).toEqual({ items: [[expect.any(Number), "Meeting Participants (Optional)", 0]], chips: [] });
+    // Weak evidence does not change which fields can take assistant text.
+    for (const a of [s1, p, find(obs, "fill", "Filter issues"), find(obs, "fill", "Recipients"), s6]) {
+      const { token: _token, ...plain } = a;
+      expect(canWriteInto(a)).toBe(canWriteInto(plain));
+    }
+    expect(canWriteInto(find(obs, "fill", "Filter issues"))).toBe(true);
+    // Chip facts are not element node ids: the node ids stay as the other snapshot facts give them.
+    expect(obs.actions.filter((a) => a.kind === "fill").map((a) => a.node)).toEqual([...new Set(obs.actions.filter((a) => a.kind === "fill").map((a) => a.node))]);
+    expect(await events()).toEqual([]);
+  });
+
+  it("P: the popup is busy while the search runs, then lists the members; the fill action shows it open", async () => {
+    await fresh();
+    const { field, popup } = await fillAndRead("Search org members or type a name...", "Ann");
+    expect(popup).toMatchObject({ open: true, busy: true, picks: [] });
+    expect(popup?.text).toContain("Searching members...");
+    let listed = await page.popup(field);
+    for (let i = 0; i < 20 && (listed?.busy ?? true); i++) { await new Promise((r) => setTimeout(r, 50)); listed = await page.popup(field); }
+    expect(listed).toMatchObject({ open: true, busy: false, picks: ["Ann Lee ann.lee@parallelloop.ai"] });
+    expect(byNode(await page.observe(), field.node)?.token?.popup).toBe(true);
+    // A field without a popup reads closed.
+    expect(await page.popup(find(await page.observe(), "fill", "Title (Optional)"))).toEqual({ open: false, text: "", picks: [], busy: false });
+    // A fill of Title closes the list with an exit animation. The closing list lies next to Title, which has focus now,
+    // but it is not a popup of Title.
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Title (Optional)"), before, "Weekly sync");
+    const after = await page.observe();
+    expect(await chrome.client.send("Runtime.evaluate", { expression: "[document.getElementById('pop').dataset.state, getComputedStyle(document.getElementById('pop')).display]", returnByValue: true }, page.sessionId))
+      .toMatchObject({ result: { value: ["closed", "block"] } });
+    expect(after.focus?.label).toBe("Title (Optional)");
+    expect(find(after, "fill", "Title (Optional)").token?.popup).toBeUndefined();
+  });
+
+  it("P: a script Enter adds the chip and never submits the form; the new item has a named remove control; without focus it is skipped", async () => {
+    await fresh();
+    const { field } = await fillAndRead("Search org members or type a name...", "bob@example.com", (x) => x?.text === "No members found");
+    const obs = await page.observe();
+    const title = find(obs, "fill", "Title (Optional)");
+    expect(await page.commit(title, obs)).toEqual({ skipped: "focus" });
+    expect(await page.commit(byNode(obs, field.node)!, obs)).toEqual({ prevented: true });
+    const after = await page.observe();
+    const p = byNode(after, field.node)!;
+    expect(p.label).toBe("textbox");
+    expect(p.value).toBe("");
+    expect(p.token?.items.at(-1)).toEqual([expect.any(Number), "bob@example.com Remove participant", 2]);
+    expect(p.token?.chips).toEqual(["bob@example.com Remove participant"]);
+    expect(await events()).toEqual(["P added bob@example.com"]);
+    // A script Enter on the empty field does nothing: it has no default action, so the form is not submitted.
+    await chrome.client.send("Runtime.evaluate", { expression: "document.getElementById('p').focus()" }, page.sessionId);
+    const empty = await page.observe();
+    expect(await page.commit(byNode(empty, field.node)!, empty)).toEqual({ prevented: false });
+    expect(await events()).toEqual(["P added bob@example.com"]);
+    // A stale observation throws before any key goes out.
+    await expect(page.commit(byNode(obs, field.node)!, obs)).rejects.toBeInstanceOf(StalePage);
+  });
+
+  it("S2: a script Enter does nothing where only the native form reads Enter; the trusted Enter then searches", async () => {
+    await fresh();
+    await fillAndRead("Filter issues", "login bug");
+    const obs = await page.observe();
+    const s2 = find(obs, "fill", "Filter issues");
+    expect(await page.commit(s2, obs)).toEqual({ prevented: false });
+    const after = await page.observe();
+    expect(find(after, "fill", "Filter issues").value).toBe("login bug");
+    expect(await events()).toEqual([]);
+    await page.press("Enter", after);
+    expect(await events()).toEqual(["S2 search login bug"]);
+  });
+
+  it("S5: the chip that a script Enter adds shows a display name and holds the email address in its title", async () => {
+    await fresh();
+    await fillAndRead("Recipients", "bob@example.com");
+    const obs = await page.observe();
+    expect(await page.commit(find(obs, "fill", "Recipients"), obs)).toEqual({ prevented: true });
+    const s5 = find(await page.observe(), "fill", "Recipients");
+    expect(texts(s5).at(-1)).toBe("Bob Stone bob@example.com Remove");
+    expect(s5.value).toBe("");
+  });
+
+  it("S6: with the list open, the field shows the multiselect listbox and the popup lists the options that Enter would pick", async () => {
+    await fresh();
+    const { field, popup } = await fillAndRead("Labels", "bug");
+    expect(popup).toMatchObject({ open: true, busy: false, picks: ["debug", "bugfix-later", 'Create "bug"'] });
+    const s6 = byNode(await page.observe(), field.node)!;
+    expect(s6.token?.multi).toBe(true);
+    expect(canWriteInto(s6)).toBe(false);
+    expect(await events()).toEqual([]);
+  });
+
+  describe("runs of the loop with scripted Jev answers", () => {
+    type Decide = (q: Questions) => PartialAnswers;
+    /** The target key whose element string carries `label`. */
+    const key = (q: Questions, head: string, label: string): string => {
+      const c = (q[head] as ChoiceQuestion | undefined)?.criteria ?? {};
+      const hit = Object.entries(c).find(([, v]) => String((v as { element?: string }).element ?? "").includes(label));
+      if (!hit) throw new Error(`no ${head} option for ${label}`);
+      return hit[0];
+    };
+    // The page has more fields than a step request has value heads: a value request then answers with the same value.
+    let value = "";
+    const fillIn = (label: string, id: string): Decide => (q) => {
+      value = id;
+      return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: key(q, "type_text_target", label), confidence: 0.8 }, type_text_value: { choice: id, confidence: 0.9 } };
+    };
+    const clickOn = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: key(q, "click_target", label), confidence: 0.9 } });
+    const enterKey: Decide = () => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.85 } });
+    const done: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+    async function run(vars: Record<string, string>, steps: Decide[]) {
+      let i = 0;
+      const oracle = fakeOracle((name, _state, q) => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q) : name === "value" ? { type_text_value: { choice: value, confidence: 0.9 } } : {}));
+      const cfg: RunConfig = {
+        task: "fill the chips fixture", url: chipsUrl, headed: false, maxSteps: 8, stepTimeoutMs: 5000, runTimeoutMs: 60_000, pauseTimeoutMs: 1000, confirm: "auto", dryRun: false,
+        session: "jev-live", model: "m", logLevel: "info", logJson: false, keepOpen: true, agentBrowserBin: "ab", vars, profile: "none", goal: "act", engine: "cdp", refreshProfile: false,
+      };
+      const runLog = fakeLogger();
+      const runner = new FastRunner({ cfg, profiles: [], chrome: async () => chrome, page, openPage: async () => page, oracle, human: fakeHuman({ interactive: false }), log: runLog });
+      return { result: await runner.run(), log: runLog };
+    }
+
+    it("P: Jev's first Enter teaches the field; before Title, a script Enter adds the second value; the form is not sent", async () => {
+      const { result, log: runLog } = await run({ a: "ann@example.com", b: "bob@example.com", title: "Weekly sync" },
+        [fillIn("Search org members or type a name...", "v_a"), enterKey, fillIn("textbox", "v_b"), fillIn("Title (Optional)", "v_title"), fillIn("Title (Optional)", "v_title"), done]);
+      expect(result.outcome, runLog.lines.join("\n")).toBe("done");
+      expect(await events()).toEqual(["P added ann@example.com", "P added bob@example.com"]);
+      expect(runLog.lines.some((l) => /chip gate: a script Enter added "bob@example\.com" to "textbox"/.test(l))).toBe(true);
+      expect(find(await page.observe(), "fill", "Title (Optional)").value).toBe("Weekly sync");
+    }, 30_000);
+
+    it("S6: with options open, a hint and no code Enter; DONE then blocks", async () => {
+      const { result } = await run({ q: "bug", f: "login" }, [fillIn("Labels", "v_q"), fillIn("Filter issues", "v_f"), done]);
+      expect(result.outcome).toBe("blocked");
+      expect(result.blocked?.hint).toBe('typed value not added: "Labels" holds "bug", which is not added yet. The form is not sent without it');
+      expect(await events()).toEqual([]);
+    }, 30_000);
+
+    it("S2: Jev's Enter reaches the page as a trusted Enter; S1, S3, and S4 get no key event", async () => {
+      const s2 = await run({ q: "login bug" }, [fillIn("Filter issues", "v_q"), enterKey, done]);
+      expect(s2.result.outcome).toBe("done");
+      expect(await events()).toEqual(["S2 search login bug"]);
+      const others = await run({ a: "develop", b: "hello team", c: "Owner" }, [fillIn("Default branch", "v_a"), fillIn("Message", "v_b"), fillIn("Role", "v_c"), clickOn("Save"), done]);
+      expect(others.result.outcome).toBe("done");
+      expect(await events()).toEqual(["S1 submit"]);
+    }, 30_000);
+  });
+
+  it("a large element before a field is not a chip; an expanded field whose popup cannot be found reads busy", async () => {
+    const list = Array.from({ length: 60 }, (_, i) => `<p>message ${i} <button aria-label="Delete message">x</button></p>`).join("");
+    await page.navigate(`data:text/html,${encodeURIComponent(`<div><div id="log">${list}</div><input aria-label="Say something" aria-expanded="true"></div>`)}`, NAV_MS);
+    await chrome.client.send("Runtime.evaluate", { expression: "document.querySelector('input').focus()" }, page.sessionId);
+    const obs = await page.observe();
+    const field = find(obs, "fill", "Say something");
+    expect(field.token?.items).toEqual([[expect.any(Number), expect.stringMatching(/^message 0 xmessage 1 x/), 0]]);
+    expect(field.token?.chips).toEqual([]);
+    expect(field.token?.popup).toBe(true);
+    expect(await page.popup(field)).toEqual({ open: true, text: "", picks: [], busy: true });
+  });
+
+  it("the chip facts never reach the Jev request", async () => {
+    const { buildStep } = await import("../../src/fast/policy.js");
+    await fresh();
+    await fillAndRead("Labels", "bug");
+    const obs = await page.observe();
+    const request = JSON.stringify(buildStep({ task: "add the label bug", goal: "act", obs, history: [], spans: [], keys: [], bannedActionIds: new Set(), doneBanned: false, canGenerate: true }));
+    for (const key of ["token", "items", "chips", "multi", "popup", "learned"]) expect(request).not.toContain(`"${key}":`);
   });
 });
 
