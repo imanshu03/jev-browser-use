@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Date parts fixture</title>
+<style>
+  body { font: 12px sans-serif; margin: 8px; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+  .parts { display: flex; align-items: center; border: 1px solid #999; padding: 0 2px; }
+  .parts input { width: 30px; border: none; text-align: center; }
+  .parts input.y { width: 42px; }
+  table { border-collapse: collapse; display: inline-table; margin-right: 8px; }
+  td button { font-size: 9px; width: 22px; height: 16px; padding: 0; }
+  td[aria-selected="true"] button { background: #cde; }
+  [role="spinbutton"] { display: inline-block; min-width: 14px; padding: 0 2px; }
+  section { border: 1px solid #ddd; padding: 4px; margin: 4px 0; }
+</style>
+</head>
+<body>
+<!-- A copy of the Usage & Limits DateRangePicker behavior (apps/platform/src/components/date-range-picker): typed M / D / YYYY
+     parts that take digits only, change the date only when it is valid, and put the old parts back on a blur with an invalid
+     part. A start after the end moves the end; an end before the start moves the start. The calendar adds a click to the range. -->
+<div role="dialog" id="picker">
+  <div class="row" id="inputs">
+    <div class="parts" id="g-start"><input maxlength="2" placeholder="M"><span>/</span><input maxlength="2" placeholder="D"><span>/</span><input class="y" maxlength="4" placeholder="YYYY"></div>
+    <div>-</div>
+    <div class="parts" id="g-end"><input maxlength="2" placeholder="M"><span>/</span><input maxlength="2" placeholder="D"><span>/</span><input class="y" maxlength="4" placeholder="YYYY"></div>
+  </div>
+  <div id="grids"></div>
+  <div class="row"><button type="button" id="cancel">Cancel</button><button type="button" id="update">Update</button></div>
+</div>
+
+<section>
+  <div class="row"><span id="due-label">Due date</span>
+    <div class="parts" id="g-due" role="group" aria-labelledby="due-label"><input maxlength="2" placeholder="M"><span>/</span><input maxlength="2" placeholder="D"><span>/</span><input class="y" maxlength="4" placeholder="YYYY"></div>
+  </div>
+</section>
+
+<section>
+  <div class="row"><span id="ev-label">Event date</span>
+    <div role="group" aria-labelledby="ev-label" id="g-event">
+      <div role="spinbutton" contenteditable="true" tabindex="0" data-type="month" aria-valuemin="1" aria-valuemax="12" aria-valuenow="8">8</div><span aria-hidden="true" data-type="literal">/</span><div role="spinbutton" contenteditable="true" tabindex="0" data-type="day" aria-valuemin="1" aria-valuemax="31" aria-valuenow="24">24</div><span aria-hidden="true" data-type="literal">/</span><div role="spinbutton" contenteditable="true" tabindex="0" data-type="year" aria-valuemin="1" aria-valuemax="9999" aria-valuenow="2026">2026</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <form class="row" id="card"><span>Card expiry</span><input placeholder="MM" maxlength="2" autocomplete="cc-exp-month" aria-label="MM"><span>/</span><input placeholder="YY" maxlength="2" autocomplete="cc-exp-year" aria-label="YY"></form>
+  <div class="row" id="clock"><span>Alarm</span><input placeholder="HH" maxlength="2"><span>:</span><input placeholder="MM" maxlength="2"></div>
+  <div class="row" id="pair"><div class="parts"><input placeholder="M"><input placeholder="D"><input placeholder="YYYY"></div><span>and</span><div class="parts"><input placeholder="M"><input placeholder="D"><input placeholder="YYYY"></div></div>
+</section>
+<script>
+window.log = [];
+const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const same = (a, b) => a && b && iso(a) === iso(b);
+const NAV = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Tab", "Backspace", "Enter"];
+
+/** The DateInput: three parts, a change only for a valid date, and the old parts back on a blur with an invalid part. */
+function dateInput(root, value, onChange) {
+  const inputs = root.querySelectorAll("input");
+  const fields = ["month", "day", "year"];
+  let date = { month: value.getMonth() + 1, day: value.getDate(), year: value.getFullYear() };
+  let initial = { ...date };
+  const show = () => inputs.forEach((e, i) => { e.value = String(date[fields[i]]); });
+  const valid = (field, v) => {
+    if ((field === "day" && (v < 1 || v > 31)) || (field === "month" && (v < 1 || v > 12)) || (field === "year" && (v < 1000 || v > 9999))) return false;
+    const n = { ...date, [field]: v };
+    const d = new Date(n.year, n.month - 1, n.day);
+    return d.getFullYear() === n.year && d.getMonth() + 1 === n.month && d.getDate() === n.day;
+  };
+  inputs.forEach((e, i) => {
+    const field = fields[i];
+    e.addEventListener("keydown", (ev) => { if (ev.metaKey || ev.ctrlKey) return; if (!/^[0-9]$/.test(ev.key) && !NAV.includes(ev.key)) ev.preventDefault(); });
+    e.addEventListener("input", () => {
+      const v = e.value ? Number(e.value) : "";
+      const ok = typeof v === "number" && valid(field, v);
+      date = { ...date, [field]: v };
+      if (ok) onChange(new Date(date.year, date.month - 1, date.day));
+    });
+    e.addEventListener("blur", () => {
+      if (!e.value) { date = { ...initial }; show(); return; }
+      const v = Number(e.value);
+      if (!valid(field, v)) { date = { ...initial }; show(); } else initial = { ...date, [field]: v };
+    });
+    e.addEventListener("mouseup", () => e.select());
+  });
+  show();
+  return { set(d) { date = { month: d.getMonth() + 1, day: d.getDate(), year: d.getFullYear() }; initial = { ...date }; show(); } };
+}
+
+const range = { from: new Date(2026, 7, 24), to: new Date(2026, 8, 23) };
+const opened = { from: iso(range.from), to: iso(range.to) };
+const start = dateInput(document.getElementById("g-start"), range.from, (d) => {
+  range.from = d;
+  if (d > range.to) { range.to = d; end.set(d); }
+  grids();
+});
+const end = dateInput(document.getElementById("g-end"), range.to, (d) => {
+  range.to = d;
+  if (d < range.from) { range.from = d; start.set(d); }
+  grids();
+});
+dateInput(document.getElementById("g-due"), new Date(2026, 9, 31), (d) => window.log.push("due " + iso(d)));
+
+/** Two month grids like react-day-picker v9 in range mode: the ISO day on the cell, range flags on the button. */
+function grids() {
+  const root = document.getElementById("grids");
+  root.innerHTML = "";
+  for (const month of [7, 8]) {
+    const t = document.createElement("table");
+    t.setAttribute("role", "grid");
+    t.setAttribute("aria-multiselectable", "true");
+    t.setAttribute("aria-label", new Date(2026, month, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }));
+    let tr = null;
+    const days = new Date(2026, month + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      if ((d - 1) % 7 === 0) { tr = document.createElement("tr"); t.appendChild(tr); }
+      const day = new Date(2026, month, d);
+      const td = document.createElement("td");
+      td.setAttribute("role", "gridcell");
+      td.setAttribute("data-day", iso(day));
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = String(d);
+      // The shadcn button carries a locale data-day. Code must never read it.
+      b.setAttribute("data-day", day.toLocaleDateString("en-GB"));
+      const inRange = range.from && range.to && iso(day) >= iso(range.from) && iso(day) <= iso(range.to);
+      const label = day.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+      b.setAttribute("aria-label", inRange ? label + ", selected" : label);
+      if (inRange) {
+        td.setAttribute("aria-selected", "true");
+        td.setAttribute("data-selected", "true");
+        if (same(day, range.from)) b.setAttribute("data-range-start", "true");
+        if (same(day, range.to)) b.setAttribute("data-range-end", "true");
+        if (!same(day, range.from) && !same(day, range.to)) b.setAttribute("data-range-middle", "true");
+      }
+      b.addEventListener("click", () => {
+        // addToRange: a day before the start moves the start, a later day moves the end, the end day again collapses the range.
+        if (same(day, range.to)) { range.from = day; range.to = day; }
+        else if (day < range.from) range.from = day;
+        else range.to = day;
+        start.set(range.from); end.set(range.to); grids();
+      });
+      td.appendChild(b);
+      tr.appendChild(td);
+    }
+    root.appendChild(t);
+  }
+}
+grids();
+document.getElementById("update").addEventListener("click", () => {
+  const now = { from: iso(range.from), to: iso(range.to) };
+  if (now.from !== opened.from || now.to !== opened.to) window.log.push("date " + now.from + " " + now.to);
+});
+
+// A react-aria-like DateField: contenteditable spinbutton segments that read digit keys and move on when a part is whole.
+const segs = [...document.querySelectorAll("#g-event [role=spinbutton]")];
+segs.forEach((seg, i) => {
+  let typed = "";
+  const max = seg.dataset.type === "year" ? 4 : 2;
+  seg.addEventListener("focus", () => { typed = ""; });
+  seg.addEventListener("keydown", (ev) => {
+    if (!/^[0-9]$/.test(ev.key)) return;
+    ev.preventDefault();
+    typed += ev.key;
+    seg.setAttribute("aria-valuenow", String(Number(typed)));
+    seg.textContent = String(Number(typed));
+    const whole = typed.length >= max || (seg.dataset.type === "month" && Number(typed) > 1) || (seg.dataset.type === "day" && Number(typed) > 3);
+    if (whole && segs[i + 1]) segs[i + 1].focus();
+    window.log.push("event " + segs.map((s) => s.getAttribute("aria-valuenow")).join("/"));
+  });
+  seg.addEventListener("beforeinput", (ev) => ev.preventDefault());
+});
+</script>
+</body>
+</html>

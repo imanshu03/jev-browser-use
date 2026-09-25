@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
 import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import { BLUR_SCRIPT, DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, nativeDateScript, pageKeyGuardScript, selectPartScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -240,6 +240,47 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
           await call("Input.insertText", { text: text as string });
         }
       }
+      pendingSettle = action;
+    },
+
+    async setDate(action, obs, plan) {
+      // One freshness check for the whole field. Each part changes the form values, so a check per part would go stale.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Page changed since this decision. Observe again.");
+      if ("native" in plan) {
+        const r = await evaluate(nativeDateScript(action.node as number, plan.native));
+        if (r.exception || r.value === null) throw new StalePage("Date field changed or is gone. Observe again.");
+        pendingSettle = action;
+        return;
+      }
+      let typed = false;
+      for (const part of plan.parts) {
+        const r = await evaluate(actScript({ ...action, kind: "click", node: part.node }));
+        const at = r.value as { x: number; y: number } | null;
+        if (r.exception || !at) {
+          if (!typed) throw new StalePage("Date part changed or is covered. Observe again.");
+          break;
+        }
+        await mouse("mouseMoved", at.x, at.y);
+        await mouse("mousePressed", at.x, at.y, { button: "left", clickCount: 1 });
+        await mouse("mouseReleased", at.x, at.y, { button: "left", clickCount: 1 });
+        typed = true;
+        if (part.spin) {
+          // A spinbutton segment (react-aria, MUI) reads digit keys, not inserted text.
+          for (const ch of part.text) {
+            const key = { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: 48 + Number(ch), nativeVirtualKeyCode: 48 + Number(ch) };
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyDown", text: ch, unmodifiedText: ch });
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+          }
+          continue;
+        }
+        const selected = await evaluate(selectPartScript(part.node));
+        if (selected.value !== true) {
+          await call("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers, commands: ["selectAll"] });
+          await call("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers });
+        }
+        await call("Input.insertText", { text: part.text });
+      }
+      if (typed) await evaluate(BLUR_SCRIPT);
       pendingSettle = action;
     },
 

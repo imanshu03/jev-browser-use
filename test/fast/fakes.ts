@@ -1,5 +1,5 @@
 // Scripted fakes for the fast engine: Page, Chrome, and Observation builders. No Chrome and no network.
-import type { Action, ActionKind, Chrome, Observation, Page } from "../../src/fast/model.js";
+import type { Action, ActionKind, Chrome, DatePlan, Observation, Page } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 
 /** One executable action. `id` defaults to `e<n>` by position when `obs()` assigns it. */
@@ -22,7 +22,7 @@ export function obs(url: string, actions: Action[], text = "page", over: Partial
   };
 }
 
-export interface ActCall { op: "act" | "press" | "back" | "navigate"; id?: string; kind?: string; text?: string; key?: string; url?: string }
+export interface ActCall { op: "act" | "press" | "back" | "navigate" | "setDate"; id?: string; kind?: string; text?: string; key?: string; url?: string; plan?: DatePlan }
 
 export interface PageScript {
   pages: Record<string, Observation>;
@@ -58,6 +58,10 @@ export function fakePage(script: PageScript): FakePage {
     async act(action: Action, _obs: Observation, text?: string) {
       if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
       p.move({ op: "act", id: action.id, kind: action.kind, ...(text !== undefined ? { text } : {}) });
+    },
+    async setDate(action: Action, _obs: Observation, plan: DatePlan) {
+      if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
+      p.move({ op: "setDate", id: action.id, plan });
     },
     async press(key: string) { p.move({ op: "press", key }); },
     async navigate(url: string) { p.move({ op: "navigate", url }); },

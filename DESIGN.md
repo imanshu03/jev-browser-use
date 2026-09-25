@@ -63,6 +63,7 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Vercel tree parsing, element context, fingerprints | [src/snapshot.ts](src/snapshot.ts) |
 | Vercel extraction, answer selection, verification | [src/extract.ts](src/extract.ts) |
 | Assistant-written text: field selection, the text request, reply checks, sanitizer | [src/fast/generate.ts](src/fast/generate.ts) |
+| Date fields: which task date fits a field, the part order, the date gate, the calendar range check | [src/fast/dates.ts](src/fast/dates.ts) |
 | One Chrome and one tab kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
 | MCP entry: stdio, stderr log, lazy setup, shutdown | [src/mcp/main.ts](src/mcp/main.ts) |
 | MCP tools, dialogs, and the rule for interactive sessions | [src/mcp/server.ts](src/mcp/server.ts) |
@@ -115,7 +116,7 @@ Skip PLAN when code has resolved the profile, start, and goal. In the direct eng
 
 ### 3.3 Values and keys
 
-`extractSpans()` collects quoted text, email addresses, URLs, dates, numbers, phrases after value verbs, proper nouns, short clauses, and the whole task. Profile names and catalog aliases are excluded. Spans have stable request identifiers and bounded text. Whitespace normalization and candidate limits are defined in `src/task.ts` and `src/types.ts`.
+`extractSpans()` collects quoted text, email addresses, URLs, dates, numbers, phrases after value verbs, proper nouns, short clauses, and the whole task. Profile names and catalog aliases are excluded. Spans have stable request identifiers and bounded text. Whitespace normalization and candidate limits are defined in `src/task.ts` and `src/types.ts`. A span whose whole text is a date also gets that date, and two dates of a range get the roles start and end (section 5.6).
 
 `--var key=value` adds `v_<key>` candidates. Keys are lower-cased. Keys that match `pass`, `pin`, `otp`, `secret`, `token`, or `code` mark the value as secret. Secret candidates use a descriptor in model questions; the browser receives the value selected by its identifier.
 
@@ -126,6 +127,7 @@ In MCP runs, the assistant can add generated spans. A generated span has the id 
 `canWriteInto()` in `src/fast/policy.ts` decides which fields can take assistant text. All of these must be true:
 
 - The action is a fill, and its role is `textbox`. This excludes search boxes, comboboxes, and number fields.
+- The field is not a date field or a date part (section 5.6), and its `maxLength` is not 4 or less (a month, a year, or a code digit). In the plugin, the value head of a bare "M" box offered `generate` and chose it at 0.54-0.60.
 - An input has no type or the type `text`. This excludes email, phone, and URL inputs, which the snapshot maps to `textbox`.
 - The `autocomplete` token does not match `EXACT_AUTOCOMPLETE` (for example `email`, `tel`, `username`, `one-time-code`, `cc-*`, and address tokens).
 - The label matches neither `CREDENTIAL_NAME` nor `EXACT_VALUE_NAME` (recipients, amounts, prices, card and account numbers, address parts, user names, URLs, keys, tokens, and search).
@@ -155,7 +157,7 @@ The operation and target instructions carry the task and rules. The rules requir
 - Select only offered targets and values. A target question assumes its named operation; the operation question decides which answer is used.
 - Return `BLOCKED` when supported operations cannot advance the task.
 
-Direct-engine rules also cover date pickers, applying every requested filter, opening a requested result, and scrolling until an extraction value is visible. Exact prompt strings live in the engine's policy or questions module.
+Direct-engine rules also cover applying every requested filter, opening a requested result, and scrolling until an extraction value is visible. A page with a date field or a calendar day also gets the date rule (section 5.6). Exact prompt strings live in the engine's policy or questions module.
 
 The `vercel` request uses `click_target_<k>` for chunks of up to 200 clickable elements, `type_text_target` for editable fields, and `select_target` for observed options. Target descriptions include the ref, role, name, state, and current value. For multiple click chunks, `none` means that the correct target is outside the chunk. Two or more qualifying winners trigger TOURNAMENT with `target_final`.
 
@@ -231,7 +233,7 @@ The table in `test/fast/value-corpus.test.ts` holds the task wording of every re
 
 `extractSpans` also drops fragments around a quoted value. An `after_verb` or `clause` fragment loses its outer quote marks, and a fragment that still holds a quote mark is not kept (`projects for "jev browser` goes, `"jev browser` becomes a duplicate of the quoted span). A `'` or `’` is an apostrophe, not a quote mark, when a letter comes before it and a letter comes after it (`it's`, `O'Brien`, `Macy’s`), or when a letter comes before it and no single quote is open (`kids’ shoes`). A `‘`, or a `'` with no letter before it, opens a quote, and the next `'` or `’` with no letter after it closes it. So `‘Macy’s’` is the quoted value `Macy’s`, and `it's done to O'Brien` has no quoted value. After a search verb (`search`, `search for`, `find`, `look up`, `query`), a fragment that starts with a quoted value and adds lower-case words after it stays without its quote marks (`"machine learning" jobs` becomes `machine learning jobs`). Words that start another instruction or name the field, the site, or the place end that form (`and`, `then`, `as`, `for`, `on`, `in`, `from`, `now`, and similar, and any capitalized word): `"jev browser" and open the first result` and `"Ada Lovelace" on Wikipedia` are not values. A mark after a letter or a digit is an apostrophe when no quote is open (`80's music`). Without this cleanup, a quoted search query got a value confidence of 0.41-0.53 in its own field; with it, 0.56-0.64. A verb with extra spaces inside ("search  for") is read as the same verb.
 
-The observation also carries field facts that never reach Jev: `form` (the identity of the field's form or dialog), `multiline`, `inputType`, `autocomplete`, `maxLength`, the document id `doc`, `filled` (the node ids of all form controls in the document with a non-blank value, in view or not), and `texts` (the node id and value of each such control that is rendered: not hidden, aria-hidden, or inert). The focus also carries `form` (with the same identity as the actions' `form`), `submitDefault`, the name of the form's first submit control in tree order (image buttons count), or "" when that control is disabled, and `multiline`; the state for Jev leaves all three out. Form identities come from their own counter, so element node ids and the step request stay the same as without these facts. `actionSpace` and the target criteria copy only named fields, so these facts stay in code.
+The observation also carries field facts that never reach Jev: `form` (the identity of the field's form or dialog), `multiline`, `inputType`, `autocomplete`, `maxLength`, the document id `doc`, `filled` (the node ids of all form controls in the document with a non-blank value, in view or not), and `texts` (the node id and value of each such control that is rendered: not hidden, aria-hidden, or inert). The focus also carries `form` (with the same identity as the actions' `form`), `submitDefault`, the name of the form's first submit control in tree order (image buttons count), or "" when that control is disabled, and `multiline`; the state for Jev leaves all three out. Form identities come from their own counter, so element node ids and the step request stay the same as without these facts. `actionSpace` and the target criteria copy only named fields, so these facts stay in code. The date facts `date`, `datePart`, and `day` are field facts too (section 5.6).
 
 ### 4.3 Request types
 
@@ -372,6 +374,64 @@ Vercel fingerprints include normalized URL, element identity, and typed values. 
 
 A model progress score or a model judgment about the last action is not used for stall detection. Code compares observations and counts executions.
 
+### 5.6 Date fields
+
+Code reads and writes dates. Jev chooses which task date goes into which date field. Every date widget that code knows becomes one date field that takes a whole task date through TYPE_TEXT. Code types the date in the field's own form and reads the field back. The value is still a task or `--var` span (rule 3), in a form that code makes from it. The source is `src/fast/dates.ts`, `parseDate` in `src/task.ts`, and the snapshot.
+
+**Task dates.** `parseDate()` reads a span whose whole text is a date:
+
+- ISO dates and other dates that start with the year ("2026-09-01", "2026/9/1");
+- numeric dates with "/", ".", or "-" and a four-digit year ("9/15/2026", "15.9.2026");
+- month names, short names, and "Sept", in either order, with an ordinal, "of", a weekday, and commas ("1 September 2026", "Tuesday, September 1st, 2026", "1st of September 2026").
+
+A date that does not exist ("31 September 2026"), a wrong weekday, a two-digit year, a date without a year, and a relative date ("next Friday") get no date. The date goes on the existing span (`Span.date`). Code adds no span, because a new span changes `typed_values` and the operation head. A numeric date whose day and month can change places ("9/1/2026") is ambiguous. It fits only a date field of the same shape: parts in month-day-year or day-month-year order with the same separator. A native date input has the shape of the page locale. In any other field it does not fit, and a fill blocks with the hint "write the month as a word or use YYYY-MM-DD". When it fits no date field of a form or dialog, the date gate (below) also stops a confirm click and DONE there, so the run blocks with the same hint.
+
+"from A to B", "between A and B", "A – B", and "A until B" give A the range role start and B the role end (`Span.dateRole`). So do "start" and "end" (or "check-in" and "check-out") just before two dates. A start without a year takes the year of its end ("between Sep 1 and Sep 15, 2026"). A `--var` date gets a date too; a key such as `start_date` or `end` gives the role.
+
+**Date fields in the observation.** The snapshot sets these facts. They never reach Jev.
+
+- A native `date`, `month`, `datetime-local`, `time`, or `week` input is a fill action with `date`: its kind, `min`, `max`, and for `date` the order and separator of the page locale. Its label names the kind ("Due date (date)"). It has no "Open" click: a click opens the browser's own picker, which is not in the page.
+- A part names a month, a day, or a year: `data-type`, a spinbutton range of 1-12 or 1-31, a placeholder, `aria-label`, or label token (M, MM, month, D, DD, day, YY, YYYY, year, and the French, German, Spanish, and Dutch words), or a `name` that ends in day, month, or year. A card expiry part (`autocomplete` cc-*) is not a part.
+- A date group is the nearest container of a part that holds one month part, one day part, one year part, and no other text box. A group needs all three, so a lone "MM" (minutes, or a card expiry month) is not a group. The snapshot shows a group as one fill action at its first part, with `date.parts`, and leaves out the part actions and their "Open" clicks. The label is "<group label or Date>[ range start|end] (<format>)", for example "Date range start (M/D/YYYY)". The value is the joined parts ("8/24/2026"). The group label comes from `aria-labelledby` or `aria-label` of the container or of a `role=group` around it, or from a `fieldset` legend. The format comes from the part order, the separator, and the padding ("MM", or a value with a leading zero).
+- Range roles come only from a separator between two groups ("-", "–", "to", "until") or from start and end labels. Two groups with other text between them are two plain date fields, and Jev chooses by label.
+- A part outside a whole group carries `datePart`.
+- A day of a calendar grid carries `day`: the ISO date from a machine attribute (the cell's `data-day` of react-day-picker v9, `data-date`, `data-value`, `data-timestamp`, an ISO `title`, or `time[datetime]`), its selection (`aria-selected` or `data-selected`), and its place in a range (`data-range-*` or `data-selection-*`). The shadcn day button's `data-day` follows the locale ("01/09/2026" in en-GB), so code never reads it. Without a machine date, code reads the day from the label.
+
+Groups and grids get ids from their own counter, so node ids and form ids do not change.
+
+**Request.** A date field is one row with TYPE_TEXT only. Its value head offers only the task and `--var` spans whose date fits the field (`wantOf`), then none, with the question `DATE_VALUE_Q`. It never offers `generate`, and `canWriteInto` is false, so a text request never lists a date field. Date heads come first in the value order, and every trim rung keeps them (at most 8). A page with a date field or a calendar day gets `DATE_RULE` after the rule about required fields (`rulesFor(goal, obs)`). Other pages get no date rule.
+
+On the Usage date range (lab asks, jev-latest), the old rule for every page ("CLICK the field, then the date, then the confirmation") and six part rows made Jev click Update first (CLICK 0.80-0.84). The value head of the start day chose "15" at 0.81-0.93. With one row per group, the date head, and the new rule, TYPE_TEXT got 0.64-0.65 and the right date 0.99-1.00. After both fields showed their dates, Update got 0.99. With the generic value question, the right date got only 0.53-0.60. In the bench, the typed date range and its numeric wording failed in all 81 runs before this change (Update was the second action in each). After it, they passed in 17 of 17 runs (CLI and plugin), each with two date fills, Update, and DONE.
+
+**Typing.** A TYPE_TEXT of a date span into a date field runs `Page.setDate`:
+
+- A native input gets the value through the native value setter, then input and change events, as Playwright's fill does. Inserted text and typed digits do not work: a date input takes digits in the order of the browser locale. A date outside `min` or `max` blocks `impossible` and sets nothing.
+- A group gets only the parts that change. Code simulates the part orders and takes the best one: each date in between exists, then each date in between stays on its side of the other field of a range, then the order of the parts on the page. On the Usage DateInput, a part that makes a date that does not exist goes back on blur: 10/31 to 9/30 month first ends at 10/30. A start after the end moves the end: 8/24 to 9/1 month first passes 9/24 and moves the end. Each part gets a click, a select-all without keys, and the inserted part text. A spinbutton segment gets one digit key at a time. One freshness check covers the whole field, because each part changes the form values. Then the focused part is blurred, so the page checks it.
+- Code reads the field back on the next observation. A wrong value gets one more pass, in another order when one is as good. When the field still shows another value, the step records `date_mismatch`, and history shows the value of the field. The field is not banned: Jev sees the value and can type the date again.
+
+**The date gate.** Code checks the task dates that Jev's value heads give to the date fields before these actions:
+
+- a click on a button in the form or dialog of a date field, except a calendar day and a month navigation button ("Go to the Previous Month", "Next month", "‹", and "Previous" or "Next" alone next to a calendar; a wizard's "Next" waits);
+- Enter in that form or dialog;
+- DONE of an act goal, for the whole page.
+
+A task date belongs to the field whose head gives it at least `GATES.dateField` (0.80), by at least `GATES.dateMargin` (0.20) more than any other field. A field takes one date: the one with the higher probability. When an assigned field does not show its date, the action does not run. The click is banned for the step, the re-ask does not offer DONE, and the `retry_reason` names each field, what it shows, and the task date. The re-ask budget is the same as for low_target. A picker's confirm button can be "Update", "Done", "OK", "Apply", "Select", or "Set", so its name does not decide. In the lab, the retry reason and the ban moved TYPE_TEXT from about 0.52 to 0.86-0.89. The gate also stops a DONE on an observation of a picker that is still closing when its fields show other dates.
+
+On a form with an invoice date and a due date, where the task names only the due date, the gate names only a field that the heads clearly choose. When both heads give the date, no field gets it and nothing is gated, so the gate never asks for a date in a field that must keep its value. A date field with no form or dialog around it gates only DONE.
+
+**The calendar range check.** It applies to a grid that takes a range (`aria-multiselectable`), with no date field in its form or dialog, when the task has one start date and one end date. A selected day outside the task range, a day inside it that is not selected, or a start or end day that is not the start or the end of the selection gates the confirm click and DONE in the same way. react-day-picker adds each click to the range that is already set: Sep 1, then Sep 15, on Aug 24 to Sep 23 gives Aug 24 to Sep 15. The check reads only the days in view.
+
+Known limits:
+
+- Code does not drive a calendar. It does not click days or month buttons, and it does not collapse a range. A calendar without a date field (the Workflows list, the shared DateInput) can only block before a wrong range is confirmed.
+- One text box with a date format (react-datepicker, Mantine, Ant Design, MUI v6) is a plain text field.
+- react-aria and MUI segments are tested with a hand-made page, not with those libraries.
+- Each part fires the page's change event with a date in between. A page that saves on change saves that date.
+- A task date for another purpose that the heads clearly give to a date field makes the gate stop a correct submit. The run then blocks, which is safe.
+- A missing year and relative dates block. Times get no parse: a time input takes only a span in the input's own form ("10:30").
+- A group shows as one field only when all its parts are in view. Otherwise its parts are plain fields with `datePart` until a scroll shows the whole group.
+- When a part has focus, the focus in the state names the part ("M"), not the group.
+
 ## 6. Completion, blocking, and human hand-off
 
 ### 6.1 Act
@@ -444,7 +504,7 @@ The direct snapshot reads visible text and supported controls in one page evalua
 
 Before a targeted action, compare the page key and target guard. The page key includes document identity, URL, viewport, safe form values, and scroll state. The target guard includes identity, accessible name, value, state, link destination, and nearby form, dialog, or row text. Geometry is resolved and hit-tested immediately before input.
 
-Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change, form change, or rich-text editor value change invalidates a pending Enter action. Native inputs, textareas, and contenteditable editors expose their values; contenteditable editors support true, empty, and plaintext-only attribute forms. Text changes elsewhere need not invalidate an unrelated targeted click or fill.
+Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change, form change, or rich-text editor value change invalidates a pending Enter action. Native inputs, textareas, and contenteditable editors expose their values; contenteditable editors support true, empty, and plaintext-only attribute forms. `Page.setDate` sets a date field with one freshness check for all its parts (section 5.6). Text changes elsewhere need not invalidate an unrelated targeted click or fill.
 
 Document scrolling and panel scrolling are separate actions. A panel action retains its node identity and scroll position. Prefer a scrollable panel with focus, then the largest visible panel. Clip observations to the panel viewport and check that the panel is still usable before scrolling.
 
@@ -575,6 +635,7 @@ Maintain coverage for these behaviors:
 | Ownership | Concurrent profile launch and refresh rejected, existing locks retained, lock release after exit, temporary cleanup, attached tab preservation |
 | Process lifetime | SIGINT during launch, error cleanup, CLI exit with keep-open after success and failure, chat connection reuse |
 | Interfaces | Exactly one result JSON document, exit mapping, argument errors, browser envelopes, CDP response matching, HTTP connection close |
+| Dates | Task date forms, ambiguity, and range roles; the snapshot facts of native inputs, part groups, and calendar days; the conditional date rule; the date head; the part order; read-back and `date_mismatch`; the date gate and its assignment; the calendar range check |
 | Assistant text | `canWriteInto`, field batches, redaction before cuts, sanitizing, `checkTexts` rules, the `generate` option and its texts, binding, single use, the unsent-text gate with fields out of view, the text request cap, cancel checkpoints |
 | MCP server | Tool names, annotations, and schemas; each status in the view; the token budget; `next` texts; dialogs and the interactive rule; cancel and `stopping`; idle timers; session reuse and relaunch; only JSON-RPC on stdout; exit on stdin end and on signals; the bundle and the plugin files |
 

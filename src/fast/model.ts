@@ -56,6 +56,50 @@ export interface Chrome {
 
 export type ActionKind = "click" | "fill" | "select" | "scroll" | "wait";
 
+export type DatePartName = "month" | "day" | "year";
+
+/**
+ * A date field. Code only; never sent to Jev. It is a native date, month, datetime-local, time, or week input, or a group
+ * of one month, one day, and one year part in a container with no other text box, which the snapshot shows as one field.
+ */
+export interface DateInfo {
+  kind: "group" | "date" | "month" | "datetime-local" | "time" | "week";
+  /** A group: its parts in page order, with their values. The first part is the field's node. */
+  parts?: { part: DatePartName; node: number; value: string; spin: boolean }[];
+  /** A group: the text between its first two parts ("/", ".", "-", or " "). A native date: the separator of the page locale. */
+  sep?: string;
+  /** A native date: the page locale's order of the numeric parts, for example "MDY". A group has the order of its parts. */
+  order?: string;
+  /** A group: the month and the day show two digits ("MM", "DD", or a current value with a leading zero). */
+  pad?: boolean;
+  /** A group: the year has two digits ("YY", or a year part with maxLength 2). */
+  short?: boolean;
+  /** The start or the end of a range: a separator ("-", "–", "to") between two groups, or start and end labels. */
+  role?: "start" | "end";
+  /** The two fields of one range have the same id. */
+  range?: number;
+  /** A native input: its min and max attributes. */
+  min?: string;
+  max?: string;
+}
+
+/** A day of a calendar grid. Code only; never sent to Jev. */
+export interface CalendarDay {
+  /** The grid, an id from the snapshot's own counter. */
+  grid: number;
+  /** YYYY-MM-DD from a machine attribute of the cell, or null: code then reads the label. */
+  day: string | null;
+  /** The grid takes a range (aria-multiselectable). */
+  multi: boolean;
+  /** The cell or its button is selected. */
+  sel: boolean;
+  /** The place in a range selection, from data-range-* or data-selection-* attributes. */
+  pos?: "start" | "middle" | "end" | "single";
+}
+
+/** How `Page.setDate` sets a date field: the native value, or the text of each part of a group in the order to type them. */
+export type DatePlan = { native: string } | { parts: { node: number; text: string; spin: boolean }[] };
+
 /** One executable action the in-page script observed. `node` is the code-owned node identity, never a selector. */
 export interface Action {
   id: string;                         // "e1".."e250", "scroll_down", "scroll_up", "wait"
@@ -76,6 +120,10 @@ export interface Action {
   maxLength?: number;                 // INPUT/TEXTAREA maxLength when > 0
   inputType?: string;                 // INPUT type, lowercased; absent for other tags
   autocomplete?: string;              // autocomplete attribute, lowercased, when set
+  // Date facts. Set by the snapshot; never sent to Jev.
+  date?: DateInfo;                    // a date field: code types a whole task date into it (Page.setDate)
+  datePart?: DatePartName;            // a month, day, or year part that is not in a whole group
+  day?: CalendarDay;                  // a day of a calendar grid
 }
 
 export interface Observation {
@@ -167,6 +215,14 @@ export interface Page {
   fresh(obs: Observation, action?: Action): Promise<boolean>;
   /** Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws StalePage when anything changed; nothing is executed then. `text` is required for a fill. */
   act(action: Action, obs: Observation, text?: string): Promise<void>;
+  /**
+   * Set a date field (an action with `date`) after one freshness check. A native input gets the value through the native
+   * setter, then input and change events. A group gets each part in plan order: a click, then the part text (select all
+   * and insert; a spinbutton gets one key per character), then a blur of the last part. Throws StalePage when the page
+   * changed before the first input; nothing is typed then. A part that is gone or covered later stops the plan: the caller
+   * reads the field back.
+   */
+  setDate(action: Action, obs: Observation, plan: DatePlan): Promise<void>;
   /** Press one key on the focused element (for example "Enter", "Escape"). With `obs`, throws StalePage when the page key no longer matches the observation; nothing is pressed then. */
   press(key: string, obs?: Observation): Promise<void>;
   /** Navigate the tab and wait for document.readyState === "complete", polling every 20 ms, up to `timeoutMs`. */

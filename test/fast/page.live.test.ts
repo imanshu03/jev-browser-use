@@ -12,13 +12,16 @@ import { findChrome, launchChrome } from "../../src/fast/chrome.js";
 import type { Action, Chrome, Observation, Page } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
-import { canPressEnter } from "../../src/fast/policy.js";
+import { canPressEnter, canWriteInto } from "../../src/fast/policy.js";
+import { calendarDay, datePlan, hasDateWidget, shownOf } from "../../src/fast/dates.js";
 import { fakeLogger } from "../fakes.js";
 
 const FIXTURES = path.resolve(__dirname, "../fixtures/live");
 const formUrl = pathToFileURL(path.join(FIXTURES, "form.html")).href;
 const liveUrl = pathToFileURL(path.join(FIXTURES, "live.html")).href;
 const replyUrl = pathToFileURL(path.join(FIXTURES, "reply.html")).href;
+const segmentsUrl = pathToFileURL(path.join(FIXTURES, "dates-segments.html")).href;
+const nativeUrl = pathToFileURL(path.join(FIXTURES, "dates-native.html")).href;
 const NAV_MS = 5000;
 
 function find(obs: Observation, kind: Action["kind"], label: string): Action {
@@ -658,4 +661,132 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions: process ow
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 20_000);
+});
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("date fields (live Chrome)", () => {
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+  const evaluate = async (expression: string) => {
+    const result = await chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    return (result["result"] as { value?: unknown })?.value;
+  };
+  const field = (obs: Observation, label: string): Action => {
+    const a = obs.actions.find((x) => x.kind === "fill" && x.label === label && x.date !== undefined);
+    if (!a) throw new Error(`no date field "${label}" among: ${obs.actions.filter((x) => x.kind === "fill").map((x) => x.label).join(", ")}`);
+    return a;
+  };
+  /** Set a date field as the loop does: plan from the observation, set, observe. */
+  const set = async (label: string, want: string): Promise<Observation> => {
+    const obs = await page.observe();
+    const a = field(obs, label);
+    const planned = datePlan(a, obs, want);
+    if (!planned) throw new Error(`no plan for ${label}`);
+    await page.setDate(a, obs, planned.plan);
+    return page.observe();
+  };
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  it("shows each whole part group as one date field with range roles, and no part rows or Open clicks", async () => {
+    await page.navigate(segmentsUrl, NAV_MS);
+    const obs = await page.observe();
+    const start = field(obs, "Date range start (M/D/YYYY)");
+    const end = field(obs, "Date range end (M/D/YYYY)");
+    expect(start).toMatchObject({ kind: "fill", role: "textbox", value: "8/24/2026" });
+    expect(start.date).toMatchObject({ kind: "group", sep: "/", order: "MDY", pad: false, short: false, role: "start" });
+    expect(end.date).toMatchObject({ role: "end", range: start.date?.range });
+    expect(start.date?.parts?.map((p) => [p.part, p.value, p.spin])).toEqual([["month", "8", false], ["day", "24", false], ["year", "2026", false]]);
+    expect(start.node).toBe(start.date?.parts?.[0]?.node);
+    expect(field(obs, "Due date (M/D/YYYY)").date?.role).toBeUndefined();
+    expect(field(obs, "Event date (M/D/YYYY)").date?.parts?.every((p) => p.spin)).toBe(true);
+    // Two groups without a range word between them are two plain "Date" fields.
+    expect(obs.actions.filter((a) => a.label === "Date (M D YYYY)").map((a) => a.date?.role)).toEqual([undefined, undefined]);
+    // No part is an action, and no part has an "Open" click. Card expiry parts are not date parts; a lone MM is.
+    expect(obs.actions.some((a) => /^(Open )?(M|D|YYYY)$/.test(a.label))).toBe(false);
+    expect(obs.actions.filter((a) => a.label === "MM").map((a) => [a.autocomplete ?? "", a.datePart ?? ""])).toEqual([["cc-exp-month", ""], ["", "month"]]);
+    expect(obs.actions.filter((a) => a.date !== undefined).every((a) => !canWriteInto(a))).toBe(true);
+    // The calendar: ISO days from the cells (never the button's locale data-day), the selection, and the range flags.
+    const days = obs.actions.filter((a) => a.day !== undefined);
+    expect(days).toHaveLength(61);
+    expect(days.find((a) => a.day?.day === "2026-08-24")?.day).toMatchObject({ multi: true, sel: true, pos: "start" });
+    expect(days.find((a) => a.day?.day === "2026-09-01")?.day).toMatchObject({ sel: true, pos: "middle" });
+    expect(days.find((a) => a.day?.day === "2026-09-23")?.day).toMatchObject({ sel: true, pos: "end" });
+    expect(days.find((a) => a.day?.day === "2026-09-24")?.day).toMatchObject({ sel: false });
+    expect(calendarDay(days[0] as Action)).toEqual({ y: 2026, m: 8, d: 1 });
+    expect(new Set(days.map((a) => a.form))).toEqual(new Set([start.form]));
+    expect(hasDateWidget(obs)).toBe(true);
+  });
+
+  it("types a range start day first, so the end does not move; then the end; then Update reports the range", async () => {
+    await page.navigate(segmentsUrl, NAV_MS);
+    const first = await page.observe();
+    expect(datePlan(field(first, "Date range start (M/D/YYYY)"), first, "2026-09-01")?.order).toBe("day,month");
+    const afterStart = await set("Date range start (M/D/YYYY)", "2026-09-01");
+    expect(field(afterStart, "Date range start (M/D/YYYY)").value).toBe("9/1/2026");
+    expect(field(afterStart, "Date range end (M/D/YYYY)").value).toBe("9/23/2026");
+    const afterEnd = await set("Date range end (M/D/YYYY)", "2026-09-15");
+    expect(shownOf(field(afterEnd, "Date range end (M/D/YYYY)"))).toBe("2026-09-15");
+    expect(afterEnd.actions.filter((a) => a.day?.sel).map((a) => a.day?.day)).toEqual(Array.from({ length: 15 }, (_, i) => `2026-09-${String(i + 1).padStart(2, "0")}`));
+    await page.act(find(afterEnd, "click", "Update"), afterEnd);
+    expect(await evaluate("window.log")).toEqual(["date 2026-09-01 2026-09-15"]);
+  });
+
+  it("the order matters on the real part behavior: 10/31 to 9/30 month first ends at 10/30, day first at 9/30", async () => {
+    await page.navigate(segmentsUrl, NAV_MS);
+    const obs = await page.observe();
+    const due = field(obs, "Due date (M/D/YYYY)");
+    const [month, day] = due.date?.parts ?? [];
+    await page.setDate(due, obs, { parts: [{ node: month?.node as number, text: "9", spin: false }, { node: day?.node as number, text: "30", spin: false }] });
+    expect(field(await page.observe(), "Due date (M/D/YYYY)").value).toBe("10/30/2026");
+    await page.navigate(segmentsUrl, NAV_MS);
+    const again = await page.observe();
+    expect(datePlan(field(again, "Due date (M/D/YYYY)"), again, "2026-09-30")?.order).toBe("day,month");
+    expect(field(await set("Due date (M/D/YYYY)", "2026-09-30"), "Due date (M/D/YYYY)").value).toBe("9/30/2026");
+  });
+
+  it("types spinbutton segments key by key", async () => {
+    await page.navigate(segmentsUrl, NAV_MS);
+    const after = await set("Event date (M/D/YYYY)", "2027-12-05");
+    expect(shownOf(field(after, "Event date (M/D/YYYY)"))).toBe("2027-12-05");
+  });
+
+  it("a stale observation types nothing", async () => {
+    await page.navigate(segmentsUrl, NAV_MS);
+    const obs = await page.observe();
+    await evaluate("document.querySelector('#g-due input').value='1'");
+    const due = field(obs, "Due date (M/D/YYYY)");
+    await expect(page.setDate(due, obs, datePlan(due, obs, "2026-09-30")?.plan as never)).rejects.toBeInstanceOf(StalePage);
+  });
+
+  it("native date inputs are fill actions without Open clicks, and the value setter sets them with input and change events", async () => {
+    await page.navigate(nativeUrl, NAV_MS);
+    const obs = await page.observe();
+    const shape = await evaluate("new Intl.DateTimeFormat(undefined,{year:'numeric',month:'numeric',day:'numeric'}).formatToParts(new Date(2026,10,23)).filter(p=>p.type!=='literal').map(p=>p.type[0].toUpperCase()).join('')");
+    expect(field(obs, "Due date (date)")).toMatchObject({ value: "2026-08-24", inputType: "date", date: { kind: "date", min: "2026-01-01", max: "2026-12-31", order: shape } });
+    expect(field(obs, "Meeting (date and time)").date?.kind).toBe("datetime-local");
+    expect(field(obs, "Billing month (month)").date?.kind).toBe("month");
+    expect(field(obs, "Start time (time)").date?.kind).toBe("time");
+    expect(field(obs, "Week (week)").date?.kind).toBe("week");
+    expect(obs.actions.some((a) => a.label.startsWith("Open ") && a.inputType !== undefined && ["date", "month", "time", "week", "datetime-local"].includes(a.inputType))).toBe(false);
+    // The GOV.UK group: the legend labels it, and the day comes first.
+    expect(field(obs, "Date of birth (D M YYYY)").date).toMatchObject({ kind: "group", order: "DMY", sep: " " });
+    const due = await set("Due date (date)", "2026-09-15");
+    expect(field(due, "Due date (date)").value).toBe("2026-09-15");
+    expect(await evaluate("window.log")).toEqual(["due input 2026-09-15", "due change 2026-09-15"]);
+    expect(field(await set("Meeting (date and time)", "2026-09-01T10:30"), "Meeting (date and time)").value).toBe("2026-09-01T10:30");
+    expect(field(await set("Billing month (month)", "2026-09"), "Billing month (month)").value).toBe("2026-09");
+    expect(field(await set("Start time (time)", "09:30"), "Start time (time)").value).toBe("09:30");
+    expect(field(await set("Week (week)", "2026-W36"), "Week (week)").value).toBe("2026-W36");
+    expect(shownOf(field(await set("Date of birth (D M YYYY)", "1990-03-07"), "Date of birth (D M YYYY)"))).toBe("1990-03-07");
+  });
 });

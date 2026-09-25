@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
 import { cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
-import type { Action, Observation, Page, UnsentText } from "../../src/fast/model.js";
+import type { Action, DateInfo, Observation, Page, UnsentText } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 import type { RunnerHints, TextReply, TextSource } from "../../src/io.js";
 import { emptyResult } from "../../src/io.js";
@@ -1050,8 +1050,9 @@ describe("requests without a text source (regression)", () => {
     // Taken again on 2026-09-23, when one value head per field replaced the shared type_text_value head and a field that
     // can take new text stopped offering the whole task and clauses. Taken again on 2026-09-25, when only a sentence dot
     // started to end a clause: "wikipedia.org" is one clause span, and the pieces of a URL ("https://mail", "example/t/1")
-    // and of a quote ("to Ann") are no longer clause spans.
-    expect(digest(out)).toBe("71f56a00c305282df7f390a45af515304e15eb973b6f1a4a2940d2360bdd6de8");
+    // and of a quote ("to Ann") are no longer clause spans. Taken again on 2026-09-26, when the date rule went into the
+    // requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
+    expect(digest(out)).toBe("2e8ec4dc523b76829eb008b077351637815e7fbafe01cc8f4ccd34f38db9a071");
   });
 });
 
@@ -2749,5 +2750,232 @@ describe("value requests", () => {
     expect(t.page.calls).toContainEqual({ op: "act", id: "e10", kind: "fill", text: "Ann Lee" });
     expect(r.steps[0]).toMatchObject({ value: "Ann Lee", value_conf: 0.9, result: "ok", jev_requests: 2 });
     expect(r.outcome).toBe("done");
+  });
+});
+
+describe("date fields", () => {
+  const URL = "https://app.test/usage";
+  /** A month-day-year group as the snapshot shows it: one fill action at the month part. */
+  const group = (id: string, node: number, label: string, [m, d, y]: [string, string, string], extra: Partial<DateInfo> = {}): Action => el(id, "fill", label, "textbox", {
+    node, value: `${m}/${d}/${y}`, form: 5, multiline: false,
+    date: { kind: "group", sep: "/", order: "MDY", pad: false, short: false, ...extra,
+      parts: [{ part: "month", node, value: m, spin: false }, { part: "day", node: node + 1, value: d, spin: false }, { part: "year", node: node + 2, value: y, spin: false }] },
+  });
+  const trigger = el("e1", "click", "Aug 24, 2026 – Sep 23, 2026", "button", { node: 1, form: null });
+  const picker = (start: [string, string, string], end: [string, string, string]): Observation => obs(URL, [
+    trigger,
+    group("e2", 10, "Date range start (M/D/YYYY)", start, { role: "start", range: 1 }),
+    group("e3", 13, "Date range end (M/D/YYYY)", end, { role: "end", range: 1 }),
+    el("e4", "click", "Cancel", "button", { node: 30, form: 5 }),
+    el("e5", "click", "Update", "button", { node: 31, form: 5 }),
+  ], `Usage\n${start.join("/")} - ${end.join("/")}`);
+  const TASK = "Set the usage date range from 1 September 2026 to 15 September 2026 and click Update";
+  const pages = {
+    closed: obs(URL, [trigger], "Usage\nShowing 2026-08-24 to 2026-09-23"),
+    open: picker(["8", "24", "2026"], ["9", "23", "2026"]),
+    start: picker(["9", "1", "2026"], ["9", "23", "2026"]),
+    both: picker(["9", "1", "2026"], ["9", "15", "2026"]),
+    done: obs(URL, [trigger], "Usage\nShowing 2026-09-01 to 2026-09-15"),
+  };
+  /** The value of the state row whose label starts with `label`. */
+  const row = (state: unknown, label: string): string | undefined => (state as { elements: { label: string; value?: string }[] }).elements.find((e) => e.label.startsWith(label))?.value;
+  const retry = (state: unknown): string | undefined => (state as { retry_reason?: string }).retry_reason;
+  /** The date heads answer as the lab: the start date into the start field, the end date into the end field. */
+  const heads = (q: Questions): PartialAnswers => {
+    const out: PartialAnswers = {};
+    const start = idx(q, "type_text_target", "Date range start");
+    const end = idx(q, "type_text_target", "Date range end");
+    out[`value_${start}`] = { choice: "s1", confidence: 0.99, probabilities: { s1: 0.99, s2: 0.005, none: 0.005 } };
+    out[`value_${end}`] = { choice: "s2", confidence: 0.97, probabilities: { s1: 0.01, s2: 0.97, none: 0.02 } };
+    return out;
+  };
+  const click = (q: Questions, label: string, conf = 0.9): PartialAnswers => ({ operation: { choice: "CLICK", confidence: 0.85, probabilities: { CLICK: 0.85, TYPE_TEXT: 0.1, DONE: 0.05 } }, click_target: { choice: idx(q, "click_target", label), confidence: conf } });
+  const type = (q: Questions, label: string): PartialAnswers => ({ operation: { choice: "TYPE_TEXT", confidence: 0.7, probabilities: { TYPE_TEXT: 0.7, CLICK: 0.25, DONE: 0.05 } }, type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.95 } });
+  const flow = (call: { op: string; id?: string }, current: string): string | undefined => {
+    if (call.op === "act" && call.id === "e1") return "open";
+    if (call.op === "setDate" && call.id === "e2") return current === "both" ? "both" : "start";
+    if (call.op === "setDate" && call.id === "e3") return "both";
+    if (call.op === "act" && call.id === "e5") return "done";
+    return undefined;
+  };
+
+  it("Update waits for the date fields; the start goes in day first, the end next, then Update and DONE", async () => {
+    const t = setup(TASK, { pages, start: "closed", transitions: flow }, (name, state, q) => {
+      if (name !== "step") return {};
+      const start = row(state, "Date range start");
+      if (start === undefined) {
+        if ((state as { page: { text: string } }).page.text.includes("2026-09-01")) return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, CLICK: 0.1 } } };
+        return click(q, "Aug 24, 2026");
+      }
+      // The first ask on the open picker clicks Update, as Jev did in every bench run before the date fields.
+      if (start === "8/24/2026" && retry(state) === undefined) return { ...click(q, "Update"), ...heads(q) };
+      if (start === "8/24/2026") return { ...type(q, "Date range start"), ...heads(q) };
+      if (row(state, "Date range end") === "9/23/2026") return { ...type(q, "Date range end"), ...heads(q) };
+      return { ...click(q, "Update"), ...heads(q) };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.map((c) => c.op === "setDate" ? `${c.id}:${JSON.stringify(c.plan)}` : `${c.op}:${c.id ?? c.url}`)).toEqual([
+      "navigate:https://app.test/usage", "act:e1",
+      'e2:{"parts":[{"node":11,"text":"1","spin":false},{"node":10,"text":"9","spin":false}]}',
+      'e3:{"parts":[{"node":14,"text":"15","spin":false}]}',
+      "act:e5",
+    ]);
+    const states = stepStates(t) as unknown as { retry_reason?: string; recent_actions: { action: string; kind: string; text: string | null }[] }[];
+    expect(states[2]?.retry_reason).toContain("Update\" was not executed: date_unset: date field \"Date range start (M/D/YYYY)\" shows 8/24/2026, not 1 September 2026; date field \"Date range end (M/D/YYYY)\" shows 9/23/2026, not 15 September 2026");
+    // The re-ask does not offer the gated Update.
+    const reask = t.oracle.requests.filter((x) => x.name === "step")[2];
+    expect(JSON.stringify((reask?.questions["click_target"] as ChoiceQuestion).criteria)).not.toContain("Update");
+    expect(r.steps[1]).toMatchObject({ operation: "TYPE_TEXT", action: "fill", value: "1 September 2026", value_conf: 0.99, result: "ok" });
+    expect(r.steps[1]?.gate).toContain("date 2026-09-01");
+    expect(states.at(-1)?.recent_actions.slice(1, 4)).toEqual([
+      { action: "Date range start (M/D/YYYY)", kind: "fill", text: "1 September 2026", page_changed: true },
+      { action: "Date range end (M/D/YYYY)", kind: "fill", text: "15 September 2026", page_changed: true },
+      { action: "Update", kind: "click", text: null, page_changed: true },
+    ]);
+  });
+
+  it("DONE waits while a date field shows another date, and the re-ask does not offer DONE", async () => {
+    const t = setup(TASK, { pages, start: "open", transitions: flow }, (name, state, q) => {
+      if (name !== "step") return {};
+      const ops = Object.keys((q["operation"] as ChoiceQuestion).criteria);
+      if (retry(state) === undefined) return { operation: { choice: "DONE", confidence: 0.8, probabilities: { DONE: 0.8, TYPE_TEXT: 0.2 } }, ...heads(q) };
+      expect(ops).not.toContain("DONE");
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other", ...heads(q) };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(t.page.calls.filter((c) => c.op !== "navigate")).toEqual([]);
+    const states = stepStates(t) as unknown as { retry_reason?: string }[];
+    expect(states[1]?.retry_reason).toMatch(/^DONE was not executed: date_unset: date field "Date range start \(M\/D\/YYYY\)" shows 8\/24\/2026/);
+  });
+
+  it("Enter in the picker waits for the date fields too", async () => {
+    const focused = { ...pages.open, focus: { node: 10, label: "M", role: "textbox", submitLabel: "", editable: true, value: "8", form: 5 } };
+    const t = setup(TASK, { pages: { open: focused }, start: "open" }, (name, state, q) => {
+      if (name !== "step") return {};
+      if (retry(state) === undefined) return { operation: { choice: "PRESS_ENTER", confidence: 0.9, probabilities: { PRESS_ENTER: 0.9, TYPE_TEXT: 0.1 } }, ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(t.page.calls.filter((c) => c.op === "press")).toEqual([]);
+    expect((stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason).toContain("date_unset: date field \"Date range start (M/D/YYYY)\" shows 8/24/2026");
+  });
+
+  it("a wrong read-back gets a second pass in another order, then date_mismatch with the value the field shows; the field stays offered", async () => {
+    // The page puts the day back each time: the field shows 9/24/2026.
+    const wrong = picker(["9", "24", "2026"], ["9", "23", "2026"]);
+    let asks = 0;
+    const t = setup(TASK, { pages: { open: pages.open, wrong }, start: "open", transitions: (c) => (c.op === "setDate" ? "wrong" : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      asks += 1;
+      if (asks === 1) return { ...type(q, "Date range start"), ...heads(q) };
+      expect(row(state, "Date range start")).toBe("9/24/2026");
+      expect(idx(q, "type_text_target", "Date range start")).toBeDefined();
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    const plans = t.page.calls.filter((c) => c.op === "setDate").map((c) => JSON.stringify(c.plan));
+    expect(plans).toEqual([
+      '{"parts":[{"node":11,"text":"1","spin":false},{"node":10,"text":"9","spin":false}]}',
+      '{"parts":[{"node":11,"text":"1","spin":false}]}',
+    ]);
+    expect(r.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "failed", gate: "date_mismatch: \"Date range start (M/D/YYYY)\" shows 9/24/2026, not 1 September 2026" });
+    expect(stepStates(t)[1]?.recent_actions).toEqual([
+      { action: "Date range start (M/D/YYYY)", kind: "fill", text: "1 September 2026", page_changed: true },
+      { action: "Date range start (M/D/YYYY)", kind: "date_mismatch", text: "the field shows 9/24/2026", page_changed: false },
+    ]);
+  });
+
+  it("a second pass that reads back right is ok", async () => {
+    let n = 0;
+    const t = setup(TASK, { pages: { open: pages.open, wrong: picker(["9", "24", "2026"], ["9", "23", "2026"]), start: pages.start }, start: "open", transitions: (c) => (c.op === "setDate" ? (++n === 1 ? "wrong" : "start") : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      if (row(state, "Date range start") === "8/24/2026") return { ...type(q, "Date range start"), ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ result: "ok" });
+    expect(r.steps[0]?.gate).toContain("date 2026-09-01 second pass");
+  });
+
+  it("an invoice date and a due date: Save waits only for the due date that the heads give it, and names only that field", async () => {
+    const form = (due: string): Observation => obs("https://app.test/invoice", [
+      el("e1", "fill", "Invoice date (date)", "textbox", { node: 1, value: "2026-09-01", form: 2, inputType: "date", date: { kind: "date", order: "MDY", sep: "/" } }),
+      el("e2", "fill", "Due date (date)", "textbox", { node: 2, value: due, form: 2, inputType: "date", date: { kind: "date", order: "MDY", sep: "/" } }),
+      el("e3", "click", "Save", "button", { node: 3, form: 2 }),
+    ], "Invoice");
+    const task = "Set the due date to 15 September 2026 and click Save";
+    const t = setup(task, { pages: { a: form("2026-09-30"), b: form("2026-09-15"), c: obs("https://app.test/invoice", [], "Saved") }, start: "a", transitions: (c) => (c.op === "setDate" ? "b" : c.op === "act" && c.id === "e3" ? "c" : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      if ((state as { page: { text: string } }).page.text === "Saved") return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9 } } };
+      const due = { [`value_${idx(q, "type_text_target", "Invoice date")}`]: { choice: "s1", confidence: 0.3, probabilities: { s1: 0.3, none: 0.7 } }, [`value_${idx(q, "type_text_target", "Due date")}`]: { choice: "s1", confidence: 0.96, probabilities: { s1: 0.96, none: 0.04 } } };
+      if (row(state, "Due date") === "2026-09-30" && retry(state) === undefined) return { ...click(q, "Save"), ...due };
+      if (row(state, "Due date") === "2026-09-30") return { ...type(q, "Due date"), ...due };
+      return { ...click(q, "Save"), ...due };
+    }, { url: "https://app.test/invoice" });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const reason = (stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason;
+    expect(reason).toContain("date field \"Due date (date)\" shows 2026-09-30, not 15 September 2026");
+    expect(reason).not.toContain("Invoice");
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([{ op: "setDate", id: "e2", plan: { native: "2026-09-15" } }]);
+  });
+
+  it("a native date outside min and max blocks and sets nothing", async () => {
+    const page = obs("https://app.test/book", [el("e1", "fill", "Check-in (date)", "textbox", { node: 1, value: "", form: 2, inputType: "date", date: { kind: "date", min: "2026-10-01", max: "2026-12-31", order: "MDY", sep: "/" } })]);
+    const t = setup("Set check-in to 15 September 2026", { pages: { a: page }, start: "a" },
+      byUrl({ [page.url]: (q) => ({ ...type(q, "Check-in"), [`value_${idx(q, "type_text_target", "Check-in")}`]: { choice: "s1", confidence: 0.95 } }) }), { url: page.url });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "impossible", hint: "date field \"Check-in (date)\" takes dates from 2026-10-01 to 2026-12-31; 15 September 2026 is outside them" });
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([]);
+  });
+
+  it("an ambiguous numeric date is never typed into a field of another shape; the hint names the fix", async () => {
+    const dotted = obs("https://app.test/de", [group("e1", 10, "Datum (D.M.YYYY)", ["24", "8", "2026"], { sep: ".", order: "DMY",
+      parts: [{ part: "day", node: 10, value: "24", spin: false }, { part: "month", node: 11, value: "8", spin: false }, { part: "year", node: 12, value: "2026", spin: false }] })]);
+    const t = setup("Set the date to 9/1/2026", { pages: { a: dotted }, start: "a" }, byUrl({ [dotted.url]: (q) => type(q, "Datum") }), { url: dotted.url });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: "date field \"Datum (D.M.YYYY)\" cannot take 9/1/2026: its day and month can change places. Write the month as a word or use YYYY-MM-DD" });
+    expect(t.page.calls.filter((c) => c.op !== "navigate")).toEqual([]);
+  });
+
+  it("a task without a date blocks a date fill with the date hint", async () => {
+    const t = setup("Open the usage page and click Update", { pages: { open: pages.open }, start: "open" }, byUrl({ [URL]: (q) => type(q, "Date range start") }), { url: URL });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: "date field \"Date range start (M/D/YYYY)\" needs a date: give the date in the task, for example 1 September 2026 or 2026-09-01" });
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([]);
+  });
+
+  it("a calendar without date fields: Update and DONE wait while the selection is not the task range", async () => {
+    const day = (id: string, node: number, iso: string, sel: boolean, pos?: "start" | "middle" | "end"): Action =>
+      el(id, "click", `Day ${iso}`, "button", { node, form: 5, day: { grid: 1, day: iso, multi: true, sel, ...(pos ? { pos } : {}) } });
+    // react-day-picker added the clicks on Sep 1 and Sep 15 to the old range: Aug 24 - Sep 15.
+    const extended = obs(URL, [
+      day("e1", 1, "2026-08-24", true, "start"), day("e2", 2, "2026-09-01", true, "middle"), day("e3", 3, "2026-09-15", true, "end"),
+      el("e4", "click", "Update", "button", { node: 4, form: 5 }),
+    ], "Workflows");
+    const t = setup(TASK, { pages: { a: extended }, start: "a" }, (name, state, q) => {
+      if (name !== "step") return {};
+      const n = t.oracle.requests.filter((x) => x.name === "step").length;
+      if (n === 1) return click(q, "Update");
+      if (n === 2) return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9 } } };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "act")).toEqual([]);
+    const reasons = (stepStates(t) as unknown as { retry_reason?: string }[]).map((x) => x.retry_reason);
+    expect(reasons[1]).toContain("date_unset: the calendar shows 2026-08-24 to 2026-09-15 selected, not 1 September 2026 to 15 September 2026");
+    expect(r.outcome).toBe("blocked");
+  });
+
+  it("a plugin run never asks the assistant for a date field", async () => {
+    const text = fakeText([{ kind: "text", values: { f1: "1 September 2026" } }]);
+    const t = setup(TASK, { pages: { open: pages.open }, start: "open" }, byUrl({ [URL]: (q) => ({ ...type(q, "Date range start"), [`value_${idx(q, "type_text_target", "Date range start")}`]: { choice: "generate", confidence: 0.9 } }) }), { url: URL }, { text, fromAssistant: true });
+    const r = await t.runner.run();
+    expect(text.requests).toEqual([]);
+    expect(r.blocked?.kind).toBe("needs_credential");
+    expect(t.oracle.requests.some((x) => JSON.stringify(x.questions).includes("generate"))).toBe(false);
   });
 });

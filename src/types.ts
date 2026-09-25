@@ -63,6 +63,19 @@ export interface SpanField {
   request: string;                // "t1".."t3"
 }
 
+/** A calendar date. */
+export interface DateValue { y: number; m: number; d: number }
+
+/**
+ * The date that the whole text of a span names. Code only; never sent to Jev. `ambiguous` is set for a numeric date whose
+ * first two numbers can both be a month ("9/1/2026"): `m` and `d` are then the first and the second number, and the fact
+ * holds only for a date field whose parts show in the same shape (`dateFor` in src/fast/dates.ts).
+ */
+export interface DateFact extends DateValue {
+  /** The separator of an ambiguous numeric date: "/", ".", or "-". */
+  ambiguous?: string;
+}
+
 export interface Span {
   id: string;                     // "s<n>" task, "v_<key>" var, "g<n>" generated
   text: string;
@@ -80,6 +93,10 @@ export interface Span {
   longCut?: true;
   secret: boolean;                // always false for "generated"
   field?: SpanField;              // only for "generated"
+  /** The date that the whole text names. Only a date field takes a span with a date. */
+  date?: DateFact;
+  /** The span is the start or the end of a date range of the task ("from A to B", "between A and B", "A – B"). */
+  dateRole?: "start" | "end";
 }
 
 /** One executed action. The first six fields go to Jev as `recent_actions`. */
@@ -209,6 +226,7 @@ export const GATES = {
   site: 0.70, wantsSearch: 0.60, searchQuery: 0.50, goal: 0.50,
   extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,
   done: 0.50, answerLine: 0.20,       // fast engine: P(DONE) for act goals; answer_line confidence for extract goals
+  dateField: 0.80, dateMargin: 0.20,  // fast engine date gate: a task date belongs to the field whose value head gives it this much, by this margin
 } as const;
 
 export const LIMITS = {
