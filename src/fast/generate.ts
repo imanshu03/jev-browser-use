@@ -87,15 +87,20 @@ export function pickFields(obs: Observation, target: Action, skip: { banned: Set
   }));
 }
 
-/** The request the assistant answers. The key order is fixed, and the page text is the last key. */
-export function buildTextRequest(a: { id: string; task: string; obs: Observation; history: FastHistoryEntry[]; fields: TextField[]; redactor: (s: string) => string }): TextRequest {
+/**
+ * The request the assistant answers. The key order is fixed, and the page text is the last key. `sent`: the texts that
+ * a send of this run took out of the page, so the assistant does not write one of them again.
+ */
+export function buildTextRequest(a: { id: string; task: string; obs: Observation; history: FastHistoryEntry[]; fields: TextField[]; redactor: (s: string) => string; sent?: { field: string; text: string }[] }): TextRequest {
   const r = a.redactor;
+  const sent = (a.sent ?? []).map((x) => ({ field: cutText(flatText(r(x.field)), LIMITS.nameChars), text: cutText(flatText(r(x.text)), LIMITS.spanChars) }));
   return {
     id: a.id,
     goal: sanitizeText(r(a.task)),
     page: { url: cutText(r(a.obs.url), LIMITS.urlChars), title: cutText(flatText(r(a.obs.title)), LIMITS.titleChars) },
     fields: a.fields,
     recent_actions: a.history.slice(-LIMITS.textHistory).map((h) => ({ action: flatText(r(h.action)), kind: flatText(r(h.kind)), text: h.text === null ? null : flatText(r(h.text)) })),
+    ...(sent.length > 0 ? { sent_texts: sent } : {}),
     untrusted_page_text: sanitizeText(r(a.obs.text)).slice(0, LIMITS.textChars),
   };
 }

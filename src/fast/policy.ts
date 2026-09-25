@@ -152,6 +152,8 @@ export interface StepInput {
   canGenerate?: boolean;
   /** A fill typed text that the assistant wrote in this run. `typed_values` then leaves out the whole task and the clauses. */
   textTyped?: boolean;
+  /** Texts that a send of this run took out of the page: `sent_texts` in the state, and the DONE_SENT text. */
+  sentTexts?: { field: string; text: string }[];
 }
 
 /** Enter cannot submit an observed empty editor. Missing focus is tolerated by older adapters. */
@@ -218,6 +220,16 @@ export const VALUE_Q_GEN = "Which offered value should be typed into this field?
 export const GENERATE = "Write new text for this field. Choose this when the goal asks for a message, reply, comment, answer, or description for this field, or when the field needs a part of an offered value, and no offered value holds that text word for word.";
 export const TYPE_TEXT_GEN = "Enter or replace text in an editable field. Another question chooses the value from the offered typed_values, or asks the user's assistant to write new text.";
 export const BLOCKED_VALUE_GEN = "A field needs a password, code, or exact value that only the user can supply";
+export const DONE_TEXT = "Every requirement is visibly satisfied, or the detailed view needed to answer the goal is visible.";
+// Used only while `sent_texts` is in the state: a send of this run took a typed text out of the page. After a send, the
+// page often shows only the next step of the app (an empty composer, a loading view), and DONE_TEXT stayed below the gate.
+export const DONE_SENT = "Every requirement is visibly satisfied, or the goal ends with sending a text and a recent action sent that text (see sent_texts), or the detailed view needed to answer the goal is visible.";
+
+/**
+ * A value request that offers a part of the head of its field (the var fallback of the loop): `vars` offers only those
+ * var spans and none, with the VALUE_Q text; `noVars` offers the head without its var spans.
+ */
+export type ValueAsk = { vars: readonly string[] } | { noVars: true };
 
 /**
  * Task fragments that Jev would choose as the message while `generate` is offered: a clause, the whole task, and a
@@ -279,11 +291,23 @@ function withCuts(rule: (s: Span) => boolean, spans: Span[], dropped: (s: Span) 
   };
 }
 
+/** The key of a var span ("brief" of v_brief), or the span id. */
+const varKey = (span: Span): string => (span.source === "var" && span.id.startsWith("v_") ? span.id.slice(2) : span.id);
+
 /** The text shown to Jev for a span. Secret spans never show their value. */
 export function spanText(span: Span): string {
   if (!span.secret) return span.text;
-  const key = span.source === "var" && span.id.startsWith("v_") ? span.id.slice(2) : span.id;
-  return `<secret value for ${key}>`;
+  return `<secret value for ${varKey(span)}>`;
+}
+
+/**
+ * A value option in a run with a text source. A non-secret var shows its key with its text: the assistant names the key
+ * after the field ("brief": v_brief 0.58-0.63 against generate 0.35-0.40 on "Describe the workflow", against 0.51-0.53 and
+ * 0.45-0.48 without the key). The CLI keeps the text alone.
+ */
+function optionText(span: Span, canGenerate: boolean): EntryType {
+  if (span.source === "generated") return cutText(span.text, LIMITS.spanChars);
+  return canGenerate && span.source === "var" && !span.secret ? { var: varKey(span), value: span.text } : spanText(span);
 }
 
 /** Visible text lines for the extract head: trimmed, non-empty, unique, cut to a length, capped in count. */
@@ -316,13 +340,17 @@ const same = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
  * - In both runs, the two values of a maybe cut show together when one of them passes (`withCuts`).
  * - Every other field offers every task and --var span.
  * - Text written for another field is never offered: it can go only into its own field.
+ * - `ask` (a value request of the var fallback): only the listed vars and none, or the head without its vars.
  */
-function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canGenerate: boolean): { question: ChoiceQuestion; head: ValueHead } | null {
+function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canGenerate: boolean, ask?: ValueAsk): { question: ChoiceQuestion; head: ValueHead } | null {
   const c: ChoiceCriteria = {};
-  const head: ValueHead = { spans: {}, generate: canGenerate && canWriteInto(a) };
-  for (const s of offeredSpans(a, obs, spans, canGenerate)) {
+  const varsOnly = ask !== undefined && "vars" in ask;
+  const head: ValueHead = { spans: {}, generate: canGenerate && canWriteInto(a) && !varsOnly };
+  const all = offeredSpans(a, obs, spans, canGenerate);
+  const offered = ask === undefined ? all : "vars" in ask ? all.filter((s) => s.source === "var" && ask.vars.includes(s.id)) : all.filter((s) => s.source !== "var");
+  for (const s of offered) {
     if (Object.keys(head.spans).length >= MAX_GROUP) break;
-    c[s.id] = s.source === "generated" ? cutText(s.text, LIMITS.spanChars) : spanText(s);
+    c[s.id] = optionText(s, canGenerate);
     head.spans[s.id] = s.id;
   }
   const gen = head.generate;
@@ -398,8 +426,11 @@ function focusState(f: NonNullable<Observation["focus"]>): Record<string, JsonVa
   return out;
 }
 
-/** `only`: build the state and the value head of that TYPE_TEXT key, and no other head (the value request of a fill). */
-function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): { state: EntryType; questions: Questions; meta: StepMeta } {
+/**
+ * `only`: build the state and the value head of that TYPE_TEXT key, and no other head (the value request of a fill).
+ * `ask`: the part of that head to offer.
+ */
+function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, ask?: ValueAsk): { state: EntryType; questions: Questions; meta: StepMeta } {
   const { task, goal, obs, history, spans, keys, bannedActionIds, doneBanned } = input;
   const space = actionSpace(obs.actions);
   const rules = rulesFor(goal);
@@ -428,7 +459,8 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   ops["WAIT"] = "Wait for the page to finish loading.";
   if (canPressEnter(obs)) ops["PRESS_ENTER"] = "Press Enter to submit the focused field.";
   ops["GO_BACK"] = "Go back to the previous page.";
-  if (!doneBanned) ops["DONE"] = "Every requirement is visibly satisfied, or the detailed view needed to answer the goal is visible.";
+  const sent = input.sentTexts ?? [];
+  if (!doneBanned) ops["DONE"] = sent.length > 0 ? DONE_SENT : DONE_TEXT;
   ops["BLOCKED"] = "No supported operation can make progress.";
   meta.offered = Object.keys(ops);
 
@@ -448,7 +480,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   for (const k of order) {
     if (only === undefined && Object.keys(meta.values).length >= trim.valueHeads) break;
     const a = space.targets.TYPE_TEXT[k];
-    const v = a ? valueHead(k, a, obs, spans, input.canGenerate === true) : null;
+    const v = a ? valueHead(k, a, obs, spans, input.canGenerate === true, only !== undefined ? ask : undefined) : null;
     if (!v) continue;
     questions[`value_${k}`] = v.question;
     meta.values[k] = v.head;
@@ -504,6 +536,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
       ? { id: s.id, text: cutText(s.text, LIMITS.spanChars), secret: false, source: "generated", field: s.field?.label ?? "" }
       : { id: s.id, text: spanText(s), secret: s.secret });
   }
+  if (sent.length > 0) state["sent_texts"] = sent.map((x) => ({ field: cutText(redact(x.field, spans), LIMITS.nameChars), text: cutText(redact(x.text, spans), LIMITS.spanChars) }));
   if (keys.length > 0) state["keys"] = keys.map((k) => ({ label: k.label, key: k.key }));
   return { state, questions, meta };
 }
@@ -523,14 +556,14 @@ function redacted(input: StepInput): StepInput {
   return { ...input, task: redact(input.task, input.spans), obs: redactData(input.obs, (s) => redact(s, input.spans)), history: redactData(input.history, (s) => redact(s, input.spans)) };
 }
 
-function fitted(input: StepInput, only?: string): { state: EntryType; questions: Questions; meta: StepMeta } {
+function fitted(input: StepInput, only?: string, ask?: ValueAsk): { state: EntryType; questions: Questions; meta: StepMeta } {
   const cuts: string[] = [];
   let last: BudgetError | null = null;
   for (const rung of LADDER) {
     // The value request has no extra value heads to drop.
     if (only !== undefined && rung.trim.valueHeads === 0 && rung.trim.textChars === LIMITS.textChars) continue;
     if (rung.note) cuts.push(`over budget: ${rung.note}`);
-    const built = assemble(input, rung.trim, cuts, only);
+    const built = assemble(input, rung.trim, cuts, only, ask);
     try {
       checkBudget(built.state, built.questions);
       return built;
@@ -549,10 +582,11 @@ export function buildStep(input: StepInput): { state: EntryType; questions: Ques
 
 /**
  * The value request of a fill whose field has no value head in the step request: the same state and one head,
- * `value_<key>`. Null when the field has no value to offer. Throws BudgetError as buildStep does.
+ * `value_<key>`. `ask` offers a part of that head (the var fallback). Null when the field has no value to offer. Throws
+ * BudgetError as buildStep does.
  */
-export function buildValueStep(input: StepInput, key: string): { state: EntryType; questions: Questions; meta: StepMeta } | null {
-  const built = fitted(redacted(input), key);
+export function buildValueStep(input: StepInput, key: string, ask?: ValueAsk): { state: EntryType; questions: Questions; meta: StepMeta } | null {
+  const built = fitted(redacted(input), key, ask);
   return built.meta.values[key] ? built : null;
 }
 

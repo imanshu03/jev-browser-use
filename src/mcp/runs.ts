@@ -24,6 +24,8 @@ export interface RunHooks {
   text: TextSource; human: Human; signal: AbortSignal; log: Logger; hints: RunnerHints;
   /** The starter reports the fields whose assistant text no fill typed. */
   untyped?: (labels: string[]) => void;
+  /** The starter reports the texts that a send of the run took out of the page. */
+  sent?: (texts: { field: string; text: string }[]) => void;
 }
 export type RunStarter = (input: BrowseInput, hooks: RunHooks) => Promise<RunResult>;
 export interface PendingText { kind: "text"; id: string; req: TextRequest; expiresAt: number; errors: Record<string, string> | null; attempts: number }
@@ -45,6 +47,7 @@ export interface Run {
   result: RunResult | null; endedAt: number | null;
   confirmEnd: ConfirmEnd | null;  // the last confirmation; null before the first one
   untyped: string[];              // labels of fields whose assistant text no fill typed
+  sent: { field: string; text: string }[]; // texts that a send of the run took out of the page
   redact(s: string): string;      // the runner's redactor, via the per-run logger, plus the API key removal
 }
 
@@ -99,6 +102,7 @@ class RunState implements Run {
   endedAt: number | null = null;
   confirmEnd: ConfirmEnd | null = null;
   untyped: string[] = [];
+  sent: { field: string; text: string }[] = [];
   /** The runner's redactor followed by the key removal. The per-run logger replaces it. */
   redactor: (s: string) => string;
   readonly controller = new AbortController();
@@ -330,7 +334,7 @@ export class RunManager {
       pause: (_message, timeoutMs, poll, kind) => this.pause(run, timeoutMs, poll, kind),
       confirm: (message, timeoutMs, detail) => this.confirm(run, message, timeoutMs, detail),
     };
-    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, untyped: (labels) => { run.untyped = [...labels]; } };
+    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, untyped: (labels) => { run.untyped = [...labels]; }, sent: (texts) => { run.sent = texts.map((x) => ({ ...x })); } };
   }
 
   /**

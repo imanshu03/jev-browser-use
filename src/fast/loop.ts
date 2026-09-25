@@ -17,11 +17,11 @@ import type { Plan } from "../plan.js";
 import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
 import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord } from "../types.js";
-import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
+import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SEND_WORDS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
 import type { Action, Chrome, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
 import { StalePage } from "./model.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
-import type { Decision, StepInput, StepMeta, Target, TargetOp } from "./policy.js";
+import type { Decision, StepInput, StepMeta, Target, TargetOp, ValueAsk, ValueHead } from "./policy.js";
 import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, readStep, readValue, top3 } from "./policy.js";
 
 export { actionKey };
@@ -98,6 +98,19 @@ interface TypedText {
   retyped: boolean;
   /** A click, Enter, select, or back ran after the fill. The text can have gone out with it. */
   acted: boolean;
+  /** The send that took the text out of the page. */
+  sent?: SentText;
+}
+
+/** A text that a send of this run took out of the page. */
+interface SentText {
+  doc: number | undefined;
+  node: number | null;
+  label: string;
+  text: string;
+  /** The step of the send, and the send: `click "Send message"` or `Enter`. */
+  step: number;
+  action: string;
 }
 
 /** Whitespace runs become one space. A page can change the line breaks of a text that it shows in a field. */
@@ -174,6 +187,15 @@ const CANCELLED = "the run was cancelled";
 function hit(label: string, words: string[]): boolean {
   const n = label.toLowerCase();
   return words.some((w) => new RegExp(`(?<![a-z])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z])`, "i").test(n));
+}
+
+/** The action ran: an `ok` record, or a record whose next observation did not settle. */
+const ran = (r: Applied): boolean => r.kind === "record" && (r.rec.result === "ok" || r.ran === true);
+
+/** A value answer for the log: `v_brief@0.52`, `generate@0.45`, `none`, or `missing`. */
+function valueText(v: Decision["value"]): string {
+  if (v === undefined || v === "none") return v ?? "missing";
+  return `${"spanId" in v ? v.spanId : "generate"}@${v.conf.toFixed(2)}`;
 }
 
 /** Risk classes from low to high. */
@@ -259,6 +281,15 @@ export class FastRunner {
   private readonly typedText = new Map<string, TypedText>();
   /** Ids of the spans that type a text again after a fill that did not stay. */
   private readonly retypes = new Set<string>();
+  /** Ids of the var spans that a fill of this run typed. The var fallback does not offer them. */
+  private readonly usedVars = new Set<string>();
+  /** Texts that a send of this run took out of the page, in order. */
+  private sent: SentText[] = [];
+  /**
+   * The unsent entries that a click on a send control, or an Enter, asked about. Each observation checks whether their
+   * text left the page. Another action than WAIT in a later step ends the watch.
+   */
+  private sendWatch: { step: number; action: string; entries: Unsent[] } | null = null;
 
   constructor(deps: FastRunnerDeps) {
     this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => redact(s, this.spans)) };
@@ -277,6 +308,9 @@ export class FastRunner {
 
   /** The unsent assistant text on the page when the run ended. The MCP session gives it to the next run on that page. */
   unsentText(): UnsentText[] { return this.unsent.map((u) => ({ ...u })); }
+
+  /** The texts that a send of this run took out of the page, with their field labels. The MCP result shows them. */
+  sentTexts(): { field: string; text: string }[] { return this.sent.map((x) => ({ field: x.label, text: x.text })); }
 
   /** Labels of the fields the assistant wrote text for in this run that no fill typed. Jev may submit without an optional field. */
   untypedText(): string[] {
@@ -432,7 +466,70 @@ export class FastRunner {
     }
     // A before pair holds only while every observation shows its control with the same value.
     this.unsent = this.unsent.map((u) => this.ageBefore(obs, u));
+    this.checkSent(obs);
     return obs;
+  }
+
+  /**
+   * Watch the texts that a click on a send control or an Enter asked about. Only an entry whose text a control showed
+   * counts: a pending entry (a fill that did not stay) gives no evidence that the page had the text to send. The
+   * observation after the action is checked at once.
+   */
+  private watchSend(gated: Unsent[], action: string): void {
+    const entries = gated.filter((u) => !u.pending).map((u) => ({ ...u }));
+    if (entries.length === 0) return;
+    this.sendWatch = { step: this.stepNo, action, entries };
+    if (this.held) this.checkSent(this.held);
+  }
+
+  /**
+   * A watched text is sent when an observation shows it in no control: a new document, or its field empty or gone and
+   * no other control that holds it. A text that stays (a send error, a disabled button) gives no record.
+   */
+  private checkSent(obs: Observation): void {
+    const w = this.sendWatch;
+    if (!w) return;
+    const left: Unsent[] = [];
+    for (const u of w.entries) {
+      if (!this.textLeft(obs, u)) { left.push(u); continue; }
+      if (this.sent.some((x) => x.doc === u.doc && x.label === u.label && x.text === u.text)) continue;
+      const sent: SentText = { doc: u.doc, node: u.node, label: u.label, text: u.text, step: w.step, action: w.action };
+      this.sent.push(sent);
+      for (const r of this.typedText.values()) if (r.doc === u.doc && r.text === u.text && !r.sent) r.sent = sent;
+      this.log.info(`step ${this.stepNo} sent: the text for "${u.label}" left the page after step ${w.step} (${w.action})`);
+    }
+    this.sendWatch = left.length > 0 ? { ...w, entries: left } : null;
+  }
+
+  /**
+   * No control of `obs` holds the text of `u`: a new document, or its field in view and empty, or its field not in
+   * `filled`, and no control in `texts` holds the text. An observation without `filled` cannot tell a field out of view
+   * from a field that is gone.
+   */
+  private textLeft(obs: Observation, u: Unsent): boolean {
+    if (obs.doc !== u.doc) return true;
+    const field = obs.actions.find((a) => a.kind === "fill" && a.node === u.node);
+    if (field ? (field.value ?? "").trim() !== "" : obs.filled === undefined || (u.node !== null && obs.filled.includes(u.node))) return false;
+    return !(obs.texts ?? []).some(([, v]) => holdsText(v, u.text));
+  }
+
+  /**
+   * A send ran in the last step, and a rendered control still showed its text right after it (a "sending" state).
+   * Observe every waitPollMs, at most fastWaitMs, until the text leaves. A DONE on the "sending" page fell below its
+   * gate. A text that only a hidden control holds (a form that the page hid after the send) is not waited for.
+   */
+  private async sendSettled(obs: Observation): Promise<Observation> {
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const polls = Math.ceil(LIMITS.fastWaitMs / LIMITS.waitPollMs);
+    const shown = (o: Observation): boolean => (this.sendWatch?.entries ?? []).some((u) => u.doc === o.doc
+      && (o.actions.some((a) => a.kind === "fill" && holdsText(a.value ?? "", u.text)) || (o.texts ?? []).some(([, v]) => holdsText(v, u.text))));
+    const t0 = Date.now();
+    let next = obs;
+    for (let i = 0; this.sendWatch !== null && shown(next) && i < polls && Date.now() - t0 < LIMITS.fastWaitMs; i++) {
+      await sleep(LIMITS.waitPollMs);
+      next = await this.observeSettled();
+    }
+    return next;
   }
 
   /**
@@ -485,6 +582,7 @@ export class FastRunner {
     let obs: Observation;
     try {
       obs = this.held ?? await this.observeSettled();
+      if (this.sendWatch?.step === this.stepNo - 1) obs = await this.sendSettled(obs);
     } catch (e) {
       if (e instanceof StalePage) return this.blocked(ctx, "ambiguous", "page keeps changing", [], this.lastObs?.url ?? null);
       throw e;
@@ -504,6 +602,7 @@ export class FastRunner {
         ...(retryReason ? { retryReason } : {}),
         ...(this.deps.text ? { canGenerate: true } : {}),
         ...(this.typedText.size > 0 ? { textTyped: true } : {}),
+        ...(this.sent.length > 0 ? { sentTexts: this.sentTexts() } : {}),
       };
       let built: ReturnType<typeof buildStep>;
       try { built = buildStep(input); } catch (e) {
@@ -531,16 +630,14 @@ export class FastRunner {
           d = readStep(A, built.meta, input, next[0]);
         }
       }
-      // A fill of a field without a value head in the step request asks for its value in a second request.
-      if (d.operation === "TYPE_TEXT" && d.target && !(d.target.key in built.meta.values)) {
-        let value: Decision["value"];
-        try { value = await this.askValue(input, d.target.key); } catch (e) {
+      if (d.operation === "TYPE_TEXT" && d.target) {
+        const t = d.target;
+        try { d = await this.resolveValue(input, d, t, built.meta); } catch (e) {
           // A value request over budget is a page that is too large, as a step request over budget is.
-          if (e instanceof BudgetError) return this.blocked(ctx, "page_too_large", `value request for "${d.target.label}": ${e.message}`, [], obs.url);
+          if (e instanceof BudgetError) return this.blocked(ctx, "page_too_large", `value request for "${t.label}": ${e.message}`, [], obs.url);
           throw e;
         }
         if (this.cancelled) return this.cancel(ctx, obs.url);
-        if (value !== undefined) d = { ...d, value };
       }
       ctx.pageKind = d.pageKind; ctx.pageKindConf = d.pageKindConf;
       ctx.operation = d.operation ? OPERATION_OF[d.operation] ?? null : null;
@@ -594,12 +691,68 @@ export class FastRunner {
     }
   }
 
-  /** The value request of one TYPE_TEXT key. Undefined when the field has no value to offer. Throws BudgetError when it is over budget. */
-  private async askValue(input: StepInput, key: string): Promise<Decision["value"]> {
-    const built = buildValueStep(input, key);
-    if (!built) return undefined;
+  /**
+   * The value request of one TYPE_TEXT key, or of a part of its head (`ask`), with the head it offered. Undefined when
+   * the field has no value to offer. Throws BudgetError when it is over budget.
+   */
+  private async askValue(input: StepInput, key: string, ask?: ValueAsk): Promise<{ value: Decision["value"]; head: ValueHead } | undefined> {
+    const built = buildValueStep(input, key, ask);
+    const head = built?.meta.values[key];
+    if (!built || !head) return undefined;
     for (const c of built.meta.cuts) this.log.warn(`step ${this.stepNo} value request: ${c}`);
-    return readValue((await this.deps.oracle.ask("value", built.state, built.questions)).answers, built.meta, key);
+    return { value: readValue((await this.deps.oracle.ask("value", built.state, built.questions)).answers, built.meta, key), head };
+  }
+
+  /**
+   * The value of a TYPE_TEXT decision. A fill of a field without a value head in the step request asks for its value in
+   * a second request. Then the var fallback (plugin runs): a var and `generate` both mean "the caller's text goes here",
+   * so a head that offers both splits between them ("Describe the workflow": v_brief 0.41-0.55 against generate
+   * 0.43-0.57), and neither passes the value gate. When the answer is `generate` below the value gate, or an assistant's
+   * var below it, and the head offers a non-secret var that no fill of this run typed:
+   * 1. One value request offers only those vars and none. A var at GATES.varOnly (0.75) or above is the value. With
+   *    only vars and none, a var that is not the field's text still gets a high confidence: a var "text" went to
+   *    "Project Name" at 0.61-0.70. Right vars got 0.78-0.89 ("message", "description", "name"), a brief 0.69-0.79.
+   * 2. Otherwise one value request offers the head without its vars. An answer other than none is the value: the
+   *    assistant then writes the text, and the send dialog shows it.
+   * Any other answer stays. Throws BudgetError when a value request is over budget.
+   */
+  private async resolveValue(input: StepInput, d: Decision, t: Target, meta: StepMeta): Promise<Decision> {
+    let head = meta.values[t.key];
+    let value = d.value;
+    if (!head) {
+      const asked = await this.askValue(input, t.key);
+      if (!asked) return d;
+      head = asked.head;
+      if (asked.value !== undefined) value = asked.value;
+    }
+    const out = (v: Decision["value"]): Decision => (v === undefined ? d : { ...d, value: v });
+    const vars = this.fallbackVars(value, head);
+    if (vars.length === 0 || this.cancelled) return out(value);
+    const was = valueText(value);
+    const only = (await this.askValue(input, t.key, { vars }))?.value;
+    if (only !== undefined && only !== "none" && "spanId" in only && only.conf >= GATES.varOnly) {
+      this.log.info(`step ${this.stepNo} var fallback: [${t.key}] answered ${was}; the vars alone -> ${valueText(only)}`);
+      return out(only);
+    }
+    if (this.cancelled) return out(value);
+    const rest = (await this.askValue(input, t.key, { noVars: true }))?.value;
+    this.log.info(`step ${this.stepNo} var fallback: [${t.key}] answered ${was}; the vars alone -> ${valueText(only)}; without the vars -> ${valueText(rest)}`);
+    return out(rest !== undefined && rest !== "none" ? rest : value);
+  }
+
+  /**
+   * The vars that the var fallback offers: the non-secret vars of the head that no fill of this run typed. None unless
+   * the answer is `generate` below the value gate, or a var below it in a run whose vars an assistant wrote. The CLI
+   * types a var at confidence 1 and never offers `generate`.
+   */
+  private fallbackVars(value: Decision["value"], head: ValueHead): string[] {
+    if (value === undefined || value === "none" || value.conf >= THRESHOLDS.data_entry.value) return [];
+    const low = "generate" in value || (this.deps.fromAssistant === true && this.spans.find((s) => s.id === value.spanId)?.source === "var");
+    if (!low) return [];
+    return Object.values(head.spans).filter((id) => {
+      const s = this.spans.find((x) => x.id === id);
+      return s !== undefined && s.source === "var" && !s.secret && !this.usedVars.has(id);
+    });
   }
 
   /**
@@ -708,10 +861,13 @@ export class FastRunner {
       }
       ctx.gate = `ok ${d.operationConf.toFixed(2)} (${risk})`;
       const undo = this.unsentUndo();
-      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, this.pruneUnsent(obs));
+      const gated = this.pruneUnsent(obs);
+      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, gated);
       if (denied) return rec(denied);
       const r = await this.execute("PRESS_ENTER", null, null, null, obs, ctx);
       if (r.kind === "stale") undo();
+      // An Enter with unsent text in a field can send it.
+      else if (ran(r) && gated.length > 0) this.watchSend(gated, "Enter");
       return r;
     }
     if (d.operation === "WAIT") {
@@ -770,11 +926,18 @@ export class FastRunner {
     const bans = this.bansFor(obs.url);
     const key = actionKey(action);
 
-    if (t.conf < THRESHOLDS[risk].target) {
-      ctx.gate = `low_target ${t.conf.toFixed(2)} < ${THRESHOLDS[risk].target} (${risk})`;
+    // A send button in the form of a field that shows unsent assistant text: the unsent-text dialog shows the text and
+    // asks the user before this click, so the target needs only the submit gate. The destructive gate repeated that
+    // check, and on a workflow builder it sent Jev to other tabs while the brief stayed unsent ("Send message" at
+    // 0.55-0.69, 7 of 21 runs).
+    const sendGate = op === "CLICK" && risk === "destructive" && this.sendInForm(action, t.label, obs);
+    const minTarget = sendGate ? THRESHOLDS.submit.target : THRESHOLDS[risk].target;
+    if (t.conf < minTarget) {
+      ctx.gate = `low_target ${t.conf.toFixed(2)} < ${minTarget} (${risk})`;
       this.stepBans.add(key);
       return { kind: "reask" };
     }
+    if (sendGate && t.conf < THRESHOLDS[risk].target) this.log.info(`step ${this.stepNo} send in the form of unsent text: target ${t.conf.toFixed(2)} passes the submit gate ${THRESHOLDS.submit.target}; the click needs the user's OK`);
     // A submit or destructive click needs a clear winner. A near tie between "Save" and "Save and publish" re-asks.
     if ((risk === "submit" || risk === "destructive") && t.runnerUp >= GATES.runnerUpRatio * t.conf) {
       ctx.gate = `ambiguous_runner_up ${t.runnerUp.toFixed(2)} >= ${GATES.runnerUpRatio} * ${t.conf.toFixed(2)} (${risk})`;
@@ -823,6 +986,9 @@ export class FastRunner {
     const r = await this.execute(op, target, text, shown, at, ctx, kept);
     // A stale action did not run: the entries that the check dropped on the old observation come back.
     if (r.kind === "stale") undo();
+    // A click on a send control (Send, Post, Reply, Comment, Publish, Share) with unsent text in a field can send it. A
+    // destructive word alone is no send: "Delete draft" also takes the text out of the page.
+    else if (op === "CLICK" && ran(r) && gated.length > 0 && hit(t.label, SEND_WORDS)) this.watchSend(gated, `click "${cutText(t.label, LIMITS.nameChars)}"`);
     // A fill whose next observation did not settle ran too: its text is in the page, and a later run must not send it
     // unseen.
     if (used && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true);
@@ -841,8 +1007,9 @@ export class FastRunner {
 
     const span = chosen ? this.spans.find((s) => s.id === chosen.spanId) : undefined;
     if (!chosen || !span) return block("needs_credential", this.credentialHint(`field "${t.label}"`, CREDENTIAL_NAME.test(t.label)));
-    // A --var value is the user's own word for this run. A span cut from the task needs Jev's confidence.
-    const valueConf = span.source === "var" ? 1 : chosen.conf;
+    // A --var value is the user's own word for this run. A span cut from the task needs Jev's confidence, and so does a
+    // var that an assistant wrote: in a plugin run it is the assistant's text, not the user's own word.
+    const valueConf = span.source === "var" && !this.deps.fromAssistant ? 1 : chosen.conf;
     ctx.valueConf = valueConf;
     if (valueConf < THRESHOLDS[risk].value) {
       ctx.gate = `low_value ${valueConf.toFixed(2)} < ${THRESHOLDS[risk].value} (${risk})`;
@@ -881,9 +1048,20 @@ export class FastRunner {
       this.stepBans.add(actionKey(action));
       return REASK;
     }
+    const rec = this.typedText.get(fieldKey);
+    // A field whose text a send of this run took out of the page gets no second text in this run. A re-ask asked again
+    // at each step until the run stopped; the next text is a new step for the assistant.
+    const sent = rec?.sent ?? this.sent.find((x) => `${x.doc}|${x.node}` === fieldKey);
+    if (sent) return block("needs_text", `the text for "${sent.label}" was sent in step ${sent.step}; a run writes and sends one text per field. For the next text, call browse again`);
+    // After a send, a text for another field needs a clear TYPE_TEXT decision. The fills of a second text after a send
+    // had 0.33-0.48 (a workflow brief typed into the workflow title); the first fills had 0.57-0.94.
+    if (this.sent.length > 0 && (ctx.operationConf ?? 0) < GATES.textAfterSend) {
+      ctx.gate = `text after a send: TYPE_TEXT ${(ctx.operationConf ?? 0).toFixed(2)} < ${GATES.textAfterSend}`;
+      this.stepBans.add(actionKey(action));
+      return REASK;
+    }
     // A field that already got its text in this run gets no new request: a second text would be typed again, and after
     // a send it would be sent again. Only the text of the request that wrote it can go in again.
-    const rec = this.typedText.get(fieldKey);
     const cached = this.spans.find((s) => s.source === "generated" && s.field?.key === fieldKey && (!rec || s.field.request === rec.request));
     if (cached) return { kind: "span", span: cached, obs, action, gate: `generated ${cached.id} cached` };
     if (rec) {
@@ -918,9 +1096,11 @@ export class FastRunner {
     const bound = new Set<number>();
     for (const s of this.spans) if (s.field?.key.startsWith(doc)) bound.add(Number(s.field.key.slice(doc.length)));
     for (const k of this.typedText.keys()) if (k.startsWith(doc)) bound.add(Number(k.slice(doc.length)));
+    // Nor a field whose text a send of this run took out of the page.
+    for (const x of this.sent) if (x.doc === obs.doc && x.node !== null) bound.add(x.node);
     const picked = pickFields(obs, action, { banned: new Set([...this.bansFor(obs.url), ...this.stepBans]), bound }, this.log.redactor);
     const fields = picked.map((p) => p.field);
-    const req = buildTextRequest({ id: `t${++this.textRequests}`, task: this.cfg.task, obs, history: this.history, fields, redactor: this.log.redactor });
+    const req = buildTextRequest({ id: `t${++this.textRequests}`, task: this.cfg.task, obs, history: this.history, fields, redactor: this.log.redactor, sent: this.sentTexts() });
     this.log.info(`step ${this.stepNo} text request ${req.id}: ${fields.map((f) => `${f.id} "${f.label}"`).join(", ")}`);
     const t0 = this.now();
     const reply = await writer.write(req, { timeoutMs: LIMITS.textWaitMs, check: (v) => checkTexts(v, fields, this.spans).errors });
@@ -979,6 +1159,7 @@ export class FastRunner {
    */
   private filled(span: Span, typed: string, action: Action, obs: Observation, unknown = false): void {
     const generated = span.source === "generated";
+    if (span.source === "var") this.usedVars.add(span.id);
     this.typedInto.set(`${obs.doc}|${action.node}`, typed);
     const mine = (u: Unsent): boolean => u.doc === obs.doc && u.node === action.node;
     const old = this.unsent.find(mine);
@@ -1224,6 +1405,18 @@ export class FastRunner {
     };
   }
 
+  /**
+   * A button with a send word in the form of a field that shows unsent assistant text, in a run where the click needs a
+   * person's OK: confirm auto or always. A run without a dialog then blocks needs_confirmation at the click, with the
+   * hint to do the action in Chrome, not "ambiguous". Any other confirm setting keeps the destructive gate.
+   */
+  private sendInForm(action: Action, label: string, obs: Observation): boolean {
+    const form = action.form ?? null;
+    if (action.role !== "button" || form === null || !hit(label, SEND_WORDS)) return false;
+    if (this.cfg.confirm !== "auto" && this.cfg.confirm !== "always") return false;
+    return this.unsent.some((u) => u.doc === obs.doc && obs.actions.some((f) => f.kind === "fill" && f.node === u.node && (f.form ?? null) === form && holdsText(f.value ?? "", u.text)));
+  }
+
   /** `gated`: the unsent entries that hold text now. A non-empty list makes the action need a dialog, and the dialog shows them. */
   private async confirmAction(risk: RiskClass, desc: string, ctx: StepCtx, top: Top, url: string, gated: Unsent[] = []): Promise<StepRecord | null> {
     const needsConfirm = risk === "destructive" || (risk === "submit" && this.cfg.confirm === "always") || gated.length > 0;
@@ -1255,6 +1448,9 @@ export class FastRunner {
     if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
     if (!ctx.gate || /^(low_|Enter confidence|ambiguous_runner_up|repeat )/.test(ctx.gate)) ctx.gate = "ok";
     if (op === "PRESS_ENTER") ctx.value = "Enter";
+    // A later action ends the watch of a send: a fill, a click, or a scroll can take a text out of the page that the
+    // send did not take. WAIT keeps it.
+    if (this.sendWatch && this.sendWatch.step < this.stepNo && op !== "WAIT") this.sendWatch = null;
     if (this.cfg.dryRun) {
       ctx.gate += " dry_run";
       this.log.info(`step ${this.stepNo} dry-run: ${op}${action ? ` [${action.id}] "${action.label}"` : ""}${shown !== null ? ` value="${shown}"` : ""}`);

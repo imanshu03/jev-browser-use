@@ -212,6 +212,7 @@ export function fastStarter(d: StarterDeps): RunStarter {
     });
     const result = await runner.run();
     hooks.untyped?.(runner.untypedText());
+    hooks.sent?.(runner.sentTexts());
     d.session.keep(runner.page, epoch, runner.unsentText());
     if (result.error?.kind === "browser") await d.session.close();
     return result;

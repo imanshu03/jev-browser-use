@@ -6,7 +6,7 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, DONE_SENT, DONE_TEXT, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Observation } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
@@ -557,5 +557,62 @@ describe("value heads: one per TYPE_TEXT field", () => {
     };
     expect(readStep(answers, b.meta, inp).click).toMatchObject({ actionId: "e2", key: "2", label: "Send", conf: 0.9 });
     expect(readStep({ ...answers, operation: { type: "choice", choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9 } } }, b.meta, inp).click).toBeUndefined();
+  });
+});
+
+describe("sends and the var fallback", () => {
+  const brief = () => obs("https://app.example/workflows/new", [
+    el("e1", "fill", "Workflow title", "textbox", { value: "", form: null }),
+    el("e5", "fill", "Describe the workflow", "textbox", { value: "", form: 3, multiline: true }),
+    el("e6", "click", "Send message", "button", { form: 3 }),
+    el("e7", "fill", "Search", "searchbox", { value: "", inputType: "search", form: null }),
+  ], "New workflow", { doc: 2.5 });
+  const vars = [span("v_brief", "Send me a daily summary of new artifacts", false, "var"), span("v_channel", "#team-updates", false, "var"), span("v_token", "s3cr3t", true, "var")];
+  const spans = [span("s1", "the workflow", false, "after_verb"), span("s2", "Describe the workflow and send it", false, "whole_task"), ...vars];
+  const at = (over: Partial<StepInput> = {}) => input({ task: "Describe the workflow and send it", obs: brief(), spans, ...over });
+  const criteria = (q: unknown) => (q as ChoiceQuestion).criteria;
+  const instr = (q: unknown) => (q as ChoiceQuestion).instructions as Record<string, unknown>;
+
+  it("a text source shows each non-secret var with its key; the CLI and a secret var keep their text", () => {
+    const on = buildStep(at({ canGenerate: true }));
+    expect(criteria(on.questions["value_2"])).toMatchObject({ v_brief: { var: "brief", value: "Send me a daily summary of new artifacts" }, v_channel: { var: "channel", value: "#team-updates" }, v_token: "<secret value for token>", generate: GENERATE });
+    expect(criteria(on.questions["value_4"])).toMatchObject({ v_brief: { var: "brief", value: "Send me a daily summary of new artifacts" } });
+    const off = buildStep(at());
+    expect(criteria(off.questions["value_2"])).toMatchObject({ v_brief: "Send me a daily summary of new artifacts", v_token: "<secret value for token>" });
+    expect(JSON.stringify(on)).not.toContain("s3cr3t");
+  });
+
+  it("the vars-only value request offers the listed vars and none with VALUE_Q; noVars offers the head without its vars", () => {
+    const only = buildValueStep(at({ canGenerate: true }), "2", { vars: ["v_brief", "v_channel"] });
+    expect(Object.keys(only?.questions ?? {})).toEqual(["value_2"]);
+    expect(criteriaKeys(only?.questions["value_2"])).toEqual(["v_brief", "v_channel", "none"]);
+    expect(instr(only?.questions["value_2"])).toMatchObject({ question: VALUE_Q, field: "[2] Describe the workflow" });
+    expect(only?.meta.values["2"]).toEqual({ spans: { v_brief: "v_brief", v_channel: "v_channel" }, generate: false });
+    // The state is the state of the step request.
+    expect(only?.state).toEqual(buildStep(at({ canGenerate: true })).state);
+    const rest = buildValueStep(at({ canGenerate: true }), "2", { noVars: true });
+    expect(criteriaKeys(rest?.questions["value_2"])).toEqual(["s1", "generate", "none"]);
+    expect(instr(rest?.questions["value_2"])).toMatchObject({ question: VALUE_Q_GEN });
+    // A field with none of the listed vars has no head: no request.
+    expect(buildValueStep(at({ canGenerate: true }), "2", { vars: [] })).toBeNull();
+    expect(buildValueStep(at({ canGenerate: true, spans: [span("s1", "the workflow", false, "after_verb")] }), "2", { vars: ["v_brief"] })).toBeNull();
+  });
+
+  it("sentTexts adds sent_texts (redacted, cut) and the DONE_SENT text; without it the DONE text stays", () => {
+    const long = `Every Friday, write a weekly status report with token s3cr3t. ${"More words. ".repeat(20)}`;
+    const b = buildStep(at({ canGenerate: true, sentTexts: [{ field: "Describe the workflow", text: long }] }));
+    expect(criteria(b.questions["operation"])["DONE"]).toBe(DONE_SENT);
+    const state = b.state as Record<string, unknown>;
+    expect(state["sent_texts"]).toEqual([{ field: "Describe the workflow", text: cutText(long.replace("s3cr3t", "***"), LIMITS.spanChars) }]);
+    expect(Object.keys(state).slice(-2)).toEqual(["typed_values", "sent_texts"]);
+    expect(JSON.stringify(b)).not.toContain("s3cr3t");
+    const none = buildStep(at({ canGenerate: true }));
+    expect(criteria(none.questions["operation"])["DONE"]).toBe(DONE_TEXT);
+    expect((none.state as Record<string, unknown>)["sent_texts"]).toBeUndefined();
+    expect(buildStep(at({ canGenerate: true, sentTexts: [] }))).toEqual(none);
+    // DONE banned: no DONE option, but the state still holds the sent texts.
+    const banned = buildStep(at({ canGenerate: true, doneBanned: true, sentTexts: [{ field: "Reply", text: "Tuesday works." }] }));
+    expect(criteriaKeys(banned.questions["operation"])).not.toContain("DONE");
+    expect((banned.state as Record<string, unknown>)["sent_texts"]).toEqual([{ field: "Reply", text: "Tuesday works." }]);
   });
 });

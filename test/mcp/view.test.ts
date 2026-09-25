@@ -8,6 +8,7 @@ import type { Pending, PendingConfirm, Run, RunStatus } from "../../src/mcp/runs
 import { RUN_STATUSES, stripKey } from "../../src/mcp/runs.js";
 import { CONFIRM_SCHEMA, PAUSE_MESSAGES, RunView, TOOL_NAMES, confirmMessage, estTokens, viewOf } from "../../src/mcp/view.js";
 import type { RunResult } from "../../src/types.js";
+import { cutText } from "../../src/fast/policy.js";
 
 const KEY = "tsk-test-key-0123456789abcdef";
 const SECRET = "s3cr3t-var";
@@ -30,11 +31,11 @@ function result(outcome: RunResult["outcome"], over: Partial<RunResult> = {}): R
 }
 
 /** A run in one state. The redactor removes the secret var value. */
-function run(status: RunStatus, over: { pending?: Pending | null; result?: RunResult | null; tail?: string[]; lastStep?: string | null; task?: string; untyped?: string[] } = {}): Run {
+function run(status: RunStatus, over: { pending?: Pending | null; result?: RunResult | null; tail?: string[]; lastStep?: string | null; task?: string; untyped?: string[]; sent?: { field: string; text: string }[] } = {}): Run {
   return {
     id: "r3-beef", task: over.task ?? "reply to Ann", startedAt: NOW - 12_400, status, pending: over.pending ?? null,
     steps: 2, lastStep: over.lastStep ?? "2 fill textbox \"Reply\" -> ok (ok)", tail: over.tail ?? ["1 click -> ok", "2 fill -> ok"], textRequests: 1,
-    result: over.result ?? null, endedAt: over.result ? NOW - 400 : null, confirmEnd: null, untyped: over.untyped ?? [],
+    result: over.result ?? null, endedAt: over.result ? NOW - 400 : null, confirmEnd: null, untyped: over.untyped ?? [], sent: over.sent ?? [],
     redact: (s) => s.split(SECRET).join("***"),
   };
 }
@@ -103,6 +104,25 @@ describe("viewOf", () => {
     expect(v.text_request?.errors).toEqual({ f1: "text is required" });
     expect(v.text_request?.expires_in_s).toBe(10);
     expect(v.text_request?.fields.map((f) => f.id)).toEqual(["f1", "f2"]);
+  });
+
+  it("sent texts: the result lists them (redacted, flat, cut) and next says not to send them again; a text request passes them on", () => {
+    const long = `Tuesday works, ${SECRET}.\u202E\n${"See you then. ".repeat(20)}`;
+    const sent = [{ field: "Reply", text: long }];
+    const done = viewOf(run("done", { result: result("done"), sent }), NOW, () => KEY);
+    expect(RunView.parse(done)).toEqual(done);
+    expect(done.result?.sent_texts).toEqual([{ field: "Reply", text: cutText(`Tuesday works, ***. ${"See you then. ".repeat(20)}`, 120) }]);
+    expect(done.next).toBe("Report the result to the user. The texts in result.sent_texts were sent. Do not send them again.");
+    const blockedView = viewOf(run("blocked", { result: result("blocked", { blocked: blocked("needs_text", "the text for \"Reply\" was sent in step 2") }), sent }), NOW, () => KEY);
+    expect(blockedView.next).toBe("Report result.blocked.hint to the user. The texts in result.sent_texts were sent. Do not send them again.");
+    expect(viewOf(run("failed", { result: result("failed", { error: { kind: "browser", message: "x" } }), sent }), NOW, () => KEY).next).toContain("result.sent_texts were sent");
+    expect(viewOf(STATES.done, NOW, () => KEY).result).not.toHaveProperty("sent_texts");
+    const req = textReq({ sent_texts: [{ field: "Reply\u202E", text: `Tuesday works, ${SECRET}.` }] });
+    const tv = viewOf(run("needs_text", { pending: { kind: "text", id: "t2", req, expiresAt: NOW + 1000, errors: null, attempts: 0 } }), NOW, () => KEY);
+    expect(RunView.parse(tv)).toEqual(tv);
+    expect(tv.text_request?.sent_texts).toEqual([{ field: "Reply", text: "Tuesday works, ***." }]);
+    expect(Object.keys(tv.text_request ?? {})).toEqual(["request", "goal", "page", "fields", "recent_actions", "sent_texts", "expires_in_s", "untrusted_page_text"]);
+    expect(viewOf(STATES.needs_text, NOW, () => KEY).text_request).not.toHaveProperty("sent_texts");
   });
 
   it("the pause message comes from the view, and the confirmation has a kind and a summary without the typed text", () => {
