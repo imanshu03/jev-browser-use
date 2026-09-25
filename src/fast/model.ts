@@ -70,6 +70,12 @@ export interface Action {
   expanded?: string;
   delta?: number;                     // scroll pixels
   rect?: { x: number; y: number; w: number; h: number };
+  // Field facts for assistant-written text. Set by the snapshot; never sent to Jev.
+  form?: number | null;               // identity(e.form || e.closest('form,[role="form"],dialog,[role="dialog"]'))
+  multiline?: boolean;                // TEXTAREA, isContentEditable, or aria-multiline="true"
+  maxLength?: number;                 // INPUT/TEXTAREA maxLength when > 0
+  inputType?: string;                 // INPUT type, lowercased; absent for other tags
+  autocomplete?: string;              // autocomplete attribute, lowercased, when set
 }
 
 export interface Observation {
@@ -82,7 +88,15 @@ export interface Observation {
   h: number;
   actions: Action[];
   /** Focus and the form submit controls used to gate Enter. */
-  focus?: { node: number; label: string; role: string | null; submitLabel: string; editable?: boolean; value?: string } | null;
+  focus?: {
+    node: number; label: string; role: string | null; submitLabel: string; editable?: boolean; value?: string;
+    /** The form or dialog of the focused element, with the same identity as `Action.form`. Never sent to Jev. */
+    form?: number | null;
+    /** The name of the form's default button: its first submit control in tree order. "" when that control is disabled. Never sent to Jev. */
+    submitDefault?: string;
+    /** The focused element is a textarea, a contenteditable, or aria-multiline. Never sent to Jev. */
+    multiline?: boolean;
+  } | null;
   /** Semantic marker of the whole page. Opaque. Used by `Page.fresh`. */
   marker: unknown;
   /** Page key: URL, scroll, viewport, form values. Opaque. Used by `Page.fresh` for clicks. */
@@ -96,6 +110,44 @@ export interface Observation {
   fingerprint: string;
   /** Milliseconds the observation took, including any post-input wait. */
   ms: number;
+  /** performance.timeOrigin of the document. Node ids are unique only inside one document. */
+  doc?: number;
+  /** Node ids of the form controls in the document, in view or not, whose value is not blank. `actions` lists only controls in view. Never sent to Jev. */
+  filled?: number[];
+  /** Node id and value of each rendered form control, in view or not, whose value is not blank. A control that is hidden, aria-hidden, or inert is not in the list. Never sent to Jev. */
+  texts?: [number, string][];
+}
+
+/**
+ * A field that holds assistant-written text that no click or Enter has sent yet. The MCP session keeps the
+ * list with its tab between runs, so a later run on the same page is gated too.
+ */
+export interface UnsentText {
+  doc: number | undefined;
+  node: number | null;
+  label: string;
+  /** The exact text that was typed, or "<secret>" for a secret value. */
+  text: string;
+  /** The text request of a generated value. null for other values and for entries from an earlier run. */
+  request: string | null;
+  /**
+   * Set only when the fill did not stay (the field showed empty right after it, or no observation after the fill
+   * settled) and no click or Enter ran since. The page can hold the text where the control does not show it, so the
+   * entry gates the next click or Enter, in this run or the next one. A select or back does not clear it: it asked
+   * nothing, so it did not show the text.
+   */
+  pending?: true;
+  /**
+   * Set when the control's own entry stayed on it but the control showed only a moved text: the page wrote a moved
+   * text over this one. An empty control then does not show that this text went, so the entry stays with no field.
+   */
+  overwritten?: true;
+  /**
+   * The other controls of the document that held the text before the fill, with their values then. The entry does not
+   * move onto one of them while it holds that value. A new value there can be the text that the page moved. Never set
+   * for a secret value.
+   */
+  before?: [number, string][];
 }
 
 /** A decision no longer refers to the observed page. The caller observes again; nothing was executed. */
