@@ -34,6 +34,11 @@
   <input id="guests" type="number" aria-label="Guests" value="10">
 </section>
 
+<!-- A role=textbox wrapper that is not editable itself: a click focuses the input inside it. -->
+<section>
+  <div id="wrap" role="textbox" aria-label="Wrapped" style="border:1px solid #888;padding:4px"><span>To:</span> <input id="inner" value="old@example.com"></div>
+</section>
+
 <!-- A field that gives its focus away: a text must never go into the other field. -->
 <section>
   <div id="thief" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Thief">Old text</div>
@@ -54,6 +59,8 @@
   composer.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendDraft("enter"); } });
   composer.addEventListener("beforeinput", (e) => { if (e.inputType === "insertParagraph") { e.preventDefault(); sendDraft("paragraph"); } });
   document.getElementById("send").addEventListener("click", () => sendDraft("click"));
+  const inner = document.getElementById("inner");
+  document.getElementById("wrap").addEventListener("mousedown", (e) => { if (e.target !== inner) { e.preventDefault(); inner.focus(); } });
   const thief = document.getElementById("thief");
   thief.addEventListener("focus", () => setTimeout(() => document.getElementById("other").focus(), 0));
 </script>

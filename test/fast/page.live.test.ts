@@ -732,6 +732,11 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fill edit plans (live Chrome)"
     expect(await text("guests")).toBe("25");
   });
 
+  it("a role=textbox wrapper that is not editable types into the text control inside it that the click focused", async () => {
+    expect(await fillIn("Wrapped", "ann@example.com")).toMatchObject({ mode: "replace", shape: "input", before: "old@example.com", after: "ann@example.com" });
+    expect(await text("inner")).toBe("ann@example.com");
+  });
+
   it("a field that gives its focus away refuses the fill: nothing is typed anywhere", async () => {
     const e = await fillIn("Thief", "Reviewed by QA", "append").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(EditRefused);

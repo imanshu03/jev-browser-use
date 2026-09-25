@@ -319,9 +319,13 @@ export interface EditStep {
 export function editScript(node: number, step: "read" | "check" | "blank", mode: "replace" | "append" = "replace", keep: string[] = []): string {
   const arg = JSON.stringify({ node: Math.trunc(node), step, mode, keep, send: SEND_CONTROL });
   return String.raw`(a => {
-  const e=window.__jevFast?.nodes.get(a.node);
-  if (!e?.isConnected) return {ok:false,why:'the field is gone',text:'',kind:'input',blank:true};
-  const norm=t=>String(t||'').replace(/[​﻿]/g,'').replace(/\s+/g,' ').trim();
+  const host=window.__jevFast?.nodes.get(a.node);
+  if (!host?.isConnected) return {ok:false,why:'the field is gone',text:'',kind:'input',blank:true};
+  // A role=textbox wrapper that is not editable itself: the text control inside it that the click focused is the field.
+  const inner=document.activeElement;
+  const e=!host.isContentEditable && !['INPUT','TEXTAREA'].includes(host.tagName) && inner && inner!==host && host.contains(inner) &&
+    (['INPUT','TEXTAREA'].includes(inner.tagName) || inner.isContentEditable) ? inner : host;
+  const norm=t=>String(t||'').replace(/[\u200B\uFEFF]/g,'').replace(/\s+/g,' ').trim();
   const kind=e.tagName==='TEXTAREA' ? 'textarea' : e.tagName==='INPUT' ? 'input' : 'editable';
   const text=kind==='editable' ? e.innerText : String(e.value??'');
   // The text of an editor inside a range, without the placeholder that Slate renders as text in an empty editor.
@@ -384,6 +388,6 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
     return out(s.isCollapsed && !!block && block!==e && caretBlank,'the caret is not in a new empty line inside the field');
   }
   const ok=a.mode==='replace' ? norm(before)==='' && norm(after)==='' : s.isCollapsed && norm(after)==='';
-  return out(ok,'the selection is not where the '+a.mode+' needs it',{caretBlank,spaceBefore:/\s$/.test(before.replace(/[​﻿]/g,''))});
+  return out(ok,'the selection is not where the '+a.mode+' needs it',{caretBlank,spaceBefore:/\s$/.test(before.replace(/[\u200B\uFEFF]/g,''))});
 })(${arg})`;
 }

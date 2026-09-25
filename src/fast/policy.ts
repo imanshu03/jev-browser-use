@@ -359,7 +359,7 @@ function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canG
 
 /** The lines of a field value: without zero-width characters, squashed, not blank. */
 export function fieldLines(value: string): string[] {
-  return value.split("\n").map((l) => l.replace(/[​﻿]/g, "").replace(/\s+/g, " ").trim()).filter(Boolean);
+  return value.split("\n").map((l) => l.replace(/[\u200B\uFEFF]/g, "").replace(/\s+/g, " ").trim()).filter(Boolean);
 }
 
 /** The mode head of a field that holds text that this run did not type: replace all of it, or add at its end. */

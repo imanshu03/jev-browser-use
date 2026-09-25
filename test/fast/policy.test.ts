@@ -618,6 +618,6 @@ describe("mode heads: a field that holds text that the run did not type", () => 
   });
 
   it("fieldLines drops zero-width characters and blank lines", () => {
-    expect(fieldLines("﻿Release\n\n  two   words \n​\n")).toEqual(["Release", "two words"]);
+    expect(fieldLines("\uFEFFRelease\n\n  two   words \n\u200B\n")).toEqual(["Release", "two words"]);
   });
 });

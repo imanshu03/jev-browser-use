@@ -60,7 +60,7 @@ function docIdOf(raw: RawSnapshot): unknown {
 }
 
 /** Whitespace runs become one space; zero-width characters go. For the compare of a field value after a fill. */
-const flat = (s: string): string => s.replace(/[​﻿]/g, "").replace(/\s+/g, " ").trim();
+const flat = (s: string): string => s.replace(/[\u200B\uFEFF]/g, "").replace(/\s+/g, " ").trim();
 
 /** The lines of a text that a document fill types: each line with text, in order. */
 export function textLines(text: string): string[] {
