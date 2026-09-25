@@ -222,7 +222,7 @@ describe("confirmMessage", () => {
   });
 
   it("shows what a send sends: each field's text and its mention chips, marked as mentions", () => {
-    const sends = [{ label: "Type a\nmessage", text: "Hi Ann, could you share the report?\n@Ann Lee\n ", mentions: ["Ann Lee", `Bob${RLO}`] }];
+    const sends = [{ label: "Type a\nmessage", text: "Hi Ann, could you share the report?\n@Ann Lee\n\u00a0 ", mentions: ["Ann Lee", `Bob${RLO}`] }];
     const m = confirmMessage(confirm({ detail: { kind: "action", action: 'click button "Send message"', host: "chat.example", typed: [{ label: "Type a message", text: "Hi Ann, could you share the report?" }], sends } }));
     expect(m).toBe([
       'Jev wants to click button "Send message" on chat.example.',

@@ -290,7 +290,7 @@ A `blocked` result with the kind `needs_confirmation` has these causes:
 
 The server asks the user through an MCP form dialog (elicitation). The assistant cannot answer it, and no tool argument can allow an action. A dialog asks:
 
-- To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. Select **Allow** to let Jev continue.
+- To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. For a send, a submit, or Enter, it also shows what the action sends: the text of each message field and each mention in it, also text that the assistant did not write. Select **Allow** to let Jev continue.
 - To use a Chrome profile when Jev is not sure which profile the task names. If the user does not allow it, the run uses the workspace default.
 
 The server shows dialogs only when all of these conditions are true:
@@ -370,6 +370,19 @@ The direct engines support native text fields and `contenteditable` editors. Obs
 Quoted text makes the requested value explicit. A `--var` value is the most reliable: it skips the value confidence check. Each field gets its own value question that names the field, so every field of a form can take its own value. A message field never takes the whole task or a clause of it: "send hello team, standup moved to 11 am" without quotes blocks with a value hint, so the instruction is not sent as the message. A description of the text ("with a short change note") and the first words of a long unquoted value ("set the subject to Quarterly budget review for Q3 planning") are not typed either: quote the value or pass it with `--var`. An unquoted value ends at "and" before the next step, so "rename it to budget review and save it" types "budget review", and "rename the file to budget and click Save" types "budget". A button name in quotes, backticks, or bold counts as the name ("and click \"Save\""). Only a sentence dot ends a value, so "rename the file to report.pdf" types "report.pdf". A title such as "Show and Tell" or "Media and press releases" stays whole. When the words after "and" can be a step or part of the value ("search for how to install and run Python", "set the title to Weekly sync and open Settings", "type hello and send it to the team"), Jev gets both values and chooses. A field that hides the longer value by its length still offers both. A message after "type" or "write", or a sentence after "reply with", keeps all its words up to the step that sends it or watches the reply: "type hello and press the Enter key" and "type hello and wait for the response" type "hello", and "type we will review and approve it" types all of it. The model still needs to select the correct field and pass the action checks. A task instruction does not establish that the task succeeded. Check the trace for a fill action and the result for completion evidence.
 
 Text values come from task spans or user variables. The `vercel` engine can also select page-derived values. The CLI and chat do not generate text. In plugin runs, the user's assistant can write new text for one field at a time, with the rules below. Native password fields are excluded from the direct engines' action snapshots; use headed sign-in when needed.
+
+### Mentions
+
+A task can ask Jev to mention or tag a person, for example "mention Ann Lee and ask her for the report status", "Tag @ann.lee and Bob Roy in the chat", or "ask @Research Agent to summarise the Q3 notes". The names after mention, tag, ping, @-mention, or at-mention count, and so does every @handle. Jev then adds each person with the message field's own mention picker: it clicks the Mention or @ button, the name, and the picker's Done or Add button. It sends only when the field shows the mention. Typed text such as "@Ann Lee" is not a mention, so a message field never takes a name to mention as its text.
+
+Code also checks these things:
+
+- A send, a submit, or Enter while an open picker holds a checked name that is not added asks Jev again, and the reason names the picker's Done button. When Jev chooses a send again, the run blocks.
+- A send of a mention that the run added and that the task does not name asks Jev again. Jev can type the message again, which removes the mention. Otherwise the run blocks, and nothing is sent.
+- A fill of the message after the run's mention adds the text at the end and keeps the mention.
+- In plugin runs, the send dialog shows the message text and each mention.
+
+Jev cannot type "@" at the cursor, so a field without a Mention or @ button cannot get a mention. In plugin runs, when the text goes in before the mention, each click in the picker needs a dialog.
 
 ### Assistant-written text (plugin runs only)
 

@@ -91,7 +91,8 @@ export function confirmMessage(c: PendingConfirm): string {
     if (d.sends && d.sends.length > 0) {
       lines.push("This action sends:");
       for (const s of d.sends) {
-        const text = sanitizeText(s.text).split("\n").map((l) => l.trimEnd());
+        // An inline chip puts a line break and a no-break space into the editor text; a line shows without them.
+        const text = sanitizeText(s.text).split("\n").map((l) => l.replace(/\u00a0/g, " ").trim());
         while (text.length > 0 && text.at(-1) === "") text.pop();
         lines.push(`${flatText(s.label)}:`);
         for (const line of text) lines.push(`> ${line}`);

@@ -2893,6 +2893,19 @@ describe("mention pickers", () => {
     expect(stays.s.sent).toEqual([]);
   });
 
+  it("D4b: a chip that shows late, in an observation after no action, still counts as the run's", async () => {
+    const task = 'Send "Deploy is done" in the chat';
+    const unsure: Decide = (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Mention"), confidence: 0.1 } });
+    const t = chat(task, [unsure, clickOn("Send message")], { text: "Deploy is done" });
+    const observe = t.page.observe.bind(t.page);
+    // The chip of an earlier click renders late: the re-ask observation is the first one that shows it.
+    t.page.observe = async () => { if (t.page.observes === 1) t.s.chips = ["Research Agent"]; return observe(); };
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain("holds the mention @Research Agent, which the task does not ask for");
+    expect(t.s.sent).toEqual([]);
+  });
+
   it("D4b: Enter is gated too, and a chip from a draft that was there before the run is not the run's", async () => {
     const task = 'Send "Deploy is done" in the chat';
     const enter = chat(task, [clickOn("Research Agent"), enterKey, enterKey], { open: true, inline: true, text: "Deploy is done" });

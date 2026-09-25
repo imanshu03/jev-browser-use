@@ -28,6 +28,7 @@ If `result.blocked.kind` is `needs_confirmation`, the text that you wrote can st
 - Write the text that the task asks for, as the user would write it. Write only the field text, with no notes and no placeholders.
 - Always write each field where `required` is true. Write an optional field only when the task needs it.
 - Do not invent names, email addresses, phone numbers, recipients, prices, or dates. Use only facts from the task, the conversation, or the page.
+- When the task asks to mention or tag a person, do not write "@Name" for that person in the text. Jev adds the mention with the page's mention picker, and typed "@Name" text is not a mention.
 - Keep each value at or below `max_chars`, and all values together at or below 4000 characters. Use line breaks only where `multiline` is true.
 - If you cannot write good text, ask the user. To stop, call `continue` with `run`, `request`, and `decline` (a short reason). If the user rejects your `continue` call, call `cancel`.
 

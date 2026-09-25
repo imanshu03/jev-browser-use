@@ -266,10 +266,13 @@ export class FastRunner {
   /** Ids of the spans that type a text again after a fill that did not stay. */
   private readonly retypes = new Set<string>();
   /**
-   * `<doc>` -> names of the mention chips that an action of this run added: a chip that a field shows right after the
-   * action and did not show before it. Chips of a draft that was there before the run are not in it.
+   * `<doc>` -> names of the mention chips that this run added: a chip that a field shows right after an action and did
+   * not show before it, or a chip that the first observation of the document did not show (a chip that rendered late).
+   * Chips of a draft that was there before the run are not in it.
    */
   private readonly addedChips = new Map<string, Set<string>>();
+  /** `<doc>` -> names of the mention chips that the first observation of the document showed. */
+  private readonly chipBase = new Map<string, Set<string>>();
   /** Staged pickers that got their one warning for a click that does not send. Keyed by document, popup, and names. */
   private readonly stagedWarned = new Set<string>();
 
@@ -445,6 +448,12 @@ export class FastRunner {
     }
     // A before pair holds only while every observation shows its control with the same value.
     this.unsent = this.unsent.map((u) => this.ageBefore(obs, u));
+    // The chips of the first observation of a document are its draft. A chip that shows later came from this run.
+    const doc0 = String(obs.doc);
+    const chips = obs.actions.flatMap((a) => (a.kind === "fill" ? (a.mentions ?? []).map((m) => [m, a.label] as const) : []));
+    const base = this.chipBase.get(doc0);
+    if (!base) this.chipBase.set(doc0, new Set(chips.map(([m]) => m)));
+    else for (const [m, label] of chips) if (!base.has(m)) this.addChip(doc0, m, label);
     return obs;
   }
 
@@ -1385,7 +1394,7 @@ export class FastRunner {
   /**
    * Record the mention chips that an action added: the chips of a field in `after` that the same field did not have in
    * `before`. All chips of a field that `before` does not show count (a composer that the page replaced). A new document
-   * adds nothing: its chips come from a draft.
+   * adds nothing: its chips come from a draft. This also finds a chip of the draft that the run removed and added again.
    */
   private noteChips(before: Observation, after: Observation): void {
     if (after.doc !== before.doc) return;
@@ -1394,14 +1403,18 @@ export class FastRunner {
       const left = [...(before.actions.find((b) => b.kind === "fill" && b.node === a.node)?.mentions ?? [])];
       for (const m of a.mentions) {
         const i = left.indexOf(m);
-        if (i >= 0) { left.splice(i, 1); continue; }
-        const doc = String(after.doc);
-        const set = this.addedChips.get(doc) ?? new Set<string>();
-        set.add(m);
-        this.addedChips.set(doc, set);
-        this.log.info(`step ${this.stepNo} mention @${cutText(m, LIMITS.nameChars)} added to "${cutText(a.label, LIMITS.nameChars)}"`);
+        if (i >= 0) left.splice(i, 1);
+        else this.addChip(String(after.doc), m, a.label);
       }
     }
+  }
+
+  private addChip(doc: string, name: string, field: string): void {
+    const set = this.addedChips.get(doc) ?? new Set<string>();
+    if (set.has(name)) return;
+    set.add(name);
+    this.addedChips.set(doc, set);
+    this.log.info(`step ${this.stepNo} mention @${cutText(name, LIMITS.nameChars)} added to "${cutText(field, LIMITS.nameChars)}"`);
   }
 
   /** A task name asks for this chip. */

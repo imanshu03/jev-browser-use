@@ -115,7 +115,7 @@ Skip PLAN when code has resolved the profile, start, and goal. In the direct eng
 
 ### 3.3 Values and keys
 
-`extractSpans()` collects quoted text, email addresses, URLs, dates, numbers, phrases after value verbs, proper nouns, short clauses, and the whole task. Profile names and catalog aliases are excluded. Spans have stable request identifiers and bounded text. Whitespace normalization and candidate limits are defined in `src/task.ts` and `src/types.ts`.
+`extractSpans()` collects names to mention (section 5.6), quoted text, email addresses, URLs, dates, numbers, phrases after value verbs, proper nouns, short clauses, and the whole task. Profile names and catalog aliases are excluded. Spans have stable request identifiers and bounded text. Whitespace normalization and candidate limits are defined in `src/task.ts` and `src/types.ts`.
 
 `--var key=value` adds `v_<key>` candidates. Keys are lower-cased. Keys that match `pass`, `pin`, `otp`, `secret`, `token`, or `code` mark the value as secret. Secret candidates use a descriptor in model questions; the browser receives the value selected by its identifier.
 
@@ -196,7 +196,7 @@ The direct STEP state carries the same task intent in this shape:
 }
 ```
 
-Rows can also carry checked, selected, and expanded state. The browser observation holds raw node identities, page and keyboard guards, geometry, and a fingerprint. These execution details remain in the browser layer. Request construction removes secrets before shortening text.
+Rows can also carry checked, selected, highlighted, and expanded state. A message field can also carry `mentions`, and so can the focus (section 5.6). The browser observation holds raw node identities, page and keyboard guards, geometry, and a fingerprint. These execution details remain in the browser layer. Request construction removes secrets before shortening text.
 
 A generated span shows in `typed_values` in a fixed form: `{ id, text, secret: false, source: "generated", field }`. The text is cut to 120 characters, and `field` is the bound field label. `typed_values` lists generated spans first, then the other spans, with `MAX_GROUP` as the cap for both groups together. The operation and target questions read it:
 
@@ -210,6 +210,8 @@ The value question of a field offers:
 1. In a field that can take new text, in a run with a text source: the text written for this field (never text written for another field), then the task and `--var` spans, then `generate` and `none`. It leaves out `clause` and `whole_task` spans, `after_verb` spans of more than `LIMITS.genSpanWords` (4) words, descriptions of text, and task spans whose text repeats the written text. The two values of a maybe cut are the exception: see the pair rule below. Without the fragment filter, Jev chose the whole task as the chat message 3 of 3 times; two options with the same text split the probability.
 2. In a field that can take new text, in a run without a text source: the task and `--var` spans without `clause` and `whole_task` spans, without descriptions of text, and without `after_verb` spans of more than 4 words whose verb does not name the value. A long name after `named`, `called`, `titled`, `type`, `enter`, `fill`, `search for`, `find`, or `query` stays. Jev then answers `none` for a message that the task only describes, and the CLI does not type or send the instruction itself ("send hello team, standup moved to 11 am in the chat", "a polite message that confirms our meeting on Tuesday"). A value after `to` or `as` of more than 4 words is also left out ("set the subject to Quarterly budget review for Q3 planning"): the field then answers `none`, and the run asks for `--var` or quotes. The two values of a maybe cut are the exception: see the pair rule below.
 3. In any other field (a search box, an email field, a credential field): every task and `--var` span, then `none`.
+
+In all three cases, a multiline field does not offer a `mention` span. A typed "@Ann Lee" is not a mention, and the name alone is not the message. A single-line field, such as the search box of a mention picker, offers it (section 5.6).
 
 A description of text is an `after_verb` span that starts with a lower-case "a", "an", or "some" and names a kind of text (message, reply, note, description, summary, comment, and similar), at any length: "with a short change note", "type a polite message that confirms our meeting". A title in title case ("A Note on Pricing") and the object of `named`, `called`, or `titled` are names and never count. The CLI typed and saved "a short change note" 3 of 3 times, and "a short description" 1 of 3 times, before this rule.
 
@@ -231,7 +233,7 @@ The table in `test/fast/value-corpus.test.ts` holds the task wording of every re
 
 `extractSpans` also drops fragments around a quoted value. An `after_verb` or `clause` fragment loses its outer quote marks, and a fragment that still holds a quote mark is not kept (`projects for "jev browser` goes, `"jev browser` becomes a duplicate of the quoted span). A `'` or `’` is an apostrophe, not a quote mark, when a letter comes before it and a letter comes after it (`it's`, `O'Brien`, `Macy’s`), or when a letter comes before it and no single quote is open (`kids’ shoes`). A `‘`, or a `'` with no letter before it, opens a quote, and the next `'` or `’` with no letter after it closes it. So `‘Macy’s’` is the quoted value `Macy’s`, and `it's done to O'Brien` has no quoted value. After a search verb (`search`, `search for`, `find`, `look up`, `query`), a fragment that starts with a quoted value and adds lower-case words after it stays without its quote marks (`"machine learning" jobs` becomes `machine learning jobs`). Words that start another instruction or name the field, the site, or the place end that form (`and`, `then`, `as`, `for`, `on`, `in`, `from`, `now`, and similar, and any capitalized word): `"jev browser" and open the first result` and `"Ada Lovelace" on Wikipedia` are not values. A mark after a letter or a digit is an apostrophe when no quote is open (`80's music`). Without this cleanup, a quoted search query got a value confidence of 0.41-0.53 in its own field; with it, 0.56-0.64. A verb with extra spaces inside ("search  for") is read as the same verb.
 
-The observation also carries field facts that never reach Jev: `form` (the identity of the field's form or dialog), `multiline`, `inputType`, `autocomplete`, `maxLength`, the document id `doc`, `filled` (the node ids of all form controls in the document with a non-blank value, in view or not), and `texts` (the node id and value of each such control that is rendered: not hidden, aria-hidden, or inert). The focus also carries `form` (with the same identity as the actions' `form`), `submitDefault`, the name of the form's first submit control in tree order (image buttons count), or "" when that control is disabled, and `multiline`; the state for Jev leaves all three out. Form identities come from their own counter, so element node ids and the step request stay the same as without these facts. `actionSpace` and the target criteria copy only named fields, so these facts stay in code.
+The observation also carries field facts that never reach Jev: `form` (the identity of the field's form or dialog), `multiline`, `inputType`, `autocomplete`, `maxLength`, the document id `doc`, `filled` (the node ids of all form controls in the document with a non-blank value, in view or not), and `texts` (the node id and value of each such control that is rendered: not hidden, aria-hidden, or inert). The focus also carries `form` (with the same identity as the actions' `form`), `submitDefault`, the name of the form's first submit control in tree order (image buttons count), or "" when that control is disabled, and `multiline`; the state for Jev leaves all three out. Form identities come from their own counter, so element node ids and the step request stay the same as without these facts. `actionSpace` and the target criteria copy only named fields, so these facts stay in code. Section 5.6 adds more facts that stay in code: `popup` on an action and on the focus, and `bareText` and `otherAtoms` on an editor. It also adds two facts that Jev sees: `mentions` and `highlighted`.
 
 ### 4.3 Request types
 
@@ -323,7 +325,7 @@ History keeps the line breaks of typed text: each line is squashed, and empty li
 - A field in view that is empty, with no other control that holds the text, drops the entry. An overwritten own entry does not drop: its empty control shows that the moved text went, not its own text. It stays with no field, and it gates again when a control shows its text. Without this rule, a pop-out that added a signature to the moved text let a later "Done" click save the overwritten text with no dialog.
 - Any other entry whose field is gone and whose text is in no rendered control stays, but it does not gate. It gates again when a control of the document holds the text again.
 
-When an entry drops, the unused generated spans of the same request drop too. While one entry gates, the click or Enter needs a human confirmation, whatever its label, also with `confirm: "auto"`. A dry run does not ask. `confirm: "never"` blocks `needs_confirmation` with the `confirmNever` hint, and a non-interactive `Human` blocks it with the `noConfirm` hint. Unsent text of more than `LIMITS.confirmTextChars` (6,000) characters blocks `needs_confirmation` because one dialog cannot show it. Otherwise `human.confirm` gets `ConfirmDetail` with the action, the host, and the label and full text of each gating entry. An allowed action does not clear the entries, so the next click asks again while the field still holds the text. The CLI and chat pass no unsent text, so their `typed` list is empty.
+When an entry drops, the unused generated spans of the same request drop too. While one entry gates, the click or Enter needs a human confirmation, whatever its label, also with `confirm: "auto"`. A dry run does not ask. `confirm: "never"` blocks `needs_confirmation` with the `confirmNever` hint, and a non-interactive `Human` blocks it with the `noConfirm` hint. Unsent text of more than `LIMITS.confirmTextChars` (6,000) characters blocks `needs_confirmation` because one dialog cannot show it. Otherwise `human.confirm` gets `ConfirmDetail` with the action, the host, and the label and full text of each gating entry. A send, a submit, or Enter also gets `sends`: what the action sends (section 5.6). An allowed action does not clear the entries, so the next click asks again while the field still holds the text. The CLI and chat pass no unsent text, so their `typed` list is empty.
 
 The MCP server keeps the entries with its tab (section 7). `FastRunnerDeps.unsent` seeds a run on that tab with the entries of the run before it, without their request ids, and `unsentText()` gives the entries when the run ends. A later `browse` call therefore cannot send text that an earlier run typed without a dialog.
 
@@ -366,11 +368,69 @@ Each direct engine checks several points inside the target before input. It can 
 
 After an executed action, set `page_changed` from the before and after fingerprints. Three consecutive non-WAIT actions without a change cause `loop_detected`. Human-resume entries reset the direct stall sequence.
 
-Direct fingerprints include URL, text, action semantics and values, and scroll state; geometry is excluded. Direct bans use stable node identity plus action label. A gate ban lasts one step. Execution counts ban a target on its URL after its repeat limit.
+Direct fingerprints include URL, text, action semantics and values, and scroll state; geometry is excluded. Direct bans use stable node identity plus action label. A message field (a multiline textbox) also adds its text to the key, for its fill and for its "Open" click. Its name no longer changes with its text (section 7.1). Before that change, the name of an editor was its text, so an action on the field with other text was not a repeat. The text in the key keeps that count. Without it, three fills of one composer with different texts were banned as a repeat. A gate ban lasts one step. Execution counts ban a target on its URL after its repeat limit.
 
 Vercel fingerprints include normalized URL, element identity, and typed values. Action signatures include the fingerprint, action, stable element key, and value. Per-page memory holds bans, waits, recoveries, and uncertainty counts. Repeated fingerprints without a new action signature also contribute to loop detection.
 
 A model progress score or a model judgment about the last action is not used for stall detection. Code compares observations and counts executions.
+
+### 5.6 Mention pickers
+
+A mention is an atomic chip in a message editor, for example `<span contenteditable="false" data-mention-id="user-ann">@Ann Lee</span>`. The chip notifies the person. Typed text such as "@Ann Lee" is not a mention. Most apps add a chip with a picker. The user types "@" or clicks a Mention button, and then chooses a name. In a multi-select picker, the user also clicks a commit button such as "Done (1)". A click outside the picker closes it, and the picker drops the checked items.
+
+In this version, Jev drives the picker with its own clicks. Code gives Jev correct facts and one rule, and it stops a send that loses or adds a mention. There is no MENTION operation yet.
+
+**Mention intent.** `mentionNames` in `src/task.ts` finds the names to mention, and `extractSpans` adds them first with the source `mention`:
+
+- The names after mention, tag, ping, @-mention, or at-mention: an @handle, a quoted name, or one to three name words. A list with commas or "and" gives each name ("Tag @ann.lee and Bob Roy").
+- Every @handle that is not in an email address or a URL.
+
+A handle keeps its "@" ("@ann.lee", "@Research Agent"). A name word starts with a capital letter and has lower-case letters after it, so "mention Q3 results", "tag it with urgent", and "mention the delay to Ann" have no mention. Because this rule runs first, a name that is also a proper noun or a quoted value keeps the source `mention`. The task has a mention intent when a span has this source.
+
+**Facts.** The snapshot and the STEP request give these facts:
+
+- A textbox never takes its name from its content (section 7.1). Before this rule, the composer had the name of its text, so its placeholder "use @ to tag" did not show after the fill.
+- An editor gives `mentions`: the names of its mention chips, in order. A chip is a top-level atom with a mention attribute (`data-mention`, `data-mention-id`, `data-mention-display`, or `data-type="mention"`), the class `mention`, the tag `ts-mention`, or text that starts with "@". Its name is `data-mention-display`, `data-label`, `data-value`, or its text without the "@". Other atoms (`contenteditable="false"`, `data-slate-void`, `data-lexical-decorator`) are images, embeds, and variables. They are not mentions; `otherAtoms` counts them. `bareText` is the editor text outside all atoms. Only `mentions` goes to Jev.
+- The row of a field with chips, and the focus in that field, show `mentions`. In a task with a mention intent, a multiline textbox without chips shows `mentions: "none"`.
+- An option takes `checked` from its own `aria-checked`, from a checkbox inside it, or from `data-state="checked"`. A control inside an option that takes no pointer events is not an action. Before this rule, the Radix checkbox of each user option showed as a row "checkbox on", and the option was "on Ann Lee".
+- In the list of a combobox (`aria-controls`, `aria-owns`, or `aria-activedescendant`) and in a cmdk list, `aria-selected` marks the option that Enter picks. The option then shows `highlighted`, not `selected`. A list with `aria-multiselectable="true"` keeps `selected`. Before this rule, "Research Agent" showed `selected=true` when the picker opened.
+- Each action in a popup gives `popup`: the ids of the popups around it, innermost first. A popup is an element with the role dialog, alertdialog, listbox, or menu, a `<dialog>`, or a Radix popper wrapper. The ids come from the form counter, so a dialog has the same id as the `form` of its controls. The focus also gives `popup`.
+- With a mention intent, the operation and target questions add `MENTION_RULE`: add the person with the field's mention picker, confirm with Done or Add, a checked item is not added, typed text is not a mention, and send only when the field lists every requested mention.
+
+In a lab on the chat fixture with the real STEP request (4 asks for each state), Jev chose the next picker step each time:
+
+| State | Choice |
+|---|---|
+| Empty composer | TYPE_TEXT 0.60, CLICK Mention 0.40 |
+| Text typed | CLICK Mention 0.88-0.93, target 0.98-0.99 |
+| Picker open | CLICK "Ann Lee" 0.86-0.90, target 0.93-0.95 |
+| "Ann Lee" checked | CLICK "Done (1)" 0.89-0.92, target 0.93-0.94 |
+| Chip added | CLICK Send, target 0.93-0.96; Enter and the click together 0.78-0.84 |
+| A quoted chat task (no mention) | CLICK Send, target 1.00, as before |
+
+Before these facts, Enter got 0.34-0.44 after the text and the run blocked in 24 of 32 plugin runs. With a checked option, Jev clicked Send at 0.73-0.87 and sent the message with no chip in 7 of 32. The facts without the rule made Jev type the text again (TYPE_TEXT 0.66), so the facts and the rule go together.
+
+**Gates.** These checks come after the target gates (confidence, runner-up, repeat) and before any text request or dialog:
+
+1. **Checked items not added.** `stagedPicker` finds, only with a mention intent, an open picker: options with `checked=true` that no field holds as a chip, and a commit button in the same popup. A commit button has a name that starts with done, add, apply, insert, select, ok, or confirm, or ends with a count ("Done (2)"), and has no destructive word. A send, a submit, or a destructive click outside that popup asks again with the reason: the open picker holds N checked items that are not added yet; click "Done (1)" first. The target is banned for the step. Enter asks again when the focus is outside the popup. Enter in the picker's own search box adds the items, so it keeps its usual gates. Another action outside the popup asks again one time for each picker state, and then it runs. When a send stays chosen, the run blocks `ambiguous` with that reason.
+2. **A chip that no name asks for.** A chip that an action of this run added is recorded: a field shows it right after the action and did not show it before. A chip of a draft that was there before the run is not recorded. A send, a submit, or a destructive click in the form of a field with such a chip asks again when no `mention` span names the chip. Enter asks again for the focused field and its form. A name matches a chip when the words are the same or when the chip has every word of the name ("@ann.lee" and "Ann" match "Ann Lee"). The reason tells Jev to type the message again: a plain fill selects all, and the chip goes. In bench r93, Jev clicked "Research Agent" in the picker and sent a message that held only that chip.
+3. **A fill after the chips.** A plain fill clicks the field, selects all, and types, so it removes the chips. When every chip of the field is a mention that this run added and a task name asks for, and the field has no other atoms, `fillMode` does this:
+   - With no other text in the field, the fill adds its text at the end (`FillOptions.append`). Page code clicks a point that is not on an atom, puts the caret after the last text or chip of the last block (before a trailing `<br>`), puts one space before the text when the field text does not end in a space, and types the text with no select-all. When the focus is not in the field after the click, it types nothing and the action is stale. When every point is on an atom, the action is stale. The step record gate ends with "append".
+   - With other text, a fill would remove the chips. The loop asks again, and no text request goes out.
+   - In every other case (no chips, other atoms, or a chip that the run did not add or no name asks for), the fill is a plain fill, as before.
+
+   A plain fill also takes a point that is not on an atom first, because a click on a chip can open its card. When every point is on an atom, it clicks the first one, as before.
+4. **The send dialog.** For a send, a submit, or Enter, `ConfirmDetail.sends` lists the message fields that the action sends: the focused field and the multiline fields of the form that hold text or chips, each with its label, its text, and its chip names. The dialog shows an entry when it has chips or when its text is not a gating unsent text. So the dialog also shows text that no assistant wrote. In bench r93, the dialog for the send of a message with only a chip showed no content. The MCP dialog shows "This action sends:", each field with its text, and a line "Mentions, each notifies that person: @Ann Lee (mention)". The confirmation summary for the assistant names the mentions. The CLI prompt does not change.
+
+With these gates, the plugin runs take two paths. Text first: the fill, then Mention, option, Done, and Send, with one dialog for each click (4 dialogs), because the unsent text gates every click. Mention first: Mention, option, Done, an append fill, and Send, with one dialog. A plugin run with no dialog blocks at Send with the text and the chip in the composer. The CLI without text blocks `needs_credential` at step 1 and leaves no chip.
+
+**Known limits.**
+
+- There is no MENTION operation. Jev cannot type "@" at the caret, so a field without a Mention or @ button (a TipTap or Lexical inline typeahead, a GitHub-style textarea suggester) cannot get a chip.
+- Code does not check that each requested name is a chip before a send. Jev's rule does that. A name that the picker does not offer can make the run block, but it does not make a wrong send.
+- The dialog shows the chips on a separate line, not in their place in the text.
+- A task with "tag" and a capitalized word ("Tag Finance on the report") has a false mention intent. The rule and `mentions: "none"` then show, and a multiline field does not offer that word as a value.
+- An editor that keeps chips in its model and shows them without a mention attribute or an "@" does not give `mentions`.
 
 ## 6. Completion, blocking, and human hand-off
 
@@ -441,6 +501,8 @@ A dialog reaches a person only in an interactive session (section 9.1). In a non
 ### 7.1 Observation and input
 
 The direct snapshot reads visible text and supported controls in one page evaluation. It assigns stable node identities with a WeakMap and retains live node references for execution. Target actions exclude disabled, hidden, inert, and unsupported controls. Native selects expose available unselected options. Editable fields offer fill and click actions.
+
+The accessible name follows ARIA for two cases. A textbox (a textarea, an editor, or an element with the role textbox or searchbox) never takes its name from its content: its text is its value. It takes aria-labelledby, aria-label, a label, title, aria-placeholder, placeholder, or data-placeholder. A textbox with none of these has the name "textbox". Only an `<input>` of type button, submit, or reset takes its name from its value; a `<button value="on">` does not. Before these rules, a chat composer had the name of its text after the fill, and a Radix checkbox had the name "on". The Plate document of the editor fixture has no name source, so its name is now "textbox" instead of its first words. Its value still shows in its row. Section 5.6 gives the option, popup, and editor facts.
 
 Before a targeted action, compare the page key and target guard. The page key includes document identity, URL, viewport, safe form values, and scroll state. The target guard includes identity, accessible name, value, state, link destination, and nearby form, dialog, or row text. Geometry is resolved and hit-tested immediately before input.
 
@@ -576,6 +638,7 @@ Maintain coverage for these behaviors:
 | Process lifetime | SIGINT during launch, error cleanup, CLI exit with keep-open after success and failure, chat connection reuse |
 | Interfaces | Exactly one result JSON document, exit mapping, argument errors, browser envelopes, CDP response matching, HTTP connection close |
 | Assistant text | `canWriteInto`, field batches, redaction before cuts, sanitizing, `checkTexts` rules, the `generate` option and its texts, binding, single use, the unsent-text gate with fields out of view, the text request cap, cancel checkpoints |
+| Mention pickers | Mention spans and non-mentions, textbox and button names, option `checked` and `highlighted`, popup chains, chips and other atoms, `MENTION_RULE` and `mentions` only with a mention intent, the checked-items gate, the unasked-chip gate, the append fill and its re-ask, the `sends` of the dialog, the key of a message field |
 | MCP server | Tool names, annotations, and schemas; each status in the view; the token budget; `next` texts; dialogs and the interactive rule; cancel and `stopping`; idle timers; session reuse and relaunch; only JSON-RPC on stdout; exit on stdin end and on signals; the bundle and the plugin files |
 
 Use [test/mcp/helpers.ts](test/mcp/helpers.ts) for the scripted reply oracle, the fake mail page on a `BrowserSession`, the fake Jev link, and the in-memory MCP client.
@@ -597,6 +660,7 @@ The main risks and controls are:
 - Assistant text sent without consent: gate every click and Enter while unsent text exists, show the full text in the dialog, and let only a person answer. No tool argument, page text, or model answer can approve an action.
 - Page text that gives instructions to the assistant: label it `untrusted_page_text`, put it last, sanitize it, and state in the skill that all result strings are data.
 - Secrets in assistant text: redact requests and views, reject secret var values, key patterns, and the API key.
+- A lost or wrong mention: stop a send while a picker holds checked items that are not added, stop a send of a chip that the run added and no task name asks for, keep the run's chips when a fill adds text, and show the chips in the send dialog (section 5.6).
 
 Residual risks of assistant text:
 
