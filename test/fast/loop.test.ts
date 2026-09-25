@@ -6,7 +6,7 @@ import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
 import { cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
 import type { Action, Observation, Page, UnsentText } from "../../src/fast/model.js";
-import { StalePage } from "../../src/fast/model.js";
+import { EditRefused, StalePage } from "../../src/fast/model.js";
 import type { RunnerHints, TextReply, TextSource } from "../../src/io.js";
 import { emptyResult } from "../../src/io.js";
 import type { RunConfig, Span } from "../../src/types.js";
@@ -1100,13 +1100,15 @@ describe("assistant-written text (generate)", () => {
     const t = setup(task, { pages: { m: mailPage(state) }, start: "m" }, seq(...steps), { url: MAIL, vars: { token: "s3cr3t" }, ...over }, opts);
     t.page.observe = async () => { t.page.observes += 1; t.page.stats.browserMs += 2; return mailPage(state); };
     const act = t.page.act.bind(t.page);
-    t.page.act = async (a, o, text) => {
-      await act(a, o, text);
-      if (a.kind === "fill" && a.node !== null) state.values[a.node] = text ?? "";
+    t.page.act = async (a, o, text, edit) => {
+      const r = await act(a, o, text, edit);
+      // An append adds a line to the text that the field holds; any other fill replaces it.
+      if (a.kind === "fill" && a.node !== null) state.values[a.node] = edit?.mode === "append" && (state.values[a.node] ?? "").trim() !== "" ? `${state.values[a.node]}\n${text ?? ""}` : text ?? "";
       if (a.kind === "click") {
         state.clicks += 1;
         if (a.label === "Send") { state.sent = `${state.values[3] ?? ""} | ${state.values[4] ?? ""}`; state.values[3] = ""; state.values[4] = ""; }
       }
+      return r;
     };
     t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); state.clicks += 1; };
     return { ...t, state };
@@ -1263,13 +1265,18 @@ describe("assistant-written text (generate)", () => {
   it("10: a value change during the wait re-asks; the fill then uses g1 with one write", async () => {
     let t!: ReturnType<typeof mail>;
     const text = fakeText([() => { t.state.values[4] = "draft"; return says({ f1: "Tuesday works." }); }]);
-    t = mail(TASK, [gen("Reply"), gen("Reply"), finish], {}, { text });
+    // The page typed "draft" during the wait: the Reply now holds text that the run did not type, so the re-ask also
+    // asks where the new text goes.
+    const replace: Decide = (q, s) => ({ ...gen("Reply")(q, s), type_text_mode: "replace_all" });
+    t = mail(TASK, [gen("Reply"), replace, finish], {}, { text });
     const r = await t.runner.run();
     expect(r.outcome).toBe("done");
     expect(text.requests).toHaveLength(1);
     expect(stepReqs(t)[1]?.state.retry_reason).toContain('text for "Reply" is ready as typed value g1; the page changed during the wait');
     expect(stepReqs(t)[1]?.state.typed_values?.[0]).toMatchObject({ id: "g1", text: "Tuesday works.", field: "Reply" });
-    expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: "Tuesday works." }]);
+    expect(Object.keys(stepReqs(t)[0]?.questions ?? {}).some((k) => k.startsWith("mode_"))).toBe(false);
+    expect(Object.keys(stepReqs(t)[1]?.questions ?? {})).toContain(`mode_${idx(stepReqs(t)[1]?.questions ?? {}, "type_text_target", "Reply")}`);
+    expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: "Tuesday works.", edit: { mode: "replace" } }]);
     expect(r.steps[0]?.gate).toBe("generated g1 cached");
   });
 
@@ -1578,8 +1585,10 @@ describe("assistant-written text (generate)", () => {
     };
     // The pop-out shows "Draft one." again, and the page then discards it: the entry drops like any other.
     expect(await run([clickOn("Restore draft"), clickOn("Discard")])).toEqual([[null, REPLY]]);
-    // A secret fill replaces the entry, and the send empties the pop-out: the entry drops like any other.
-    expect(await run([typeValue("Reply (pop-out)", "v_token"), clickOn("Send")])).toEqual([]);
+    // A secret fill replaces the entry, and the send empties the pop-out: the entry drops like any other. The pop-out
+    // holds a signature that the run did not type, so Jev also says that the value replaces its text.
+    const replace: Decide = (q, s) => ({ ...typeValue("Reply (pop-out)", "v_token")(q, s), type_text_mode: "replace_all" });
+    expect(await run([replace, clickOn("Send")])).toEqual([]);
   });
 
   it("13n:a text that the page moves and changes (list marks, a signature) keeps its dialog and its record", async () => {
@@ -1634,7 +1643,9 @@ describe("assistant-written text (generate)", () => {
     // Notes already holds "Q3 plan review notes, draft 1". After the Subject fill, the page turns Subject into a heading.
     const notes = [el("e50", "fill", "Notes", "textbox", { node: 50, form: 7, multiline: true })];
     const text = fakeText([says({ f1: "Q3 plan", f2: "Q3 plan review notes, draft 2" }), says({ f1: "Notes text" })]);
-    const t = mail(TASK, [gen("Subject"), clickOn("Comment"), gen("Notes"), giveUp], {},
+    // Notes holds text that the run did not type: Jev also says that the new text replaces it.
+    const replace: Decide = (q, s) => ({ ...gen("Notes")(q, s), type_text_mode: "replace_all" });
+    const t = mail(TASK, [gen("Subject"), clickOn("Comment"), replace, giveUp], {},
       { text, human: fakeHuman({ interactive: true, confirm: [true, true] }), state: { extra: notes, values: { 50: "Q3 plan review notes, draft 1" } } });
     const act = t.page.act.bind(t.page);
     t.page.act = async (a, o, value) => { await act(a, o, value); if (a.kind === "fill" && a.node === 3) { t.state.values[3] = ""; t.state.hidden = [3]; } };
@@ -3082,5 +3093,218 @@ describe("WAIT polls until the page holds still", () => {
     const r = await t.runner.run();
     expect(r.outcome).toBe("done");
     expect(t.page.observes).toBe(4);
+  });
+});
+
+describe("fills that keep a field's text, refused fills, and a step that a submit click opened", () => {
+  const URL = "https://app.example/doc";
+  const DOC = "Release 4.2 notes\nThe QA team tested it.";
+  const LINE = "Reviewed by QA";
+  const TASK = 'add the line "Reviewed by QA" at the end of the document and save it';
+  const docPage = (value: string, extra: Action[] = []) => obs(URL, [
+    el("e1", "fill", "Document", "textbox", { node: 1, value, multiline: true, form: null }),
+    el("e2", "click", "Save", "button", { node: 2, form: null }),
+    ...extra,
+  ], `Notes\n${value}`, { doc: 5 });
+  const SAVED = obs(URL, [el("e1", "click", "Edit", "button", { node: 9 })], "Notes\nSaved", { doc: 5 });
+  type Decide = (q: Questions, state: { recent_actions: { action: string; kind: string; text: string | null }[]; retry_reason?: string }) => PartialAnswers;
+  /** Step requests take the next decision; the last one repeats. */
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as never) : {});
+  };
+  const fill = (mode: string | null, conf = 0.97, value: PartialAnswers[string] = { choice: "s1", confidence: 0.9 }): Decide => (q) => ({
+    page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Document"), confidence: 0.9 }, type_text_value: value,
+    ...(mode !== null ? { type_text_mode: { choice: mode, confidence: conf } } : {}),
+  });
+  const click = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const wait: Decide = () => ({ page_kind: "task_page", operation: "WAIT" });
+  const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
+  const appended = (before: string, text: string) => ({ mode: "append" as const, shape: "document" as const, before, after: `${before}\n${text}` });
+  const steps = (t: { oracle: { requests: { name: string; state: unknown; questions: Questions }[] } }) => t.oracle.requests.filter((r) => r.name === "step");
+  const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
+  const fills = (t: { page: { calls: { op: string; kind?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "fill");
+
+  /** The document page: a fill that runs moves to `after` (the document with the line), Save moves to SAVED. */
+  function doc(decide: Decide[], edits: PageScript["edits"] = (c) => appended(DOC, c.text ?? ""), over: Partial<RunConfig> = {}, opts: SetupOpts = {}) {
+    return setup(TASK, { pages: { d: docPage(DOC), after: docPage(`${DOC}\n${LINE}`), saved: SAVED }, start: "d", edits,
+      transitions: (c) => (c.op === "act" && c.kind === "fill" ? "after" : c.op === "act" && c.id === "e2" ? "saved" : undefined) }, seq(...decide), { url: URL, ...over }, opts);
+  }
+
+  it("a field that holds text the run did not type: the mode head, an append plan, and history 'fill (append)'", async () => {
+    const t = doc([fill("append"), click("Save"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const first = steps(t)[0];
+    const key = idx(first?.questions ?? {}, "type_text_target", "Document");
+    expect(Object.keys(first?.questions ?? {})).toContain(`mode_${key}`);
+    expect(((first?.questions[`value_${key}`] as ChoiceQuestion).instructions as { question: string }).question).toMatch(/^Which offered value is the new text/);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "append" } }]);
+    expect(stepStates(t)[1]?.recent_actions[0]).toMatchObject({ action: "Document", kind: "fill (append)", text: LINE });
+    expect(t.log.lines.some((l) => /step 1 edit append 0\.97 for \[e1\]/.test(l))).toBe(true);
+    // After Save the page has no held field: no mode head.
+    expect(Object.keys(steps(t)[2]?.questions ?? {}).some((k) => k.startsWith("mode_"))).toBe(false);
+  });
+
+  it("a mode below 0.6 asks again one time, then blocks with the hint; nothing is typed", async () => {
+    const t = doc([fill("append", 0.55)]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain('low_mode append 0.55 < 0.6; the task must say if the new text replaces the text of "Document" or goes at its end');
+    expect(steps(t)[1]?.state).toMatchObject({ retry_reason: expect.stringContaining("low_mode append 0.55") });
+    expect(fills(t)).toEqual([]);
+    // A missing mode answer is a low one: there is no fallback to replace.
+    const m = doc([(q) => ({ ...fill(null)(q, { recent_actions: [] }), type_text_mode: { choice: "prepend", confidence: 0.99 } })]);
+    expect((await m.runner.run()).blocked?.hint).toContain("low_mode missing < 0.6");
+    expect(fills(m)).toEqual([]);
+  });
+
+  it("a replace of held text needs 0.8: 0.79 blocks, 0.85 replaces", async () => {
+    const low = doc([fill("replace_all", 0.79)]);
+    expect((await low.runner.run()).blocked?.hint).toContain("low_mode replace_all 0.79 < 0.8");
+    expect(fills(low)).toEqual([]);
+    const ok = doc([fill("replace_all", 0.85), click("Save"), finish], (c) => ({ mode: "replace", shape: "document", before: DOC, after: c.text ?? "" }));
+    expect((await ok.runner.run()).outcome).toBe("done");
+    expect(fills(ok)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "replace" } }]);
+    expect(stepStates(ok)[1]?.recent_actions[0]?.kind).toBe("fill");
+  });
+
+  it("a value of none on a held field blocks needs_credential, not the mode gate", async () => {
+    const t = doc([fill("append", 0.97, "none")]);
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("needs_credential");
+    expect(fills(t)).toEqual([]);
+  });
+
+  it("a field whose text is all this run's own gets no mode head: a new text replaces it, as before", async () => {
+    const empty = docPage("");
+    const t = setup(TASK, { pages: { e: empty, own: docPage(LINE), saved: SAVED }, start: "e", transitions: (c) => (c.op === "act" && c.kind === "fill" ? "own" : c.op === "act" && c.id === "e2" ? "saved" : undefined) },
+      seq(fill(null), fill(null), click("Save"), finish), { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    for (const s of steps(t)) expect(Object.keys(s.questions).some((k) => k.startsWith("mode_"))).toBe(false);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE }, { op: "act", id: "e1", kind: "fill", text: LINE }]);
+  });
+
+  it("an append that lost a line of the field blocks before any click", async () => {
+    const t = doc([fill("append"), click("Save"), finish], (c) => ({ mode: "append", shape: "document", before: DOC, after: `Release 4.2 notes\n${c.text ?? ""}` }));
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.hint).toBe('the fill of "Document" did not go as planned: the field lost 1 line of its text, such as "The QA team tested it.". Check the field before any save or send');
+    expect(t.page.calls.some((c) => c.op === "act" && c.kind === "click")).toBe(false);
+    const shown = doc([fill("append"), click("Save"), finish], () => ({ mode: "append", shape: "document", before: DOC, after: DOC }));
+    expect((await shown.runner.run()).blocked?.hint).toContain("the field does not show the typed text");
+  });
+
+  it("an empty field that the page replaced instead of an append is not checked as an append", async () => {
+    const t = doc([fill("append"), click("Save"), finish], (c) => ({ mode: "replace", shape: "document", before: "", after: c.text ?? "" }));
+    expect((await t.runner.run()).outcome).toBe("done");
+    expect(stepStates(t)[1]?.recent_actions[0]?.kind).toBe("fill");
+  });
+
+  it("the same append again is not typed: the field still ends with the text that this run added", async () => {
+    const t = doc([fill("append"), fill("append"), click("Save"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(fills(t)).toHaveLength(1);
+    expect(r.steps[1]).toMatchObject({ operation: "TYPE_TEXT", result: "skipped", error: "already added" });
+    expect(r.steps[1]?.gate).toBe('"Document" already ends with this text, which this run added; it is not typed again');
+    expect(stepStates(t)[2]?.recent_actions[1]).toMatchObject({ kind: "fill (already added)", text: LINE, page_changed: false });
+  });
+
+  it("a refused fill observes and decides one time more with the reason, then blocks with it; nothing is typed", async () => {
+    const why = "the fill did not start: focus is on input.slate-shadow-input, not on the field";
+    const t = doc([fill("append")], () => new EditRefused(why));
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked).toMatchObject({ kind: "ambiguous", hint: `the fill of "Document" was refused: ${why}` });
+    expect(steps(t)).toHaveLength(2);
+    expect(steps(t)[1]?.state).toMatchObject({ retry_reason: `TYPE_TEXT on "Document" was not executed: ${why}. Check the current page and choose the next useful action.` });
+    expect(fills(t)).toEqual([]);
+    expect(t.log.lines.some((l) => l.includes("page keeps changing"))).toBe(false);
+  });
+
+  it("a fill that changed the page before its refusal blocks at once, and its text gates the next run (plugin)", async () => {
+    const t = doc([fill("append")], () => new EditRefused("the fill stopped after a new line: the caret is not in a new empty line inside the field", true), {}, { fromAssistant: true });
+    const r = await t.runner.run();
+    expect(r.blocked?.hint).toBe('the fill of "Document" did not go as planned: the fill stopped after a new line: the caret is not in a new empty line inside the field. Check the field before any save or send');
+    expect(steps(t)).toHaveLength(1);
+    expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: LINE, pending: true }]);
+  });
+
+  it("autonomous runs: an append has no replaced audit, a replace_all has one, and a fill that changed the page before its refusal keeps it", async () => {
+    const auto = { confirm: "autonomous" } as const;
+    const add = await doc([fill("append"), finish], undefined, auto).runner.run();
+    expect(add.outcome).toBe("done");
+    expect(add.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "ok" });
+    expect(add.steps[0]?.unattended).toBeUndefined();
+    const all = await doc([fill("replace_all"), finish], (c) => ({ mode: "replace", shape: "document", before: DOC, after: c.text ?? "" }), auto).runner.run();
+    expect(all.steps[0]?.unattended).toMatchObject({ why: ["replaced"], replaced_chars: [...DOC].length });
+    const lost = await doc([fill("replace_all")], () => new EditRefused("the page changed during the fill", true), auto).runner.run();
+    expect(lost.outcome).toBe("blocked");
+    expect(lost.steps[0]?.unattended).toMatchObject({ why: ["replaced"], replaced_chars: [...DOC].length });
+    // A refusal before any change: the fill did not run, so the next decision gets neither its gate nor its audit.
+    let n = 0;
+    const once = await doc([fill("replace_all"), wait, finish], () => (n++ === 0 ? new EditRefused("the fill did not start: focus is not on the field") : undefined), auto).runner.run();
+    expect(once.steps[0]).toMatchObject({ operation: "WAIT", gate: "ok" });
+    expect(once.steps[0]?.unattended).toBeUndefined();
+  });
+
+  it("an append stays only when the field shows the typed text (plugin): else its entry is pending", async () => {
+    const kept = doc([fill("append"), giveUp], () => undefined, {}, { fromAssistant: true });
+    await kept.runner.run();
+    expect(kept.runner.unsentText()).toEqual([expect.objectContaining({ node: 1, text: LINE })]);
+    expect(kept.runner.unsentText()[0]?.pending).toBeUndefined();
+    const lost = setup(TASK, { pages: { d: docPage(DOC) }, start: "d" }, seq(fill("append"), giveUp), { url: URL }, { fromAssistant: true });
+    await lost.runner.run();
+    expect(lost.runner.unsentText()).toMatchObject([{ node: 1, text: LINE, pending: true }]);
+  });
+
+  describe("a step that a submit click opened", () => {
+    const EDIT = obs(URL, [el("e1", "click", "Cancel", "button", { node: 1 }), el("e2", "click", "Save", "button", { node: 2, expanded: "false" })], "Release notes", { doc: 5 });
+    const POPOVER = obs(URL, [
+      el("e1", "click", "Cancel", "button", { node: 1 }), el("e2", "click", "Save", "button", { node: 2, expanded: "true" }),
+      el("e3", "fill", "e.g., Updated project requirements...", "textbox", { node: 33, value: "", multiline: true, form: 1 }),
+      el("e4", "click", "Cancel", "button", { node: 34, form: 1 }), el("e5", "click", "Confirm", "button", { node: 35, form: 1 }),
+    ], "Release notes\nSave Changes\nCancel\nConfirm", { doc: 5 });
+    const popover = (decide: Decide[], over: Partial<RunConfig> = {}) => setup("edit the notes and save them", { pages: { e: EDIT, p: POPOVER, s: SAVED }, start: "e",
+      transitions: (c) => (c.op === "act" && c.id === "e2" ? "p" : c.op === "act" && c.id === "e5" ? "s" : undefined) }, seq(...decide), { url: URL, ...over });
+
+    it("DONE while the popup of a Save click is open with Confirm is refused: the re-ask has no DONE, Confirm, then DONE", async () => {
+      const t = popover([click("Save"), finish, click("Confirm"), finish]);
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e2", "e5"]);
+      const reask = steps(t)[2];
+      expect(criteriaKeys(reask?.questions["operation"])).not.toContain("DONE");
+      expect((reask?.state as { retry_reason: string }).retry_reason).toContain('DONE was not executed: the click on "Save" opened a step that is still open, with "Confirm". The click did not finish the action');
+      expect(t.log.lines.some((l) => l.includes('"Save" opened a step with "Confirm"'))).toBe(true);
+      expect(criteriaKeys(steps(t)[3]?.questions["operation"])).toContain("DONE");
+    });
+
+    it("a step that stays open blocks after two refused DONE answers, with a clear hint", async () => {
+      const t = popover([click("Save"), finish, wait, finish, wait, finish]);
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("blocked");
+      expect(r.blocked?.kind).toBe("ambiguous");
+      expect(r.blocked?.hint).toBe('the click on "Save" opened a step that is still open, with "Confirm". The task is not done while that step is open; check the page');
+      expect(t.page.calls.filter((c) => c.op === "act" && c.id === "e5")).toEqual([]);
+    });
+
+    it("a new dialog with a cancel control after a submit click counts too; one without it, or after a navigational click, does not", async () => {
+      const plain = { ...EDIT, actions: EDIT.actions.map((a) => (a.id === "e2" ? { ...a, expanded: undefined } : a)) } as Observation;
+      const dialog = (labels: string[]) => obs(URL, [...plain.actions.filter((a) => a.kind !== "wait"), ...labels.map((l, i) => el(`e${i + 3}`, "click", l, "button", { node: 40 + i, form: 4 }))], "dialog", { doc: 5 });
+      const run = async (start: Observation, next: Observation, label: string) => {
+        const t = setup("save the notes", { pages: { a: start, b: next }, start: "a", transitions: (c) => (c.op === "act" && c.kind === "click" ? "b" : undefined) }, seq(click(label), finish), { url: URL });
+        return t.runner.run();
+      };
+      expect((await run(plain, dialog(["Cancel", "Delete"]), "Save")).steps[1]?.result).not.toBe("done");
+      expect((await run(plain, dialog(["Close", "Save another"]), "Save")).outcome).toBe("done");
+      const nav = obs(URL, [el("e1", "click", "Options", "button", { node: 1, expanded: "false" })], "x", { doc: 5 });
+      const menu = obs(URL, [el("e1", "click", "Options", "button", { node: 1, expanded: "true" }), el("e2", "click", "Save as PDF", "menuitem", { node: 50 })], "x", { doc: 5 });
+      expect((await run(nav, menu, "Options")).outcome).toBe("done");
+    });
   });
 });

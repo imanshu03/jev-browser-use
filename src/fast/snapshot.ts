@@ -414,3 +414,118 @@ export const LOCATION_SCRIPT = "location.href";
 
 /** Keyboard input also checks focus and the form or dialog around the focused control. */
 export const KEY_GUARD_SCRIPT = "(() => { const c=window.__jevFast; return c ? c.keyGuard() : null; })()";
+
+/**
+ * The wait between the steps of a fill: two animation frames and one task turn, at most 50 ms. An editor copies the
+ * browser selection into its own model in that time (slate-react on `selectionchange`). The fill runs inside the armed
+ * causal settle, so these timers are native: the tracker must not count them as work of the input.
+ */
+export const EDIT_SETTLE_SCRIPT = "new Promise(r => { const t = window.__jevCausal?.native || setTimeout; t.call(window, r, 50); requestAnimationFrame(() => requestAnimationFrame(() => t.call(window, r, 0))); })";
+
+/** The names of a control that sends a message. The same words as SEND_BUTTON in loop.ts. */
+const SEND_CONTROL = String.raw`\b(?:send|post|reply|comment)\b`;
+
+/** One step of a fill, read in the page. See `editScript`. */
+export interface EditStep {
+  ok: boolean;
+  /** Why the step failed. "" when `ok`. */
+  why: string;
+  /** The field text: `innerText` of an editor, `value` of an input or textarea. */
+  text: string;
+  kind: "input" | "textarea" | "editable";
+  /** The field holds no text (zero-width characters do not count). */
+  blank: boolean;
+  /** "read" only. */
+  shape?: "input" | "textarea" | "composer" | "document";
+  /** "check" only: the block of the caret has no text. */
+  caretBlank?: boolean;
+  /** "check" only: the text before the caret ends with white space. */
+  spaceBefore?: boolean;
+  /** "check" only: false for an input without a selection API (email, number). Code then checks focus only. */
+  selectable?: boolean;
+}
+
+/**
+ * One step of a fill, in the page. It never types. `step`:
+ * - "read": the field text, its kind, and its shape (`FieldShape` in model.ts). Focus must be on the field or inside it.
+ * - "check": focus is on the field or inside it, the field is visible, and the selection is where `mode` needs it: all
+ *   of the text for replace, a caret with no text after it for append. An input without a selection API (email,
+ *   number) checks focus only.
+ * - "blank": after a new line, the caret is in an empty block inside the field, and the field still holds each line of
+ *   `keep`.
+ */
+export function editScript(node: number, step: "read" | "check" | "blank", mode: "replace" | "append" = "replace", keep: string[] = []): string {
+  const arg = JSON.stringify({ node: Math.trunc(node), step, mode, keep, send: SEND_CONTROL });
+  return String.raw`(a => {
+  const host=window.__jevFast?.nodes.get(a.node);
+  if (!host?.isConnected) return {ok:false,why:'the field is gone',text:'',kind:'input',blank:true};
+  // A role=textbox wrapper that is not editable itself: the text control inside it that the click focused is the field.
+  const inner=document.activeElement;
+  const e=!host.isContentEditable && !['INPUT','TEXTAREA'].includes(host.tagName) && inner && inner!==host && host.contains(inner) &&
+    (['INPUT','TEXTAREA'].includes(inner.tagName) || inner.isContentEditable) ? inner : host;
+  const norm=t=>String(t||'').replace(/[\u200B\uFEFF]/g,'').replace(/\s+/g,' ').trim();
+  const kind=e.tagName==='TEXTAREA' ? 'textarea' : e.tagName==='INPUT' ? 'input' : 'editable';
+  const text=kind==='editable' ? e.innerText : String(e.value??'');
+  // The text of an editor inside a range, without the placeholder that Slate renders as text in an empty editor.
+  const textIn=x=>{
+    let t='';
+    const w=document.createTreeWalker(e,NodeFilter.SHOW_TEXT);
+    for (let n=w.nextNode();n;n=w.nextNode()) {
+      if (n.parentElement?.closest('[data-slate-placeholder]') || !x.intersectsNode(n)) continue;
+      t+=n.data.slice(n===x.startContainer ? x.startOffset : 0,n===x.endContainer ? x.endOffset : n.data.length);
+    }
+    return t;
+  };
+  const range=(sc,so,ec,eo)=>{const x=document.createRange();x.setStart(sc,so);x.setEnd(ec,eo);return x;};
+  const all=()=>{const x=document.createRange();x.selectNodeContents(e);return x;};
+  const out=(ok,why,more)=>({ok,why:ok?'':why,text,kind,blank:norm(kind==='editable' ? textIn(all()) : text)==='',...more});
+  const act=document.activeElement;
+  const where=n=>!n || n===document.body || n===document.documentElement ? 'nothing' :
+    (n.tagName.toLowerCase()+(n.id ? '#'+n.id : n.classList?.length ? '.'+n.classList[0] : '')+
+      (n.getAttribute('aria-label') ? ' "'+n.getAttribute('aria-label').slice(0,40)+'"' : ''));
+  if (!act || (act!==e && !e.contains(act))) return out(false,'focus is on '+where(act)+', not on the field');
+  if (!e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return out(false,'the field is hidden');
+  const inline=x=>/^inline/.test(getComputedStyle(x).display);
+  if (a.step==='read') {
+    if (kind!=='editable') return out(true,'',{shape:kind});
+    // A send-like control in the field's form or dialog, or else in the containers around the field that hold no other
+    // text field (up to 6): a new line can send there.
+    const send=new RegExp(a.send,'i');
+    const name=b=>b.getAttribute('aria-label')||b.innerText||b.value||b.getAttribute('title')||'';
+    const fields='textarea,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"],input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"],input[type="number"]';
+    const scope=e.closest('form,[role="form"],dialog,[role="dialog"]');
+    const roots=scope ? [scope] : [];
+    for (let p=e.parentElement,i=0;p && !scope && i<6 && ![...p.querySelectorAll(fields)].some(f=>f!==e && !e.contains(f) && !f.contains(e));p=p.parentElement,i++) roots.push(p);
+    const sends=roots.some(r=>[...r.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"]')]
+      .some(b=>!e.contains(b) && send.test(name(b))));
+    // Blocks with text, below the wrappers that hold all of them (Draft.js puts one wrapper around the blocks).
+    let box=e;
+    while (box.children.length===1 && !inline(box.children[0]) && box.children[0].children.length>0) box=box.children[0];
+    const blocks=[...box.children].filter(c=>!inline(c) && norm(c.innerText)!=='').length;
+    const rich=e.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"],ul,ol,li,blockquote,pre,table');
+    return out(true,'',{shape:!sends && (blocks>=2 || rich) ? 'document' : 'composer'});
+  }
+  if (kind!=='editable') {
+    if (typeof e.selectionStart!=='number') return out(true,'',{selectable:false});
+    const v=String(e.value), s0=e.selectionStart, s1=e.selectionEnd;
+    const ok=a.mode==='replace' ? s0===0 && s1===v.length : s0===v.length && s1===v.length;
+    return out(ok,'the selection is not where the '+a.mode+' needs it',{selectable:true,caretBlank:v.trim()==='',spaceBefore:/\s$/.test(v.slice(0,s0))});
+  }
+  const s=getSelection();
+  if (!s || !s.rangeCount || !e.contains(s.anchorNode) || !e.contains(s.focusNode)) return out(false,'the selection is outside the field');
+  const r=s.getRangeAt(0);
+  const before=textIn(range(e,0,r.startContainer,r.startOffset)), after=textIn(range(r.endContainer,r.endOffset,e,e.childNodes.length));
+  let block=r.endContainer.nodeType===3 ? r.endContainer.parentElement : r.endContainer;
+  while (block && block!==e && inline(block)) block=block.parentElement;
+  const within=(block && block!==e ? block : e), inBlock=document.createRange();
+  inBlock.selectNodeContents(within);
+  const caretBlank=norm(textIn(inBlock))==='';
+  if (a.step==='blank') {
+    const now=norm(e.innerText), lost=a.keep.find(l=>!now.includes(norm(l)));
+    if (lost!==undefined) return out(false,'the field lost the line "'+norm(lost).slice(0,40)+'"');
+    return out(s.isCollapsed && !!block && block!==e && caretBlank,'the caret is not in a new empty line inside the field');
+  }
+  const ok=a.mode==='replace' ? norm(before)==='' && norm(after)==='' : s.isCollapsed && norm(after)==='';
+  return out(ok,'the selection is not where the '+a.mode+' needs it',{caretBlank,spaceBefore:/\s$/.test(before.replace(/[\u200B\uFEFF]/g,''))});
+})(${arg})`;
+}

@@ -6,7 +6,7 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, ENTER_PICKS, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, ENTER_PICKS, GENERATE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, fieldLines, readEdit, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Observation } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
@@ -589,5 +589,67 @@ describe("value heads: one per TYPE_TEXT field", () => {
     };
     expect(readStep(answers, b.meta, inp).click).toMatchObject({ actionId: "e2", key: "2", label: "Send", conf: 0.9 });
     expect(readStep({ ...answers, operation: { type: "choice", choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9 } } }, b.meta, inp).click).toBeUndefined();
+  });
+});
+
+describe("mode heads: a field that holds text that the run did not type", () => {
+  const doc = "Release 4.2 notes\nThis release improves the editor.\n\nChanges\n- Faster saving";
+  const page = () => obs("https://a.b/doc", [
+    el("e1", "fill", "Title", "textbox", { value: "Release 4.2 notes", inputType: "text" }),
+    el("e2", "fill", "Document", "textbox", { value: doc, multiline: true }),
+    el("e3", "fill", "Comment", "textbox", { value: "", multiline: true }),
+    el("e4", "click", "Save", "button"),
+  ], doc, { doc: 1.5 });
+  const spans = [span("s1", "Reviewed by QA")];
+  const ask = (over: Partial<StepInput> = {}) => buildStep(input({ task: 'add the line "Reviewed by QA" at the end and save', obs: page(), spans, ...over }));
+  const instr = (q: unknown) => (q as ChoiceQuestion).instructions as Record<string, unknown>;
+  const modeHeads = (q: Record<string, unknown>) => Object.keys(q).filter((k) => k.startsWith("mode_"));
+
+  it("only a field in heldText gets a mode head, next to its value head, with the field's lines", () => {
+    expect(modeHeads(ask().questions)).toEqual([]);
+    const b = ask({ heldText: new Set([2]) });
+    expect(modeHeads(b.questions)).toEqual(["mode_2"]);
+    expect(b.meta.modes).toEqual({ "2": true });
+    expect(criteriaKeys(b.questions["mode_2"])).toEqual(["replace_all", "append"]);
+    expect((b.questions["mode_2"] as ChoiceQuestion).criteria).toEqual(MODES);
+    expect(instr(b.questions["mode_2"])).toEqual({ question: MODE_Q, goal: 'add the line "Reviewed by QA" at the end and save', field: "[2] Document", current_lines: ["Release 4.2 notes", "This release improves the editor.", "Changes", "- Faster saving"] });
+    // A banned field gets no head.
+    expect(modeHeads(ask({ heldText: new Set([2]), bannedActionIds: new Set(["e2"]) }).questions)).toEqual([]);
+  });
+
+  it("the value head of a held field asks for the new text; the TYPE_TEXT text says a fill can add to a field", () => {
+    const b = ask({ heldText: new Set([2]) });
+    expect(instr(b.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW, field: "[2] Document" });
+    expect(instr(b.questions["value_3"])).toMatchObject({ question: VALUE_Q });
+    expect((b.questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_HELD);
+    const g = ask({ heldText: new Set([2]), canGenerate: true });
+    expect(instr(g.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW_GEN });
+    expect((g.questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_HELD_GEN);
+    // Without a held field, the texts stay as they were.
+    expect((ask().questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe("Enter or replace text in an editable field. Another question chooses the value from the offered typed_values.");
+    expect((ask({ canGenerate: true }).questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_GEN);
+  });
+
+  it("the value request of a held field carries its mode head too", () => {
+    const v = buildValueStep(input({ task: "add a line", obs: page(), spans, heldText: new Set([2]) }), "2");
+    expect(Object.keys(v?.questions ?? {})).toEqual(["value_2", "mode_2"]);
+    expect(v?.meta.modes).toEqual({ "2": true });
+  });
+
+  it("readEdit maps replace_all to replace and append to append; readStep reads the chosen field's mode", () => {
+    const inp = input({ task: "add a line", obs: page(), spans, heldText: new Set([2]) });
+    const b = buildStep(inp);
+    const mode = (choice: string, confidence: number): Answers => ({ mode_2: { type: "choice", choice, confidence, probabilities: { [choice]: confidence } } });
+    expect(readEdit(mode("append", 0.97), b.meta, "2")).toEqual({ mode: "append", conf: 0.97, probs: { append: 0.97 } });
+    expect(readEdit(mode("replace_all", 0.85), b.meta, "2")).toMatchObject({ mode: "replace", conf: 0.85 });
+    expect(readEdit(mode("prepend", 0.9), b.meta, "2")).toBeUndefined();
+    expect(readEdit({}, b.meta, "2")).toBeUndefined();
+    expect(readEdit(mode("append", 0.97), b.meta, "3")).toBeUndefined();
+    const answers: Answers = { operation: { type: "choice", choice: "TYPE_TEXT", confidence: 0.8, probabilities: { TYPE_TEXT: 0.8 } }, type_text_target: { type: "choice", choice: "2", confidence: 0.9, probabilities: { "2": 0.9 } }, ...mode("append", 0.97) };
+    expect(readStep(answers, b.meta, inp).edit).toMatchObject({ mode: "append", conf: 0.97 });
+  });
+
+  it("fieldLines drops zero-width characters and blank lines", () => {
+    expect(fieldLines("\uFEFFRelease\n\n  two   words \n\u200B\n")).toEqual(["Release", "two words"]);
   });
 });

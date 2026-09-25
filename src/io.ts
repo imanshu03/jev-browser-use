@@ -59,7 +59,9 @@ export interface TextField {
   required: boolean;              // true only for f1, the field Jev chose
   multiline: boolean;
   max_chars: number;              // min(maxLength, LIMITS.generatedChars)
-  current_value: string;          // redacted, sanitized, cut to LIMITS.valueChars
+  current_value: string;          // redacted, sanitized, cut to LIMITS.valueChars (LIMITS.heldValueChars, lines kept, for f1 when it holds text the run did not type)
+  /** "append": the field keeps its text, and the new text goes at its end. Write only the new text. Absent: the text replaces the field value. */
+  mode?: "append";
 }
 
 export interface TextRequest {    // key order is fixed; untrusted_page_text is last

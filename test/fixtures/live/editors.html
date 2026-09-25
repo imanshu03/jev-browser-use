@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editors fixture</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  [contenteditable] { border: 1px solid #888; padding: 4px; margin: 6px 0; min-height: 24px; }
+  section { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<!-- A document editor with the Plate trap: Mod+A moves focus to a hidden input, Enter counts as a send. -->
+<section>
+  <div id="doc" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Document"><h1>Release 4.2 notes</h1><p>This release improves the editor.</p><ul><li>Faster saving</li><li>New history panel</li></ul><p>The QA team tested it.</p></div>
+</section>
+<input id="shadow" aria-label="shadow" style="position:fixed;left:-300px;top:-300px;opacity:0">
+
+<!-- A document editor that ends in an empty paragraph after a list (Tiptap adds one). -->
+<section>
+  <div id="tail" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Checklist"><p>Intro</p><ul><li>One</li></ul><p><br></p></div>
+</section>
+
+<!-- A chat composer with a draft. Enter sends, and so does an insertParagraph input (Slate insertBreak, ProseMirror). -->
+<form id="chat" onsubmit="event.preventDefault()">
+  <div id="composer" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message">Hello team</div>
+  <button type="button" id="send">Send</button>
+</form>
+
+<!-- Native fields with values. -->
+<section>
+  <textarea id="notes" aria-label="Notes" rows="3">Keep answers short.</textarea>
+  <input id="email" type="email" aria-label="Email" value="old@example.com">
+  <input id="guests" type="number" aria-label="Guests" value="10">
+</section>
+
+<!-- A role=textbox wrapper that is not editable itself: a click focuses the input inside it. -->
+<section>
+  <div id="wrap" role="textbox" aria-label="Wrapped" style="border:1px solid #888;padding:4px"><span>To:</span> <input id="inner" value="old@example.com"></div>
+</section>
+
+<!-- A field that gives its focus away: a text must never go into the other field. -->
+<section>
+  <div id="thief" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Thief">Old text</div>
+  <input id="other" aria-label="Other">
+</section>
+
+<script>
+  window.sends = [];
+  window.shadowFocus = 0;
+  const doc = document.getElementById("doc");
+  const shadow = document.getElementById("shadow");
+  doc.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") { e.preventDefault(); window.shadowFocus += 1; shadow.focus(); }
+    if (e.key === "Enter") window.sends.push("doc:" + doc.innerText);
+  });
+  const composer = document.getElementById("composer");
+  const sendDraft = (how) => { window.sends.push(how + ":" + composer.innerText); composer.innerText = ""; };
+  composer.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendDraft("enter"); } });
+  composer.addEventListener("beforeinput", (e) => { if (e.inputType === "insertParagraph") { e.preventDefault(); sendDraft("paragraph"); } });
+  document.getElementById("send").addEventListener("click", () => sendDraft("click"));
+  const inner = document.getElementById("inner");
+  document.getElementById("wrap").addEventListener("mousedown", (e) => { if (e.target !== inner) { e.preventDefault(); inner.focus(); } });
+  const thief = document.getElementById("thief");
+  thief.addEventListener("focus", () => setTimeout(() => document.getElementById("other").focus(), 0));
+</script>
+</body>
+</html>

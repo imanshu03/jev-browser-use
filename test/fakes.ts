@@ -111,7 +111,8 @@ export function fakeOracle(script: OracleScript): Oracle & { requests: { name: s
       for (const [qn, q] of Object.entries(questions)) {
         // A script answers `type_text_value` for the field that its TYPE_TEXT target chooses. The step request asks one
         // value head per field (`value_<key>`), so that answer serves every value head that the script does not answer.
-        const g = partial[qn] ?? (/^value_/.test(qn) ? partial["type_text_value"] : undefined);
+        // `type_text_mode` serves the mode heads (`mode_<key>`) in the same way.
+        const g = partial[qn] ?? (/^value_/.test(qn) ? partial["type_text_value"] : /^mode_/.test(qn) ? partial["type_text_mode"] : undefined);
         // Defaults: noul 0.05, except the scope and target_ok guards, which default to 0.9 so scripted actions pass the gate.
         const defaultNoul = /^(in_task_scope|target_ok)$/.test(qn) ? 0.9 : 0.05;
         if (q.type === "noul") answers[qn] = { type: "noul", noul: typeof g === "number" ? g : typeof g === "object" && g.noul !== undefined ? g.noul : defaultNoul };

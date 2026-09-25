@@ -1,6 +1,6 @@
 // Scripted fakes for the fast engine: Page, Chrome, and Observation builders. No Chrome and no network.
-import type { Action, ActionKind, Chrome, Observation, Page } from "../../src/fast/model.js";
-import { StalePage } from "../../src/fast/model.js";
+import type { Action, ActionKind, Chrome, EditPlan, EditResult, Observation, Page } from "../../src/fast/model.js";
+import { EditRefused, StalePage } from "../../src/fast/model.js";
 
 /** One executable action. `id` defaults to `e<n>` by position when `obs()` assigns it. */
 export function el(id: string, kind: ActionKind, label: string, role: string, extra: Partial<Action> = {}): Action {
@@ -22,7 +22,7 @@ export function obs(url: string, actions: Action[], text = "page", over: Partial
   };
 }
 
-export interface ActCall { op: "act" | "press" | "back" | "navigate"; id?: string; kind?: string; text?: string; key?: string; url?: string }
+export interface ActCall { op: "act" | "press" | "back" | "navigate"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan }
 
 export interface PageScript {
   pages: Record<string, Observation>;
@@ -31,6 +31,8 @@ export interface PageScript {
   transitions?: (call: ActCall, current: string) => string | undefined;
   /** Throw StalePage on the first `act` calls this many times. */
   staleTimes?: number;
+  /** The result of a fill, or an EditRefused to throw. Undefined: the fill returns nothing (an adapter without results). */
+  edits?: (call: ActCall, action: Action) => EditResult | EditRefused | undefined;
 }
 
 export interface FakePage extends Page {
@@ -55,9 +57,13 @@ export function fakePage(script: PageScript): FakePage {
     },
     async observe() { p.observes += 1; p.stats.calls += 1; p.stats.browserMs += 2; return p.page(); },
     async fresh() { return true; },
-    async act(action: Action, _obs: Observation, text?: string) {
+    async act(action: Action, _obs: Observation, text?: string, edit?: EditPlan) {
       if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
-      p.move({ op: "act", id: action.id, kind: action.kind, ...(text !== undefined ? { text } : {}) });
+      const call: ActCall = { op: "act", id: action.id, kind: action.kind, ...(text !== undefined ? { text } : {}), ...(edit ? { edit } : {}) };
+      const result = action.kind === "fill" ? script.edits?.(call, action) : undefined;
+      if (result instanceof EditRefused) { if (!result.changed) throw result; p.move(call); throw result; }
+      p.move(call);
+      return result;
     },
     async press(key: string) { p.move({ op: "press", key }); },
     async navigate(url: string) { p.move({ op: "navigate", url }); },

@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChrome, launchChrome } from "../../src/fast/chrome.js";
 import type { Action, Chrome, Observation, Page } from "../../src/fast/model.js";
-import { StalePage } from "../../src/fast/model.js";
+import { EditRefused, StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
 import { canPressEnter } from "../../src/fast/policy.js";
 import { LIMITS } from "../../src/types.js";
@@ -465,6 +465,14 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     }
   });
 
+  it("the waits between the steps of a fill are not work of the input: right after the fill, the armed tracker holds no timer", async () => {
+    await page.navigate(`${base}/search-debounce.html`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Note"), before, "hello");
+    expect(await evaluate("window.__jevCausal.armed && window.__jevCausal.timers.size")).toBe(0);
+    await page.observe();
+  });
+
   it("a new aria-busy marker holds the settle until it goes", async () => {
     const { after, ms } = await fillAndObserve("search-debounce.html?busy=1", "Note", "hello");
     expect(after.text).toContain("saved");
@@ -804,4 +812,90 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("review regressions: process ow
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 20_000);
+});
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fill edit plans (live Chrome)", () => {
+  const editorsUrl = pathToFileURL(path.join(FIXTURES, "editors.html")).href;
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+  const evaluate = async (expression: string) => {
+    const result = await chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    return (result["result"] as { value?: unknown })?.value;
+  };
+  const text = async (id: string) => String(await evaluate(`(() => { const e = document.getElementById(${JSON.stringify(id)}); return 'value' in e ? e.value : e.innerText; })()`));
+  const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
+  /** Load the fixture again and fill `label` with `value` as `mode` says. */
+  async function fillIn(label: string, value: string, mode?: "replace" | "append") {
+    await page.navigate(editorsUrl, NAV_MS);
+    const obs = await page.observe();
+    return page.act(find(obs, "fill", label), obs, value, mode ? { mode } : undefined);
+  }
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+  afterAll(async () => { await page?.close().catch(() => undefined); await chrome?.close(); });
+
+  it("an append into a document adds a new block after the last one; no Mod+A, no Enter, no hidden input", async () => {
+    const r = await fillIn("Document", "Reviewed by QA", "append");
+    expect(r).toMatchObject({ mode: "append", shape: "document" });
+    expect(lines(await text("doc"))).toEqual(["Release 4.2 notes", "This release improves the editor.", "Faster saving", "New history panel", "The QA team tested it.", "Reviewed by QA"]);
+    expect(await evaluate("document.querySelector('#doc').lastElementChild.tagName + ':' + document.querySelector('#doc').lastElementChild.textContent")).toBe("P:Reviewed by QA");
+    expect(await evaluate("[window.sends.length, window.shadowFocus, document.getElementById('shadow').value]")).toEqual([0, 0, ""]);
+  });
+
+  it("text with line breaks goes into a document as one block per line", async () => {
+    await fillIn("Document", "In short, it is faster.\nIt adds a history panel.", "append");
+    expect(lines(await text("doc")).slice(-3)).toEqual(["The QA team tested it.", "In short, it is faster.", "It adds a history panel."]);
+    expect(await evaluate("[...document.querySelector('#doc').children].slice(-2).map((e) => e.tagName + ':' + e.textContent)")).toEqual(["P:In short, it is faster.", "P:It adds a history panel."]);
+  });
+
+  it("a replace selects all of the document with a key-less command: the hidden input never gets focus", async () => {
+    const r = await fillIn("Document", "Release 4.2 is cancelled");
+    expect(r).toMatchObject({ mode: "replace" });
+    expect(lines(await text("doc"))).toEqual(["Release 4.2 is cancelled"]);
+    expect(await evaluate("[window.sends.length, window.shadowFocus]")).toEqual([0, 0]);
+  });
+
+  it("an append into a document that ends in an empty paragraph types there, with no second new block", async () => {
+    await fillIn("Checklist", "Reviewed by QA", "append");
+    expect(lines(await text("tail"))).toEqual(["Intro", "One", "Reviewed by QA"]);
+    expect(await evaluate("[...document.querySelector('#tail').children].map((e) => e.tagName)")).toEqual(["P", "UL", "P"]);
+  });
+
+  it("an append into a composer joins with one space and sends nothing; text with line breaks is refused before any change", async () => {
+    const r = await fillIn("Message", "see you at 3", "append");
+    expect(r).toMatchObject({ mode: "append", shape: "composer", after: "Hello team see you at 3" });
+    expect(await evaluate("window.sends")).toEqual([]);
+    const e = await fillIn("Message", "one\ntwo", "append").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(EditRefused);
+    expect((e as EditRefused).changed).toBe(false);
+    expect(await text("composer")).toBe("Hello team");
+    expect(await evaluate("window.sends")).toEqual([]);
+  });
+
+  it("an append into a textarea adds a line; a replace of email and number inputs works without a selection API", async () => {
+    expect(await fillIn("Notes", "Always answer in English", "append")).toMatchObject({ shape: "textarea" });
+    expect(await text("notes")).toBe("Keep answers short.\nAlways answer in English");
+    expect(await fillIn("Notes", "Only English")).toMatchObject({ mode: "replace" });
+    expect(await text("notes")).toBe("Only English");
+    await fillIn("Email", "ann@example.com");
+    expect(await text("email")).toBe("ann@example.com");
+    await fillIn("Guests", "25");
+    expect(await text("guests")).toBe("25");
+  });
+
+  it("a role=textbox wrapper that is not editable types into the text control inside it that the click focused", async () => {
+    expect(await fillIn("Wrapped", "ann@example.com")).toMatchObject({ mode: "replace", shape: "input", before: "old@example.com", after: "ann@example.com" });
+    expect(await text("inner")).toBe("ann@example.com");
+  });
+
+  it("a field that gives its focus away refuses the fill: nothing is typed anywhere", async () => {
+    const e = await fillIn("Thief", "Reviewed by QA", "append").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(EditRefused);
+    expect((e as Error).message).toBe('the fill did not start: focus is on input#other "Other", not on the field');
+    expect(await text("thief")).toBe("Old text");
+    expect(await text("other")).toBe("");
+  });
 });
