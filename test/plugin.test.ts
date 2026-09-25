@@ -66,7 +66,7 @@ describe("plugin files", () => {
     expect(s.cwd).toBe(".");
     // Codex gives a stdio server only a small base environment, so the key must be in the list. A headed Chrome
     // on Linux needs the display variables. Codex skips a variable that is not set.
-    expect(s.env_vars).toEqual(expect.arrayContaining(["TYPESAFE_API_KEY", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]));
+    expect(s.env_vars).toEqual(expect.arrayContaining(["TYPESAFE_API_KEY", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]));
     // The README fallback for config.toml passes the same list.
     const readme = readFileSync(path.join(root, "README.md"), "utf8");
     const block = /\[mcp_servers\.jev\][\s\S]*?env_vars = (\[[\s\S]*?\])/.exec(readme);
@@ -96,6 +96,12 @@ describe("skill", () => {
   it("names every tool and every status", () => {
     const { body } = skill();
     for (const n of [...TOOLS, ...STATUSES]) expect(body, n).toContain(`\`${n}\``);
+  });
+
+  it("autonomous mode: the skill names confirm autonomous and user_said, and only the user's own message turns it on", () => {
+    const { body } = skill();
+    for (const w of ["`confirm: \"autonomous\"`", "`user_said`", "`result.unattended`", "own message", "A \"yes\" to your question does not count"]) expect(body, w).toContain(w);
+    for (const f of ["plugin/.claude-plugin/plugin.json", "plugin/.codex-plugin/plugin.json"]) expect(JSON.stringify(read(f)), f).toContain("autonomous");
   });
 
   it("names every TOOL_NAMES and RUN_STATUSES value", () => {

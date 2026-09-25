@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { main, parseArgs, UsageError } from "../src/cli.js";
+import { main, parseArgs, USAGE, UsageError } from "../src/cli.js";
 import { emptyResult } from "../src/io.js";
 import type { RunResult } from "../src/types.js";
 
@@ -42,6 +42,14 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["t", "--var", "novalue"], env)).toThrow(UsageError);
     expect(() => parseArgs(["t", "--bogus"], env)).toThrow(UsageError);
     expect(() => parseArgs(["t", "--url"], env)).toThrow(UsageError);
+  });
+  it("--confirm autonomous: cdp and chromium only; USAGE names it", () => {
+    expect(parseArgs(["t", "--confirm", "autonomous"], env).confirm).toBe("autonomous");
+    expect(parseArgs(["t", "--confirm", "autonomous", "--engine", "chromium"], env).confirm).toBe("autonomous");
+    expect(() => parseArgs(["t", "--confirm", "autonomous", "--engine", "vercel"], env)).toThrow("--confirm autonomous needs --engine cdp or chromium");
+    expect(() => parseArgs(["t", "--confirm", "autonomous"], { ...env, JEV_BROWSER_ENGINE: "vercel" })).toThrow(UsageError);
+    expect(() => parseArgs(["t", "--confirm", "maybe"], env)).toThrow("--confirm must be auto, always, never, or autonomous");
+    expect(USAGE).toContain("--confirm <auto|always|never|autonomous>");
   });
   it("a JEV_BROWSER_MAX_STEPS value that is not a number gives a UsageError", () => {
     for (const v of ["abc", "NaN"]) expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: v })).toThrow(/--max-steps must be between 1 and 100/);

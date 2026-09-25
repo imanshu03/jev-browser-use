@@ -16,7 +16,7 @@ import { BudgetError, choiceOf } from "../jev.js";
 import type { Plan } from "../plan.js";
 import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
-import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord } from "../types.js";
+import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord, UnattendedAction } from "../types.js";
 import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
 import type { Action, Chrome, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
 import { StalePage } from "./model.js";
@@ -52,6 +52,11 @@ export interface FastRunnerDeps {
   fromAssistant?: boolean;
   /** Unsent assistant text that an earlier run left on `page`. The gate applies to it as to this run's own text. */
   unsent?: readonly UnsentText[];
+  /**
+   * A person can see the run and act in the browser. Only an autonomous run reads it: without a person, a sign-in wall
+   * blocks at once. Default: `human.interactive`.
+   */
+  attended?: boolean;
 }
 
 type Top = { label: string; p: number }[];
@@ -61,6 +66,8 @@ interface StepCtx {
   pageKind: PageKind | null; pageKindConf: number | null; doneP: number | null; operation: Operation | null; operationConf: number | null;
   target: { ref: string; role: string; name: string; under: string } | null; targetConf: number | null; runnerUp: number | null;
   action: ActionKind; value: string | null; valueConf: number | null; risk: RiskClass | null; gate: string;
+  /** The audit of an action that an autonomous run does with no dialog. The record gets it only when the input ran. */
+  unattended: UnattendedAction | null;
 }
 
 /** `ran`: the action ran, and only the observation after it did not settle. */
@@ -169,12 +176,29 @@ const HEADED_HINT = "Run with --headed (or /headed on in chat) and sign in when 
 const NO_CONFIRM_HINT = "run on a TTY with confirmation enabled";
 const SECRET_SHOWN = "<secret>";
 const VALUE_HINT = "pass --var key=value (or /var key=value in chat)";
+const UNATTENDED_WALL_HINT = "an autonomous run with no person at a TTY does not wait for a sign-in; sign in first (run with --headed on a TTY), then run again";
 const CANCELLED = "the run was cancelled";
 
 function hit(label: string, words: string[]): boolean {
   const n = label.toLowerCase();
   return words.some((w) => new RegExp(`(?<![a-z])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z])`, "i").test(n));
 }
+
+/** Autocomplete tokens of credential fields. A task or var value never goes into them, as with a credential label. */
+const CREDENTIAL_AUTOCOMPLETE = /password|one-time-code/;
+
+/** A credential field: its label, its input type, or its autocomplete token says so. */
+function isCredential(a: Action, label: string): boolean {
+  return CREDENTIAL_NAME.test(label) || a.inputType === "password" || CREDENTIAL_AUTOCOMPLETE.test(a.autocomplete ?? "");
+}
+
+/** Labels of fields whose values an audit entry never lists: secrets, and payment and identity numbers. */
+const PRIVATE_LABEL = /\b(?:secret|token|api ?key|card|cvv|cvc|iban|account (?:number|no)|routing|ssn|social security|tax ?id|passport)\b/i;
+/** Autocomplete tokens of fields whose values an audit entry never lists. */
+const PRIVATE_AUTOCOMPLETE = /cc-|one-time-code|password/;
+/** An audit entry lists at most this many other fields, each value cut to AUDIT_VALUE_CHARS. */
+const AUDIT_FIELDS = 8;
+const AUDIT_VALUE_CHARS = 200;
 
 /** Risk classes from low to high. */
 const RISK_ORDER: RiskClass[] = ["read_only", "navigational", "data_entry", "submit", "destructive"];
@@ -271,14 +295,14 @@ export class FastRunner {
     this.startedAt = this.now();
     this.result = emptyResult(deps.cfg.task, this.goal, deps.cfg.model, deps.cfg.engine ?? "cdp");
     // Text requests of an earlier run have other ids. A seeded entry never drops the spans of this run.
-    this.unsent = (deps.unsent ?? []).map((u) => ({ ...u, request: null }));
+    this.unsent = (deps.unsent ?? []).map((u) => ({ ...u, request: null, earlier: true as const }));
   }
 
   /** The page the run used. Null when the run opened no page: a plan-level block, or a launch that failed. */
   get page(): Page | null { return this._page; }
 
   /** The unsent assistant text on the page when the run ended. The MCP session gives it to the next run on that page. */
-  unsentText(): UnsentText[] { return this.unsent.map((u) => ({ ...u })); }
+  unsentText(): UnsentText[] { return this.unsent.map(({ earlier: _earlier, ...u }) => ({ ...u })); }
 
   /** Labels of the fields the assistant wrote text for in this run that no fill typed. Jev may submit without an optional field. */
   untypedText(): string[] {
@@ -477,7 +501,7 @@ export class FastRunner {
     this.stepBans.clear();
     const ctx: StepCtx = {
       t0: this.now(), req0: this.deps.oracle.stats.requests, url: "", title: "", pageKind: null, pageKindConf: null, doneP: null, operation: null, operationConf: null,
-      target: null, targetConf: null, runnerUp: null, action: "none", value: null, valueConf: null, risk: null, gate: "",
+      target: null, targetConf: null, runnerUp: null, action: "none", value: null, valueConf: null, risk: null, gate: "", unattended: null,
     };
     if (this.cancelled) return this.cancel(ctx, this.lastObs?.url ?? null);
     if (this.stepNo > this.cfg.maxSteps) return this.blocked(ctx, "max_steps", `stopped after ${this.cfg.maxSteps} steps`, [], this.lastObs?.url ?? null);
@@ -572,6 +596,9 @@ export class FastRunner {
         continue;
       }
       stale += 1;
+      // The stale action did not run. Its gate ("confirmed", "autonomous") and its audit must not go to the next
+      // decision: a WAIT after a stale Send showed "confirmed". A re-ask keeps its gate: it is the reason of a block.
+      ctx.gate = ""; ctx.unattended = null;
       this.log.warn(`step ${this.stepNo} stale page (${stale}/${LIMITS.fastStaleRetries}): ${r.message}`);
       if (r.action && /covered/i.test(r.message)) {
         // A target that stays covered is not a changing page. Ban it on this page so the re-ask takes another route.
@@ -736,7 +763,8 @@ export class FastRunner {
       }
       ctx.gate = `ok ${d.operationConf.toFixed(2)} (${risk})`;
       const undo = this.unsentUndo();
-      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, this.pruneUnsent(obs));
+      const focusForm = obs.focus?.form !== undefined ? obs.focus.form : obs.actions.find((a) => a.node === obs.focus?.node)?.form ?? null;
+      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, this.pruneUnsent(obs), { obs, form: focusForm });
       if (denied) return rec(denied);
       const r = await this.execute("PRESS_ENTER", null, null, null, obs, ctx);
       if (r.kind === "stale") undo();
@@ -852,8 +880,16 @@ export class FastRunner {
     // While a field holds unsent assistant text, every click needs a dialog: icon buttons and "Comment" are not risk words.
     const undo = this.unsentUndo();
     const gated = op === "CLICK" ? this.pruneUnsent(obs) : [];
-    const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated);
+    const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated, { obs: at, form: action.form });
     if (denied) return { kind: "record", rec: denied };
+    // An autonomous fill that replaces text that the run did not type is in the audit: nobody saw the old text go.
+    if (op === "TYPE_TEXT" && text !== null && this.cfg.confirm === "autonomous" && !this.cfg.dryRun) {
+      const replaced = this.replacedChars(target, at);
+      if (replaced > 0) {
+        const label = cutText(flatText(this.log.redactor(target.label)), LIMITS.nameChars);
+        ctx.unattended = { action: desc, host: hostOf(at.url), why: ["replaced"], texts: [{ label, text, chars: [...text].length, left: null }], fields: [], replaced_chars: replaced };
+      }
+    }
 
     const r = await this.execute(op, target, text, shown, at, ctx, kept);
     // A stale action did not run: the entries that the check dropped on the old observation come back.
@@ -875,7 +911,7 @@ export class FastRunner {
     if (chosen && "generate" in chosen) return this.generate(chosen.conf, t, action, obs, ctx, risk, top);
 
     const span = chosen ? this.spans.find((s) => s.id === chosen.spanId) : undefined;
-    if (!chosen || !span) return block("needs_credential", this.credentialHint(`field "${t.label}"`, CREDENTIAL_NAME.test(t.label)));
+    if (!chosen || !span) return block("needs_credential", this.credentialHint(`field "${t.label}"`, isCredential(action, t.label)));
     // A --var value is the user's own word for this run. A span cut from the task needs Jev's confidence.
     const valueConf = span.source === "var" ? 1 : chosen.conf;
     ctx.valueConf = valueConf;
@@ -884,9 +920,10 @@ export class FastRunner {
       this.stepBans.add(actionKey(action));
       return REASK;
     }
-    // A password, PIN, or code field takes only a secret --var value, never text cut from the task.
+    // A password, PIN, or code field takes only a secret --var value, never text cut from the task. The label, the input
+    // type, or the autocomplete token (one-time-code, a password token) marks such a field.
     // A task and vars that an assistant wrote never fill a credential field.
-    if (CREDENTIAL_NAME.test(t.label) && (!span.secret || this.deps.fromAssistant)) {
+    if (isCredential(action, t.label) && (!span.secret || this.deps.fromAssistant)) {
       return block("needs_credential", this.credentialHint(`field "${t.label}" is a credential and`, true));
     }
     // Assistant-written text goes only into the field it was written for.
@@ -908,7 +945,7 @@ export class FastRunner {
   private async generate(conf: number, t: NonNullable<Decision["target"]>, action: Action, obs: Observation, ctx: StepCtx, risk: RiskClass, top: Top): Promise<Typed> {
     const block = (kind: BlockedKind, hint: string): Typed => ({ kind: "applied", applied: { kind: "record", rec: this.blocked(ctx, kind, hint, top, obs.url) } });
     const fieldKey = `${obs.doc}|${action.node}`;
-    if (CREDENTIAL_NAME.test(t.label)) return block("needs_credential", this.credentialHint(`field "${t.label}" is a credential and`, true));
+    if (isCredential(action, t.label)) return block("needs_credential", this.credentialHint(`field "${t.label}" is a credential and`, true));
     if (!canWriteInto(action)) return block("needs_credential", `field "${t.label}" takes an exact value: ${this.valueHint(false)}`);
     ctx.valueConf = conf;
     if (conf < THRESHOLDS[risk].value) {
@@ -1259,10 +1296,27 @@ export class FastRunner {
     };
   }
 
-  /** `gated`: the unsent entries that hold text now. A non-empty list makes the action need a dialog, and the dialog shows them. */
-  private async confirmAction(risk: RiskClass, desc: string, ctx: StepCtx, top: Top, url: string, gated: Unsent[] = []): Promise<StepRecord | null> {
-    const needsConfirm = risk === "destructive" || (risk === "submit" && this.cfg.confirm === "always") || gated.length > 0;
+  /**
+   * `gated`: the unsent entries that hold text now. A non-empty list makes the action need a dialog, and the dialog shows
+   * them. `at`: the observation of the action and the form of its target, for the fields of an audit entry.
+   */
+  private async confirmAction(risk: RiskClass, desc: string, ctx: StepCtx, top: Top, url: string, gated: Unsent[] = [], at?: { obs: Observation; form: number | null | undefined }): Promise<StepRecord | null> {
+    const autonomous = this.cfg.confirm === "autonomous";
+    // An autonomous run audits every submit too: nobody saw it go.
+    const needsConfirm = risk === "destructive" || (risk === "submit" && (this.cfg.confirm === "always" || autonomous)) || gated.length > 0;
     if (!needsConfirm || this.cfg.dryRun) return null;
+    if (autonomous) {
+      // The user's own words turned off every dialog of this run, also for long text. The action goes on, and its
+      // record keeps what went out with nobody to see it. execute() keeps the audit only when the input ran.
+      const why: UnattendedAction["why"] = [...(risk === "destructive" || risk === "submit" ? [risk] : []), ...(gated.length > 0 ? ["unsent_text" as const] : [])];
+      ctx.gate = "autonomous";
+      ctx.unattended = {
+        action: desc, host: hostOf(url), why,
+        texts: gated.map((u) => ({ label: u.label, text: u.text, chars: [...u.text].length, left: null, ...(u.earlier ? { earlier_run: true as const } : {}) })),
+        fields: at ? this.auditFields(at.obs, at.form, gated.map((u) => u.node)) : [],
+      };
+      return null;
+    }
     // The confirm argument, not the session, stops the dialog. Its hint names that argument.
     if (this.cfg.confirm === "never") {
       return this.blocked(ctx, "needs_confirmation", `${risk} action ${desc}: ${this.deps.hints?.confirmNever ?? this.deps.hints?.noConfirm ?? NO_CONFIRM_HINT}`, top, url);
@@ -1283,10 +1337,63 @@ export class FastRunner {
     return null;
   }
 
+  /**
+   * The non-empty fields that an audit entry lists: the fields of `form` (the fields in view when the form is not known),
+   * without the controls of `skip` (their text is in the entry) and without credential, secret, and payment fields.
+   */
+  private auditFields(obs: Observation, form: number | null | undefined, skip: (number | null)[]): UnattendedAction["fields"] {
+    const out: UnattendedAction["fields"] = [];
+    for (const a of obs.actions) {
+      if (out.length >= AUDIT_FIELDS) break;
+      if (a.kind !== "fill" || skip.includes(a.node) || (form !== null && form !== undefined && (a.form ?? null) !== form)) continue;
+      const value = a.value ?? "";
+      if (value.trim() === "" || isCredential(a, a.label) || PRIVATE_LABEL.test(a.label) || PRIVATE_AUTOCOMPLETE.test(a.autocomplete ?? "")) continue;
+      out.push({ label: cutText(flatText(this.log.redactor(a.label)), LIMITS.nameChars), value: cutText(this.log.redactor(value), AUDIT_VALUE_CHARS) });
+    }
+    return out;
+  }
+
+  /** The characters of the value that a fill of `a` replaces: 0 for an empty field, and for a value that this run typed there. */
+  private replacedChars(a: Action, obs: Observation): number {
+    const old = a.value ?? obs.texts?.find(([n]) => n === a.node)?.[1] ?? "";
+    if (old.trim() === "") return 0;
+    const own = this.typedInto.get(`${obs.doc}|${a.node}`);
+    return own !== undefined && squash(own) === squash(old) ? 0 : [...old].length;
+  }
+
+  /**
+   * After an audited action: true when no control of `after` holds `text`, or a new document loaded; false when a control
+   * holds it; null when `before` did not show it either (a pending entry), so nothing shows where it went. A control that
+   * held the text and is hidden now (a modal popover sets aria-hidden on the form) keeps it while `filled` lists its node.
+   */
+  private leftAfter(text: string, before: Observation, after: Observation): boolean | null {
+    if (after.doc !== before.doc) return true;
+    const holders = (o: Observation): (number | null)[] => [
+      ...(o.texts ?? []).filter(([, v]) => holdsText(v, text)).map(([n]) => n),
+      ...o.actions.filter((a) => a.kind === "fill" && holdsText(a.value ?? "", text)).map((a) => a.node),
+    ];
+    if (holders(after).length > 0) return false;
+    const had = holders(before);
+    if (had.length === 0) return null;
+    return had.some((n) => n !== null && (after.filled?.includes(n) ?? false)) ? false : true;
+  }
+
+  /** An audited action whose input or next observation threw can have run: its record, with the audit, goes into the result. */
+  private keepAudit(ctx: StepCtx, audit: UnattendedAction | null, e: unknown): void {
+    if (!audit) return;
+    ctx.unattended = audit;
+    const rec = this.record(ctx, "failed", `may have run: ${String((e as Error | null)?.message ?? e)}`);
+    this.result.steps.push(rec);
+    this.log.step(rec);
+  }
+
   /** Execute one operation, observe again, push history. `shown` is the redacted text for logs; `kept`, when set, for history. */
   private async execute(op: string, action: Action | null, text: string | null, shown: string | null, obs: Observation, ctx: StepCtx, kept: string | null = shown): Promise<Applied> {
     const page = this._page as Page;
     ctx.action = ACTION_OF[op] ?? "none";
+    // The audit of an action with no dialog holds only when the input ran: a stale or cancelled action writes none.
+    const audit = ctx.unattended;
+    ctx.unattended = null;
     if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
     if (!ctx.gate || /^(low_|Enter confidence|ambiguous_runner_up|repeat )/.test(ctx.gate)) ctx.gate = "ok";
     if (op === "PRESS_ENTER") ctx.value = "Enter";
@@ -1311,8 +1418,10 @@ export class FastRunner {
         const a = control ?? action;
         return a ? { kind: "stale", message: e.message, action: a } : { kind: "stale", message: e.message };
       }
+      this.keepAudit(ctx, audit, e);
       throw e;
     }
+    ctx.unattended = audit;
     if (action) {
       const sig = `${obs.url}|${actionKey(action)}`;
       this.sigCounts.set(sig, (this.sigCounts.get(sig) ?? 0) + 1);
@@ -1336,8 +1445,13 @@ export class FastRunner {
         next = await this.observeSettled();
       } catch (e) {
         if (e instanceof StalePage) return { kind: "record", rec: this.blocked(ctx, "ambiguous", "page keeps changing", [], obs.url), ran: true };
+        this.keepAudit(ctx, audit, e);
         throw e;
       }
+    }
+    if (audit) {
+      const after = next;
+      ctx.unattended = { ...audit, texts: audit.texts.map((t) => ({ ...t, left: this.leftAfter(t.text, obs, after) })) };
     }
     entry.page_changed = next.fingerprint !== obs.fingerprint;
     entry.url = next.url;
@@ -1399,6 +1513,10 @@ export class FastRunner {
 
   private async handoff(ctx: StepCtx, kind: "needs_sign_in" | "captcha", top: Top, obs: Observation): Promise<StepRecord> {
     const cfg = this.cfg;
+    // An autonomous run that no person attends does not wait for one: it blocks at once.
+    if (cfg.confirm === "autonomous" && !(this.deps.attended ?? this.deps.human.interactive)) {
+      return this.blocked(ctx, kind, this.deps.hints?.unattendedWall ?? UNATTENDED_WALL_HINT, top, obs.url);
+    }
     // A headed run pauses with or without a TTY: Human.pause polls the page when no key can arrive.
     if (cfg.headed && this.pauses < LIMITS.pauses) {
       this.pauses += 1;
@@ -1430,11 +1548,17 @@ export class FastRunner {
   }
 
   private record(ctx: StepCtx, result: StepRecord["result"], error: string | null): StepRecord {
+    const u = ctx.unattended ? redactData(ctx.unattended, this.log.redactor) : null;
+    if (u) {
+      const texts = u.texts.map((t) => `${t.label} (${t.chars} chars, ${t.left === true ? "left the page" : t.left === false ? "still in a field" : "not known"})`);
+      this.log.warn(`step ${this.stepNo} unattended: ${u.action} (${u.why.join(", ")})${texts.length > 0 ? `; texts: ${texts.join(", ")}` : ""}${u.replaced_chars ? `; replaced ${u.replaced_chars} chars` : ""}`);
+    }
     return {
       step: this.stepNo, url: ctx.url, title: ctx.title, page_kind: ctx.pageKind, page_kind_conf: ctx.pageKindConf, done_p: ctx.doneP,
       operation: ctx.operation, operation_conf: ctx.operationConf, target: ctx.target, target_conf: ctx.targetConf, runner_up: ctx.runnerUp,
       action: ctx.action, value: ctx.value, value_conf: ctx.valueConf, risk: ctx.risk, path: "fast", gate: ctx.gate, result,
       error: error ? this.log.redactor(error) : null, jev_requests: this.deps.oracle.stats.requests - ctx.req0, duration_ms: this.now() - ctx.t0,
+      ...(u ? { unattended: u } : {}),
     };
   }
 }

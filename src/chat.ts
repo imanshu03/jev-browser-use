@@ -39,7 +39,9 @@ Options:
   --session <name>           Session name. Default: jev-chat-<8 hex>. The vercel engine uses it as the agent-browser session.
   --model <name>             Default: jev-latest.
   --max-steps <n>            Default 25, max 100.
-  --confirm <auto|always|never>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+  --confirm <auto|always|never|autonomous>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+                             autonomous: no action asks or blocks for a person; each step record of such an action
+                             holds an "unattended" audit. cdp and chromium only.
   --log-level <info|debug>   debug prints the full step trace. Default: info.
   --var <key=value>          A value Jev may type. Repeatable. Keys with pass/pin/otp/secret/token/code are secret.
   --headless                 Hide the Chrome window. Chat mode shows it by default.

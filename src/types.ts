@@ -94,6 +94,26 @@ export interface HistoryEntry {
   element_key?: string;
 }
 
+/**
+ * An action that an autonomous run (`confirm: "autonomous"`) did with no dialog: a destructive or submit action, a
+ * click or Enter while assistant text was in a field, or a fill that replaced text that the run did not type. Only the
+ * record of an action that ran carries it.
+ */
+export interface UnattendedAction {
+  action: string;                 // as a dialog names it: `click button "Send"`
+  host: string;
+  why: ("destructive" | "submit" | "unsent_text" | "replaced")[];
+  /**
+   * The assistant texts in fields at the action (for a fill: the text it typed). `left`: after the action no control
+   * holds the text, or a new document loaded (true); a control holds it (false); not known (null).
+   */
+  texts: { label: string; text: string; chars: number; left: boolean | null; earlier_run?: true }[];
+  /** The other non-empty fields of the target's form, or of the page when the form is not known. No credential, secret, or payment field. */
+  fields: { label: string; value: string }[];
+  /** A fill only: the number of characters of the old value that it replaced. */
+  replaced_chars?: number;
+}
+
 export interface StepRecord {
   step: number;
   url: string;
@@ -116,6 +136,8 @@ export interface StepRecord {
   error: string | null;
   jev_requests: number;
   duration_ms: number;
+  /** Autonomous runs only: the audit of an action that ran with no dialog. */
+  unattended?: UnattendedAction;
 }
 
 export interface RunConfig {
@@ -130,7 +152,8 @@ export interface RunConfig {
   stepTimeoutMs: number;
   runTimeoutMs: number;
   pauseTimeoutMs: number;
-  confirm: "auto" | "always" | "never";
+  /** "autonomous": no action asks, and no action blocks for want of a person. The direct engines only. */
+  confirm: "auto" | "always" | "never" | "autonomous";
   dryRun: boolean;
   session: string;
   model: string;

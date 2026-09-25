@@ -143,6 +143,29 @@ export function checkInput(input: BrowseInput, env: NodeJS.ProcessEnv, profiles:
   return null;
 }
 
+/**
+ * The user's words that turn on autonomous mode: "autonomous", "autonomously", "don't ask me", "do not ask me", or
+ * "without asking". The apostrophe can be straight or curly, or missing.
+ */
+export const AUTONOMY_WORDS = /\bautonomous(?:ly)?\b|\bdon['\u2019]?t ask me\b|\bdo not ask me\b|\bwithout asking\b/i;
+
+/**
+ * null when the confirm value and user_said agree. confirm "autonomous" needs user_said with the user's own words
+ * (AUTONOMY_WORDS), and user_said goes only with it. JEV_MCP_AUTONOMOUS=0 turns the mode off.
+ */
+export function checkAutonomy(input: BrowseInput, env: NodeJS.ProcessEnv): string | null {
+  if (input.confirm !== "autonomous") {
+    return input.user_said !== undefined ? `user_said goes only with confirm "autonomous". Leave out user_said` : null;
+  }
+  if (env[MCP_ENV.autonomous] === "0") return `autonomous mode is off in this server (${MCP_ENV.autonomous}=0). Use confirm "auto": the user allows each action in a dialog`;
+  const said = (input.user_said ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (said === "") return `confirm "autonomous" needs user_said: the words of the user's own message that ask you to act without questions, for example "do it autonomously" or "don't ask me"`;
+  if (!AUTONOMY_WORDS.test(said)) {
+    return `user_said must hold the user's own words "autonomous", "autonomously", "don't ask me", "do not ask me", or "without asking". Only the user turns on autonomous mode. Otherwise use confirm "auto"`;
+  }
+  return null;
+}
+
 /** The Jev connection. client() reads the key until it finds one, else throws NoKeyError. Nothing connects before that. */
 export interface JevLink { client(): TypeSafeClient; warm(): Promise<void>; key(): string | null; close(): Promise<void> }
 
@@ -208,7 +231,7 @@ export function fastStarter(d: StarterDeps): RunStarter {
     const runner = new FastRunner({
       cfg, profiles, chrome: d.session.chromeFor(cfg), ...(page ? { page, unsent: d.session.unsent } : {}), openPage: (c) => d.session.openPage(c),
       oracle, human: hooks.human, log: hooks.log, warm: () => d.jev.warm(),
-      text: hooks.text, signal: hooks.signal, hints: hooks.hints, fromAssistant: true,
+      text: hooks.text, signal: hooks.signal, hints: hooks.hints, fromAssistant: true, ...(hooks.attended !== undefined ? { attended: hooks.attended } : {}),
     });
     const result = await runner.run();
     hooks.untyped?.(runner.untypedText());

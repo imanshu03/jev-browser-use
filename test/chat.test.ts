@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Browser } from "../src/browser.js";
 import type { Human } from "../src/io.js";
-import { IDLE_PING_MS, chatLogger, metricsLine, parseChatArgs, runChat, type ChatDeps } from "../src/chat.js";
+import { CHAT_USAGE, IDLE_PING_MS, chatLogger, metricsLine, parseChatArgs, runChat, type ChatDeps } from "../src/chat.js";
 import type { KeyCheck } from "../src/config.js";
 import { loadKey, saveKey } from "../src/config.js";
 import { emptyResult } from "../src/io.js";
@@ -231,6 +231,11 @@ describe("parseChatArgs", () => {
     expect(parseChatArgs(["--engine", "chromium"], {}).cfg.engine).toBe("chromium");
     expect(parseChatArgs([], { JEV_BROWSER_ENGINE: "chromium" }).cfg.engine).toBe("chromium");
     for (const engine of ["fast", "legacy"]) expect(() => parseChatArgs(["--engine", engine], {})).toThrow(UsageError);
+  });
+  it("--confirm autonomous passes to the tasks; the vercel engine rejects it; the usage names it", () => {
+    expect(parseChatArgs(["--confirm", "autonomous"], {}).cfg.confirm).toBe("autonomous");
+    expect(() => parseChatArgs(["--confirm", "autonomous", "--engine", "vercel"], {})).toThrow(UsageError);
+    expect(CHAT_USAGE).toContain("--confirm <auto|always|never|autonomous>");
   });
   it("rejects a task argument and unknown flags", () => {
     expect(() => parseChatArgs(["open gmail"], {})).toThrow(/jev-browser "open gmail"/);

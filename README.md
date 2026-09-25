@@ -73,7 +73,7 @@ The result goes to stdout as one JSON document. The trace goes to stderr. The ex
 | `--step-timeout <ms>` | Per browser command. Default 30000. |
 | `--run-timeout <ms>` | Default 600000. |
 | `--pause-timeout <ms>` | Default 300000. |
-| `--confirm <auto\|always\|never>` | `auto`: destructive actions ask on a TTY. `always`: submits ask too. `never`: destructive actions block. |
+| `--confirm <auto\|always\|never\|autonomous>` | `auto`: destructive actions ask on a TTY. `always`: submits ask too. `never`: destructive actions block. `autonomous`: no action asks, and no action blocks for want of a person. The step record of each action that would ask gets an `unattended` audit (see [Autonomous mode](#autonomous-mode)). `cdp` and `chromium` only: with `vercel` it is a usage error. |
 | `--dry-run` | Decides and logs, never acts. |
 | `--session <name>` | Session name. Default `jev-<8 hex>`. The `vercel` engine uses it as the agent-browser session. Use a unique name per process. |
 | `--model <name>` | Default `jev-latest`. |
@@ -171,7 +171,7 @@ The browser stays open between tasks. When a task names no URL and no known site
 | `--session <name>` | Session name. Default `jev-chat-<8 hex>`. |
 | `--model <name>` | Default `jev-latest`. |
 | `--max-steps <n>` | Default 25, max 100. |
-| `--confirm <auto\|always\|never>` | Same as the one-shot CLI. |
+| `--confirm <auto\|always\|never\|autonomous>` | Same as the one-shot CLI. |
 | `--log-level <info\|debug>` | `info` prints one line per step. `debug` prints the full trace. |
 | `--var <key=value>` | A value Jev may type. Repeatable. Same as the one-shot CLI. |
 | `--headless` | Hides the browser window. |
@@ -194,7 +194,7 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 
 ## Assistant plugin (Claude Code and Codex)
 
-The plugin lets Claude Code or Codex run browser tasks with the direct engines. The assistant starts a run with a tool call. Jev chooses every action, as in the CLI. When a form needs new text, such as a reply, the run asks the assistant to write it (see [Assistant-written text](#assistant-written-text-plugin-runs-only)). Before Jev clicks or presses Enter while that text is in a field, the user must allow the action in a dialog.
+The plugin lets Claude Code or Codex run browser tasks with the direct engines. The assistant starts a run with a tool call. Jev chooses every action, as in the CLI. When a form needs new text, such as a reply, the run asks the assistant to write it (see [Assistant-written text](#assistant-written-text-plugin-runs-only)). Before Jev clicks or presses Enter while that text is in a field, the user must allow the action in a dialog. The user can turn off the dialogs of one task with their own words (see [Autonomous mode](#autonomous-mode)).
 
 [plugin/](plugin/) holds the manifests for both clients, the MCP server configuration, and the `jev-browser` skill. The server is one bundled file, `plugin/dist/jev-mcp.mjs`. Git ignores it, so build it after [Install](#install) and after each source change:
 
@@ -239,7 +239,7 @@ command = "node"
 args = ["<repo>/plugin/dist/jev-mcp.mjs"]
 env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "JEV_BROWSER_CONFIG", "XDG_CONFIG_HOME",
   "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_CHROME_BIN", "JEV_CHROMIUM_BIN",
-  "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
+  "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
@@ -262,7 +262,7 @@ Without a key, `browse` returns an error that tells how to add one. When the ser
 
 | Tool | Effect |
 |---|---|
-| `browse` | Starts a task. `task` is required. Optional: `url`, `profile` (a name, a directory, or `none`), `headed` (default `true`), `engine` (`cdp` or `chromium`), `goal`, `vars`, `max_steps`, `confirm` (default `auto`), `dry_run`, and `wait_s`. Without `url`, the task continues on the page where the last run ended. A `url` loads the page again. |
+| `browse` | Starts a task. `task` is required. Optional: `url`, `profile` (a name, a directory, or `none`), `headed` (default `true`), `engine` (`cdp` or `chromium`), `goal`, `vars`, `max_steps`, `confirm` (`auto`, `always`, `never`, or `autonomous`; default `auto`), `user_said` (with `autonomous` only, 1 to 300 characters), `dry_run`, and `wait_s`. Without `url`, the task continues on the page where the last run ended. A `url` loads the page again. |
 | `wait` | Waits for the run to change, then returns its state. It does not change the run. |
 | `continue` | Gives the text that a run asks for (`values`, field id to text), or declines the request (`decline`, a short reason). |
 | `cancel` | Stops a run. |
@@ -270,7 +270,7 @@ Without a key, `browse` returns an error that tells how to add one. When the ser
 
 `browse`, `wait`, and `continue` wait up to `wait_s` seconds (default 40, maximum 50). They return earlier when the run needs the assistant or ends. Each result holds the run state as text JSON and as `structuredContent`. The field `next` tells the assistant what to do.
 
-`isError` means that the call was wrong: for example, an unknown run, a stale text request, a bad URL, an unknown profile, no key, or a new task while another run is active. The error text states the correct call. `blocked` and `failed` are normal results.
+`isError` means that the call was wrong: for example, an unknown run, a stale text request, a bad URL, an unknown profile, no key, a new task while another run is active, or `confirm: "autonomous"` without the user's words in `user_said`. The error text states the correct call. `blocked` and `failed` are normal results.
 
 ### Run statuses
 
@@ -292,7 +292,7 @@ A `blocked` result with the kind `needs_confirmation` has these causes:
 
 ### Dialogs
 
-The server asks the user through an MCP form dialog (elicitation). The assistant cannot answer it, and no tool argument can allow an action. A dialog asks:
+The server asks the user through an MCP form dialog (elicitation). The assistant cannot answer it, and no tool argument allows one action. Only [autonomous mode](#autonomous-mode), which the user turns on in their own words, turns off the dialogs of a run. A dialog asks:
 
 - To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. Select **Allow** to let Jev continue.
 - To use a Chrome profile when Jev is not sure which profile the task names. If the user does not allow it, the run uses the workspace default.
@@ -305,7 +305,34 @@ The server shows dialogs only when all of these conditions are true:
 
 SDK hosts, for example T3 Code, set `CLAUDE_CODE_SESSION_ATTENDED=0`. Without dialogs, an action that needs one blocks with `needs_confirmation`. The assistant text stays in the field, and the Chrome window stays open. Check the text there and do the action yourself. Set `JEV_MCP_TRUST_ELICITATION=1` only when a person answers the dialogs in that client.
 
-Codex with `approval_policy = "never"` declines every dialog, so each action that needs a dialog blocks with `needs_confirmation`. The `codex-pl` profile uses `never`. To get dialogs, start Codex with `-c approval_policy="on-request"`.
+Codex with `approval_policy = "never"` declines every dialog, so each action that needs a dialog blocks with `needs_confirmation`. The `codex-pl` profile uses `never`. To get dialogs, start Codex with `-c approval_policy="on-request"`. In autonomous mode no dialog opens, so a run goes to its end also with `never`.
+
+### Autonomous mode
+
+The user can let Jev act with no dialogs for one task. The user writes "autonomous", "autonomously", "don't ask me", "do not ask me", or "without asking" in their own message. The assistant then calls `browse` with `confirm: "autonomous"` and puts those words in `user_said`. In that run:
+
+- Every click, Enter, send, save, submit, and delete goes on with no dialog, also while assistant text is in a field, and also for text of more than 6,000 characters. No action blocks with `needs_confirmation`.
+- The run does not ask which profile to use. When Jev is not sure, the run uses the workspace default, as a session without dialogs does. Pass `profile` when the user names one.
+- When no person answers in the session, a sign-in wall or a check blocks the run at once. When a person can answer, a headed run pauses as usual.
+- Password and one-time-code fields still stop the run, because they need a value that only the user can type. The same applies to a field that needs an exact value that the user did not give. The confidence checks do not change.
+
+The server refuses the call (`isError`) in these cases:
+
+- `confirm: "autonomous"` without `user_said`, or with `user_said` that does not hold one of the words above.
+- `user_said` with another `confirm` value.
+- `JEV_MCP_AUTONOMOUS=0` in the server environment. This variable only turns the mode off. Nothing is needed to turn it on.
+- A `browse` call with the task of the active run and another `confirm` value. No call turns the mode on or off in the middle of a run.
+
+The mode holds for one run. Each view of the run has `autonomous`: `user_said`, `unattended_actions` (the number of audited actions so far), and `profile` (when the run has ended). The result lists each action that ran with no dialog in `result.unattended`: the step, the action, the host, the risk, the step result, `why` (`destructive`, `submit`, `unsent_text`, or `replaced`), the assistant texts in fields at the action, and up to 8 other non-empty fields of the form. The list leaves out credential, secret, payment, and one-time-code fields. Each text has `left`: `true` when no field holds the text after the action, or when a new page loaded; `false` when a field still holds it; `null` when this is not known. Some pages keep the text in the field after a send, so a Send entry can show `left: false`. A fill that replaces text that the run did not type is in the list too, with `replaced_chars`. An entry with the result `failed` may have run. A text that an earlier entry shows becomes "same as step N". The CLI result has the same audit in `steps[].unattended`. `next` tells the assistant to report every entry.
+
+Risks of this mode:
+
+- Nobody checks the text before it goes out. The assistant can write wrong text, and page text can try to change what the assistant writes.
+- Page text can tell the assistant to turn on the mode. The server checks only that `user_said` holds the words. It cannot see the user's message, so an assistant that makes up the words passes the check. The skill tells the assistant to use only the user's own message.
+- Jev can choose a wrong target, for example Enter in a command bar that sends a chat message. The dialog was the last check against such an action. The audit shows it only after it ran.
+- A run can go on after its goal, up to `max_steps`, with no dialog to stop it.
+
+`JEV_MCP_REVIEW_TEXT=1` and the client permission prompts still ask. With `browse` on prompt, the prompt shows `confirm` and `user_said` before the run starts.
 
 ### Permissions
 
@@ -323,7 +350,7 @@ In Claude Code, add allow rules only for the three tools that do not act on a pa
 }
 ```
 
-Keep `browse` and `continue` on prompt. The prompt shows the task, the URL, and the text before a page gets them. In bypass mode, set `JEV_MCP_REVIEW_TEXT=1`. Claude Code then prompts for every `continue` call, also in bypass mode, and shows the values.
+Keep `browse` and `continue` on prompt. The prompt shows the task, the URL, `confirm`, `user_said`, and the text before a page gets them. In bypass mode, set `JEV_MCP_REVIEW_TEXT=1`. Claude Code then prompts for every `continue` call, also in bypass mode, and shows the values.
 
 In its default approval mode, Codex asks before `browse` and `continue`, because their annotations mark them as destructive. It does not ask before `wait`, `cancel`, and `close_browser`.
 
@@ -339,6 +366,7 @@ In its default approval mode, Codex asks before `browse` and `continue`, because
 | `JEV_MCP_ALLOW_FILE` | `1` lets `browse.url` use `file:` URLs. |
 | `JEV_MCP_TRUST_ELICITATION` | `1` shows dialogs also when `CLAUDE_CODE_SESSION_ATTENDED=0`. |
 | `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for every `continue` call, also in bypass mode. The server reads it at startup. Codex does not use it. |
+| `JEV_MCP_AUTONOMOUS` | `0` turns off [autonomous mode](#autonomous-mode): `browse` refuses `confirm: "autonomous"`. |
 
 The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_CHROME_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
 
@@ -347,7 +375,7 @@ The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT
 - The server runs one task at a time. A `browse` call with the same task as the active run returns that run.
 - A run can send 3 text requests. A request has at most 4 fields and 4,000 characters of text in total. The assistant has 300 s to answer. This wait does not count toward the run timeout. After 3 rejected answers to one request, the run blocks with `needs_text`.
 - A dialog opens only in a tool call that started 5 s ago or less. Otherwise the call returns `confirming`, and the next `wait` opens the dialog. If no call opens a dialog in 60 s, Jev does not do the action, and the hint says that no dialog was shown. A dialog stays open for at most 100 s. These times keep each call below the 2-minute point where Claude Code moves a tool call to the background.
-- Unsent text of more than 6,000 characters blocks the action with `needs_confirmation`, because one dialog cannot show it.
+- Unsent text of more than 6,000 characters blocks the action with `needs_confirmation`, because one dialog cannot show it. Autonomous mode shows no dialog, so it does not block there.
 - One result is at most about 7,000 tokens. The server cuts the page text first, then the older step lines (down to 3), then answer strings (to 2,000 characters).
 - The server keeps the last 10 finished runs. A restart forgets them.
 - Chrome stays open between runs, with one tab. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
@@ -383,7 +411,7 @@ When a form needs new text, such as a reply, Jev can choose `generate` for the f
 - **One request.** A request holds the field that Jev chose (`f1`, required) and up to 3 other empty writable fields of the same form, in page order. It also holds the task, the page URL and title, the last 5 actions, and up to 6,000 characters of page text.
 - **Checks.** Each text must fit the field's `max_chars`, and all texts of one request together must fit 4,000 characters. A text must not hold a secret `--var` value of 4 or more characters, the API key, or text that looks like a key or token. The run removes control and invisible characters. In a single-line field, a line break becomes a space. An error names the field and the rule, never the text.
 - **Binding and single use.** Each text is bound to the field it was written for, in that document. Jev can type it only into that field, and only one time. If the page changes during the wait, the run observes the page again and asks Jev again; the text stays ready for its field. If a new document loads during the wait, the texts of that request are dropped, and Jev can ask for new text. Jev never sees a text that is bound to another document. When a field of the request is empty again, for example after a send, the unused texts of that request are dropped.
-- **Unsent-text gate.** While a field holds assistant text that no click or Enter has sent, every click and every Enter needs a dialog, whatever the label. This includes "Comment" buttons and icon buttons. The dialog shows each unsent text in full. An allowed action does not end the gate: the next click asks again while the text stays in its field. A native field or rich-text editor out of view still counts. A page can remove the field and show the same text in a new field, for example in a Write and Preview tab pair, a list that loads rows as you scroll, or a pop-out editor. The gate then follows the text to the new field, also when that field changes the text a little (a list, curly quotes, capitals, or a length limit), and also when that field holds another text of the assistant. A field that held the text before Jev typed it does not take the gate while it keeps its value. A search query or another text that Jev typed does not take the gate of a sent short reply that it contains ("Sure" in "sure thing contract"). While no rendered field holds the text, a click does not ask. The gate ends when the field is empty and no other field holds the text, or when a new document loads. When the page writes a moved text over another assistant text, that other text keeps its gate: it gates again when a field shows it. A fill that the field did not show right away still gates the next click, also after a scroll, a dropdown selection, going back, and in the next plugin run: some editors keep the text where the page does not show it. Only an allowed click or Enter ends that: its dialog showed the text. A fill after which the page did not settle gates the same way. A later fill of the field keeps the gate, and the dialog then shows the new value (`<secret>` for a secret value). When the later fill did not show either, the dialog also shows the earlier text, because the page can hold both. Typing, selecting a dropdown option, scrolling, waiting, and going back do not need a dialog.
+- **Unsent-text gate.** While a field holds assistant text that no click or Enter has sent, every click and every Enter needs a dialog, whatever the label. This includes "Comment" buttons and icon buttons. The dialog shows each unsent text in full. An allowed action does not end the gate: the next click asks again while the text stays in its field. A native field or rich-text editor out of view still counts. A page can remove the field and show the same text in a new field, for example in a Write and Preview tab pair, a list that loads rows as you scroll, or a pop-out editor. The gate then follows the text to the new field, also when that field changes the text a little (a list, curly quotes, capitals, or a length limit), and also when that field holds another text of the assistant. A field that held the text before Jev typed it does not take the gate while it keeps its value. A search query or another text that Jev typed does not take the gate of a sent short reply that it contains ("Sure" in "sure thing contract"). While no rendered field holds the text, a click does not ask. The gate ends when the field is empty and no other field holds the text, or when a new document loads. When the page writes a moved text over another assistant text, that other text keeps its gate: it gates again when a field shows it. A fill that the field did not show right away still gates the next click, also after a scroll, a dropdown selection, going back, and in the next plugin run: some editors keep the text where the page does not show it. Only an allowed click or Enter ends that: its dialog showed the text. In autonomous mode the click or Enter goes on with no dialog, and its audit entry shows the text. A fill after which the page did not settle gates the same way. A later fill of the field keeps the gate, and the dialog then shows the new value (`<secret>` for a secret value). When the later fill did not show either, the dialog also shows the earlier text, because the page can hold both. Typing, selecting a dropdown option, scrolling, waiting, and going back do not need a dialog.
 - **Later runs.** The server keeps the unsent text with its tab. When a run ends before the text is sent, for example after a declined dialog, the next `browse` call on the same tab has the same gate. The gate ends there by the same rules. `close_browser` and a new tab end it.
 - **Task and vars.** In plugin runs the assistant writes the task and the vars. A non-secret task or var value typed into a multiline field therefore also counts as unsent text. The run removes control and invisible characters from every non-secret task or var value before it types it, so the page gets the text that the dialog shows. A secret value is typed as it is. A credential field never takes a value from the assistant: the user types it in the Chrome window.
 
@@ -391,7 +419,7 @@ When a form needs new text, such as a reply, Jev can choose `generate` for the f
 
 - A low-confidence target or Enter decision gets one retry per step. The direct engines observe again, include the rejection reason, and print a retry message. If uncertainty remains, the run can return `ambiguous`.
 - A stale page or changed focus causes a new observation and decision within a separate retry limit. Input is not sent from the stale decision.
-- Enter requires submit checks. Labels such as Send can require human confirmation under the current risk rules. A required prompt without an interactive terminal blocks the action.
+- Enter requires submit checks. Labels such as Send can require human confirmation under the current risk rules. A required prompt without an interactive terminal blocks the action. With `--confirm autonomous`, no action asks.
 - Repeated actions without a page change can return `loop_detected`. Sign-in walls, confirmation requirements, and run limits also produce blocked results with a reason.
 - In plugin runs, `needs_text` means that the run did not get usable new text: the assistant declined, no text came in 300 s, the text failed its checks, or the run used its 3 text requests. The CLI and chat never return `needs_text`.
 

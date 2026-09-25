@@ -155,6 +155,8 @@ export interface UnsentText {
    * for a secret value.
    */
   before?: [number, string][];
+  /** Set by the runner on an entry that an earlier run left on the page. `FastRunner.unsentText` leaves it out. */
+  earlier?: true;
 }
 
 /** A decision no longer refers to the observed page. The caller observes again; nothing was executed. */

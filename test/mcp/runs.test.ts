@@ -126,6 +126,55 @@ describe("RunManager: start, busy, get", () => {
   });
 });
 
+describe("RunManager: autonomous runs", () => {
+  const rec = (n: number, over: Partial<StepRecord> = {}): StepRecord => ({
+    step: n, url: "https://x", title: "t", page_kind: null, page_kind_conf: null, done_p: null, operation: "CLICK", operation_conf: 0.9,
+    target: { ref: "e1", role: "button", name: "Send", under: "" }, target_conf: 0.9, runner_up: 0, action: "click", value: null, value_conf: null,
+    risk: "destructive", path: "fast", gate: "autonomous", result: "ok", error: null, jev_requests: 1, duration_ms: 5, ...over,
+  });
+  const audit = (left: boolean | null): NonNullable<StepRecord["unattended"]> => ({ action: 'click button "Send"', host: "x", why: ["destructive", "unsent_text"], texts: [{ label: "Reply", text: "Hi", chars: 2, left }], fields: [] });
+
+  it("the Human is never interactive and never opens a dialog; attended keeps the session's answer; the log names the user's words", async () => {
+    const { runs, m, log } = setup();
+    const run = runs.start(input("a", { confirm: "autonomous", user_said: `do it autonomously ${KEY}` }), { interactive: true });
+    const h = m.last().hooks;
+    expect(h.human.interactive).toBe(false);
+    expect(h.attended).toBe(true);
+    await expect(h.human.confirm("About to click. Type y to allow: ", 1000, { kind: "action", action: "click", host: "x", typed: [] })).resolves.toBe(false);
+    expect(run.status).toBe("running");
+    expect(run.pending).toBeNull();
+    expect(run.autonomous).toEqual({ userSaid: `do it autonomously ${KEY}`, unattended: 0, sentAt: null });
+    expect(log.lines).toContain(`INFO run ${run.id} started (autonomous: no dialogs; the user said "do it autonomously ***")`);
+    const plain = setup();
+    plain.runs.start(input("b"), { interactive: true });
+    expect(plain.m.last().hooks.human.interactive).toBe(true);
+    expect(plain.m.last().hooks.attended).toBe(true);
+  });
+
+  it("a same-task browse with another confirm value is BusyError; the same value gives the run", () => {
+    const { runs } = setup();
+    const run = runs.start(input("a", { confirm: "autonomous", user_said: "don't ask me" }), { interactive: false });
+    expect(runs.start(input("a", { confirm: "autonomous", user_said: "don't ask me" }), { interactive: false })).toBe(run);
+    expect(() => runs.start(input("a"), { interactive: false })).toThrow(`run ${run.id} is active with confirm "autonomous". Call wait with run "${run.id}", or call cancel.`);
+    const other = setup();
+    const r2 = other.runs.start(input("a"), { interactive: false });
+    expect(() => other.runs.start(input("a", { confirm: "autonomous", user_said: "don't ask me" }), { interactive: false })).toThrow(BusyError);
+    expect(r2.autonomous).toBeNull();
+  });
+
+  it("step records with an audit count for the banner; the first text that left the page sets sentAt", () => {
+    const { runs, m } = setup();
+    const run = runs.start(input("a", { confirm: "autonomous", user_said: "don't ask me" }), { interactive: false });
+    const log = m.last().hooks.log;
+    log.step(rec(1, { gate: "ok" }));
+    log.step(rec(2, { unattended: audit(false) }));
+    log.step(rec(3, { unattended: audit(true) }));
+    log.step(rec(4, { unattended: audit(true) }));
+    expect(run.autonomous).toMatchObject({ unattended: 3, sentAt: 3 });
+    expect(run.steps).toBe(4);
+  });
+});
+
 describe("RunManager: per-run logger", () => {
   it("the redactor setter also sets the stderr logger's redactor, both with the key removed", () => {
     const { runs, m, log } = setup();

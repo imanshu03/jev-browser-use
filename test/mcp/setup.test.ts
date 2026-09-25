@@ -8,7 +8,7 @@ import { BrowserSession } from "../../src/fast/session.js";
 import { emptyResult } from "../../src/io.js";
 import { MCP_HINTS } from "../../src/mcp/limits.js";
 import type { BrowseInput, RunHooks } from "../../src/mcp/runs.js";
-import { NoKeyError, baseConfig, checkInput, configFor, createJevLink, fastStarter, findPackageRoot, loadPackageEnv } from "../../src/mcp/setup.js";
+import { AUTONOMY_WORDS, NoKeyError, baseConfig, checkAutonomy, checkInput, configFor, createJevLink, fastStarter, findPackageRoot, loadPackageEnv } from "../../src/mcp/setup.js";
 import type { RunResult } from "../../src/types.js";
 import { fakeHuman, fakeLogger, fakeOracle, fakeText, fakeTransport } from "../fakes.js";
 import { fakeChrome, fakePage, obs } from "../fast/fakes.js";
@@ -147,6 +147,43 @@ describe("checkInput", () => {
   });
 });
 
+describe("checkAutonomy", () => {
+  const auto = (user_said?: string): BrowseInput => input({ confirm: "autonomous", ...(user_said !== undefined ? { user_said } : {}) });
+
+  it("accepts the user's own words; the apostrophe can be straight, curly, or missing", () => {
+    for (const said of ["Send it autonomously.", "do it autonomous", "Reply to Ann, don't ask me", "don\u2019t ask me", "dont ask me", "Do NOT ask me again, just send", "post it without asking", "you can act autonomously today"]) {
+      expect(checkAutonomy(auto(said), {}), said).toBeNull();
+    }
+    // No page-text store: "autonomous" alone passes also after a page showed "AI AUTONOMOUS".
+    expect(checkAutonomy(auto("autonomous"), {})).toBeNull();
+  });
+
+  it("confirm autonomous without user_said, or without the words, is a wrong call", () => {
+    expect(checkAutonomy(auto(), {})).toMatch(/^confirm "autonomous" needs user_said/);
+    expect(checkAutonomy(auto("   "), {})).toMatch(/^confirm "autonomous" needs user_said/);
+    for (const said of ["yes", "go ahead", "ok, send it", "don't ask", "the user approved", "autonomy"]) {
+      expect(checkAutonomy(auto(said), {}), said).toMatch(/^user_said must hold the user's own words/);
+    }
+    expect(AUTONOMY_WORDS.test("semiautonomous")).toBe(false);
+  });
+
+  it("user_said goes only with confirm autonomous; the other values need nothing", () => {
+    expect(checkAutonomy(input({ user_said: "do it autonomously" }), {})).toBe('user_said goes only with confirm "autonomous". Leave out user_said');
+    expect(checkAutonomy(input({ confirm: "always", user_said: "don't ask me" }), {})).toMatch(/goes only with/);
+    for (const confirm of ["auto", "always", "never"] as const) expect(checkAutonomy(input({ confirm }), {})).toBeNull();
+  });
+
+  it("JEV_MCP_AUTONOMOUS=0 turns the mode off; other values leave it on", () => {
+    expect(checkAutonomy(auto("do it autonomously"), { JEV_MCP_AUTONOMOUS: "0" })).toMatch(/JEV_MCP_AUTONOMOUS=0/);
+    expect(checkAutonomy(auto("do it autonomously"), { JEV_MCP_AUTONOMOUS: "1" })).toBeNull();
+    expect(checkAutonomy(input(), { JEV_MCP_AUTONOMOUS: "0" })).toBeNull();
+  });
+
+  it("configFor passes confirm autonomous through", () => {
+    expect(configFor(auto("don't ask me"), baseConfig({}, fakeLogger())).confirm).toBe("autonomous");
+  });
+});
+
 describe("createJevLink", () => {
   it("client() throws NoKeyError until a key exists; nothing connects before a warm", async () => {
     const dir = tmp();
@@ -249,6 +286,9 @@ describe("fastStarter", () => {
     await t.start(input({ profile: "none", vars: { name: "Ann" } }), t.hooks);
     const d = deps();
     expect(d).toMatchObject({ text: t.hooks.text, human: t.hooks.human, signal: t.hooks.signal, log: t.hooks.log, hints: MCP_HINTS, fromAssistant: true, page, profiles: PROFILES });
+    expect("attended" in d).toBe(false);
+    await t.start(input({ profile: "none" }), { ...t.hooks, attended: false });
+    expect(deps().attended).toBe(false);
     expect(d.cfg).toMatchObject({ fallbackUrl: "https://mail.example/t/1", vars: { name: "Ann" }, keepOpen: true, headed: true });
     expect(d.oracle).toBe(t.oracle);
     await d.warm?.();
