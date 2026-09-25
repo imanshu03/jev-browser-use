@@ -29,6 +29,7 @@ If `result.blocked.kind` is `needs_confirmation`, the text that you wrote can st
 - Always write each field where `required` is true. Write an optional field only when the task needs it.
 - Do not invent names, email addresses, phone numbers, recipients, prices, or dates. Use only facts from the task, the conversation, or the page.
 - Keep each value at or below `max_chars`, and all values together at or below 4000 characters. Use line breaks only where `multiline` is true.
+- If a field has `mode: "append"`, the field keeps its text, and your text goes at its end. Write only the new text. Do not repeat the text in `current_value`.
 - If you cannot write good text, ask the user. To stop, call `continue` with `run`, `request`, and `decline` (a short reason). If the user rejects your `continue` call, call `cancel`.
 
 ## Safety rules

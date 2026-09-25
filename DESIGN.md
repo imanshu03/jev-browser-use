@@ -165,6 +165,14 @@ The direct request asks the value of each TYPE_TEXT field in its own question, `
 
 A value question can also offer `generate`, but only for a field that passes `canWriteInto` in a run with a text source (`canGenerate`). `meta.generate` is true when such a field is offered. Only then do the TYPE_TEXT operation text, the value question, and the `needs_credential_or_value` reason use the `*_GEN` texts in `src/fast/policy.ts`. `generate` means "write new text for this field"; the loop then asks the assistant. A search box, an email field, or a credential field never offers `generate`. Without a text source the request has no `*_GEN` text. `readValue` reads `generate` only from a question that offered it; otherwise it reads `none`.
 
+**Mode question.** A multiline field can hold text that this run did not type: a document, a draft, or project instructions. The loop gives the node ids of these fields to the request (`StepInput.heldText`). A field is not in the list when all its text is this run's own text: the last text that a fill typed there, the record of an assistant text, or an unsent entry on it. A new text then replaces that text, as before. A held field changes the request in three ways:
+
+- Its value question asks for "the new text" (`VALUE_Q_NEW`, `VALUE_Q_NEW_GEN`). With "the value typed into this field", a quoted line for the end of a document got 0.27-0.42 in plugin runs, because no offered value is the final text of the document. As "the new text" it got 0.71-0.75.
+- A mode question, `mode_<key>`, goes next to its value question, also in a VALUE request. It shows the goal, the field, and up to 40 lines of the field (`MODE_LINES`). The choices are `replace_all` and `append` (`MODES`).
+- The TYPE_TEXT operation text says that a fill can also add to the text of a field (`TYPE_TEXT_HELD`, `TYPE_TEXT_HELD_GEN`).
+
+`readEdit` reads the mode. The loop needs a mode of 0.60 or more (`GATES.editMode`), and 0.80 or more for `replace_all` (`GATES.editReplace`): a wrong replace deletes a document that no check can bring back. A lower or missing answer asks again one time and then blocks `ambiguous`, with the hint that the task must say if the new text replaces the text or goes at its end. There is no fallback to replace. A value of `none` blocks `needs_credential`, as for other fields. The first version has two modes only. A mode that replaces one line or adds after one line needs bench cases where Jev passes its gates: in probes, "Add X to the list of changes" got 0.47 on its value question.
+
 ### 4.2 State
 
 The `vercel` OBSERVE state has this structure. Optional fields appear when they have candidates or useful state:
@@ -380,6 +388,13 @@ In the `vercel` engine, operation DONE triggers VERIFY. `done_final >= 0.70` com
 
 In the direct engines, DONE completes an act goal when `P(DONE) >= 0.50`. A lower value suppresses DONE for two steps. The direct engines have no separate VERIFY request. The operation prompt must therefore require evidence for the full goal.
 
+**A step that a submit click opened.** A click on a submit or destructive control can open a confirmation step and not do the action: a "Save" that opens a "Save Changes" popover with "Confirm", or a "Delete" that opens a dialog with "Cancel" and "Delete". After such a click, the loop compares the observation before the click with the observation after it (`noteOpened`). The click opened a step when the observation after it shows new submit or destructive controls on the same document, and one of these is true:
+
+- The clicked control shows `aria-expanded="true"` now, and it did not before: the new controls are in its popup.
+- The new controls are in a new form or dialog that also has a cancel control ("Cancel", "No", "Not now", "Go back", "Keep editing", or "Discard").
+
+While one of these controls is on the page, DONE is not accepted. The loop asks again without DONE, and the retry reason names the click and the controls. After two refused DONE answers (`LIMITS.openStepHolds`), a third one blocks `ambiguous` with a hint that the step is still open. A success notice with "Close" and "Save another" is not a step, and a popup of a navigational control is not one either. Before this rule, Jev said DONE at 0.72-0.89 with the "Save Changes" popover open in the artifact bench runs, so the document was never saved.
+
 ### 6.2 Check
 
 All three engines use `answer_state` and `evidence` from the main request. The answer choices are `yes`, `no`, and `not_visible_yet`. A yes or no at confidence 0.60 or greater completes the check. Return a boolean answer, `probability=P(yes)`, and the selected evidence.
@@ -446,6 +461,24 @@ Before a targeted action, compare the page key and target guard. The page key in
 
 Keyboard input also compares `key_guard`, which includes focus and the focused control's surrounding state. A focus change, form change, or rich-text editor value change invalidates a pending Enter action. Native inputs, textareas, and contenteditable editors expose their values; contenteditable editors support true, empty, and plaintext-only attribute forms. Text changes elsewhere need not invalidate an unrelated targeted click or fill.
 
+**Fill.** A fill never sends a key that a page can read, and it types only while the field has focus. It runs these steps. The page settles after each step: two animation frames and one task turn, at most 50 ms (`EDIT_SETTLE_SCRIPT`). An editor copies the browser selection into its model in that time.
+
+1. Click the field, as for a click.
+2. Read the field (`editScript`, step `read`): its text, its kind, and its shape (`FieldShape`). Focus must be on the field or on an element inside it, and the field must be visible.
+3. Put the selection in place with a key-less editing command: `selectAll` for a replace, `moveToEndOfDocument` for an append. An empty field is always replaced. The command goes in a key event with the key `Unidentified`, so no page handler sees Mod+A, End, or Enter. A real Mod+A made Plate replace the whole document, or move focus to its hidden `slate-shadow-input` so that the text went nowhere. Lexical dropped the text, and a composer can send on Enter.
+4. Check again (step `check`): focus is on the field, the field is visible, and the selection covers all the text (replace) or is a caret with no text after it (append). An input without a selection API (email, number) checks focus only. When it held a value, its value after the insert must be the typed text.
+5. Type the text with `Input.insertText`. An append joins by the field shape:
+   - `textarea`: a line break in the text, but none when the value ends with one.
+   - `composer`: one space in the same insertText, but none after white space or in an empty block. A text with line breaks is refused before any change. A contenteditable is a composer when a control whose name has send, post, reply, or comment is in its form or dialog, or in a container around it that holds no other text field (up to 6 levels). It is also a composer when it holds one block of text.
+   - `document`: any other contenteditable with two or more blocks, a heading, a list, a quote, code, or a table. The key-less `insertParagraph` command makes a new block, but only when the block of the caret has text. A check (step `blank`) then needs the caret in an empty block inside the field, and every line that the field held. Each line of the text goes into its own block. A document never gets a line break inside insertText: Plate makes a soft break, and Lexical drops the text after it. A replace with line breaks into a document also types one block per line.
+6. Read the field again. `act` returns `EditResult`: the mode that ran, the shape, and the field text before and after.
+
+A failed step throws `EditRefused` with the reason, not `StalePage`: the same check fails again, so a stale-page retry only repeats it and loses the reason. Before the first insert, nothing was typed. The loop then observes and decides one time more, with the reason in `retry_reason`, and after that blocks `ambiguous` ("the fill of X was refused: ..."). A refusal after a change (`EditRefused.changed`: a new block went in, or an input shows another value) blocks at once ("did not go as planned ... Check the field before any save or send"). A document that goes away before the first insert is a stale page.
+
+Key-less `insertParagraph` is not safe in a composer: ProseMirror reads the new block as Enter, and Slate calls `insertBreak`, which some composers use to send. A line break inside insertText is not safe either. So a composer joins with a space and refuses line breaks. A synthetic paste is not general: Plate parses it as Markdown, and a plain contenteditable ignores it. Residual risk: a composer with two or more blocks and no send-like control near it is a document, and a new block can send its draft.
+
+After an append, the loop checks the result (`appendLost`): the field shows the typed text, and it still holds each line that it held before. If not, the run blocks before any click, so a damaged document is not saved or sent. `filled()` counts an append as kept only when the field shows the typed text, because the field was not empty before. History shows an append as `fill (append)`. An append is not idempotent, and Jev sees only the first 80 characters of a field. So when this run added a text to a field, and the field still ends with it, the same append is not typed again: the step records `already added`, and history shows `fill (already added)`.
+
 Document scrolling and panel scrolling are separate actions. A panel action retains its node identity and scroll position. Prefer a scrollable panel with focus, then the largest visible panel. Clip observations to the panel viewport and check that the panel is still usable before scrolling.
 
 After input, use bounded readiness and render checks. Editable-combobox fills can wait briefly for options. A document that never reaches `readyState=complete` is accepted after the cap instead of paying the full wait on every observation. Navigation-context loss is a stale-page condition; a closed transport or command timeout is a browser failure.
@@ -492,7 +525,7 @@ One HTTP transport serves key validation, model requests, and optional warm-up c
 
 **What reaches the assistant.** In MCP runs, the assistant (the harness model) gets two kinds of data:
 
-- The text request (`buildTextRequest` in `src/fast/generate.ts`). It holds the redacted goal, the page URL and title, the fields, the last 5 actions, and up to 6,000 characters of page text. `untrusted_page_text` is the last key. Every string is redacted first, then sanitized, then cut, so a cut never keeps part of a secret. A field's `current_value` has at most 80 characters.
+- The text request (`buildTextRequest` in `src/fast/generate.ts`). It holds the redacted goal, the page URL and title, the fields, the last 5 actions, and up to 6,000 characters of page text. `untrusted_page_text` is the last key. Every string is redacted first, then sanitized, then cut, so a cut never keeps part of a secret. A field's `current_value` has at most 80 characters. When `f1` holds text that the run did not type, its `current_value` keeps its lines and has at most 2,000 characters (`LIMITS.heldValueChars`), so the assistant can read the text that it adds to or replaces. For an append, `f1` also has `mode: "append"`: the assistant writes only the new text.
 - The tool result view (`viewOf` in `src/mcp/view.ts`). Every string goes through the run's redactor and the API key removal. Page-derived strings are made flat (one line), and the page text is sanitized. Redaction runs before and after sanitizing, because sanitizing can join the parts of a secret. A step line redacts the value and the target name before it cuts the value to 60 characters.
 
 `continue` values are checked for the API key as sent and after the runner's normalization (line breaks, then `sanitizeText`), so format characters between the characters of the key do not hide it. A decline reason loses the key in the same way.
@@ -542,7 +575,7 @@ The MCP server uses stdio. Stdout carries only JSON-RPC. `src/mcp/main.ts` sends
 
 The tools are `browse`, `wait`, `continue`, `cancel`, and `close_browser` (`TOOL_NAMES` in `src/mcp/view.ts`). Their annotations mark `browse` and `continue` as destructive and open-world, `wait` as read-only, and `cancel` and `close_browser` as not destructive and not open-world. With `JEV_MCP_REVIEW_TEXT=1`, `continue` also has `_meta["anthropic/requiresUserInteraction"]`. The input schemas are strict.
 
-Every result is `{ content: [{ type: "text", text: JSON.stringify(view) }], structuredContent: view }`. `isError: true` means a wrong call only, and its text states the correct call. The view keys are `run`, `status`, `next`, `task`, `elapsed_s`, `steps`, `last_step`, and then the optional `confirmation`, `pause`, `result`, and `text_request`. `text_request` is last, and `untrusted_page_text` is its last key. A view fits `MCP.viewTokens` (7,000 estimated tokens): the page text is cut first, then the oldest step lines (down to 3), then answer strings (to 2,000 characters). Codex shows only `structuredContent` to its model and cuts tool output above about 10,000 tokens.
+Every result is `{ content: [{ type: "text", text: JSON.stringify(view) }], structuredContent: view }`. `isError: true` means a wrong call only, and its text states the correct call. The view keys are `run`, `status`, `next`, `task`, `elapsed_s`, `steps`, `last_step`, and then the optional `confirmation`, `pause`, `result`, and `text_request`. `text_request` is last, and `untrusted_page_text` is its last key. A field of `text_request` can have `mode: "append"` (see section 8). A view fits `MCP.viewTokens` (7,000 estimated tokens): the page text is cut first, then the oldest step lines (down to 3), then answer strings (to 2,000 characters). Codex shows only `structuredContent` to its model and cuts tool output above about 10,000 tokens.
 
 `next` names the run id and, for `needs_text`, the request id. For a `needs_confirmation` block, `next` adds that the dialog was declined only when the hint is "the user did not allow <action>". The other hints of that kind mean that no person declined a dialog. The loop gives that hint for every false answer, so `RunManager` records how each confirmation ended (`ConfirmEnd`). When no call opened the dialog in time (`no_pickup`), or the dialog failed or got no answer in time (`no_answer`), it replaces the hint with one that says so.
 
@@ -569,7 +602,7 @@ Maintain coverage for these behaviors:
 | State and budgets | Parsed state and values, disabled controls, stable identities, per-operation heads, choice limits, trim order, oversized-page block |
 | Decisions | Every goal, supported action, completion hold, block reason, risk band, runner-up rejection, missing value, dry run, repeat and wait cap |
 | Vercel execution | Tournament, dependent CONFIRM, select options, page-derived values, covered-click retry, Escape and RECOVER, extraction and VERIFY |
-| Direct execution | Fresh and stale targets, focus changes, form changes, covered geometry, dynamic text, native select, document and panel scrolling |
+| Direct execution | Fresh and stale targets, focus changes, form changes, covered geometry, dynamic text, native select, document and panel scrolling; fills with key-less commands, the focus and selection checks, the separator of each field shape, refusals, the append check, and a step that a submit click opened |
 | Secrets | Real fill followed by another request, quotes and backslashes, newlines, nested log data, long values before trimming, final results, unchanged browser input |
 | Human interaction | Headless block, headed polling without a TTY, TTY resume and abort, prompt refusal, exhausted pause budget |
 | Ownership | Concurrent profile launch and refresh rejected, existing locks retained, lock release after exit, temporary cleanup, attached tab preservation |
@@ -594,6 +627,7 @@ The main risks and controls are:
 - Secret exposure: redact structured data at request, log, and result boundaries while retaining original input locally.
 - Browser and API changes: keep transport and error mapping isolated, with fixtures and bounded failures.
 - Assistant text in the wrong place: fill only fields that pass `canWriteInto`, bind each text to one field in one document, use it one time, and ask Jev again when the page changed during the wait.
+- Text in a hidden field, or a lost document: type only while the field has focus, use no key that a page can read, ask Jev if a field's own text stays, and check an append before any save or send.
 - Assistant text sent without consent: gate every click and Enter while unsent text exists, show the full text in the dialog, and let only a person answer. No tool argument, page text, or model answer can approve an action.
 - Page text that gives instructions to the assistant: label it `untrusted_page_text`, put it last, sanitize it, and state in the skill that all result strings are data.
 - Secrets in assistant text: redact requests and views, reject secret var values, key patterns, and the API key.
