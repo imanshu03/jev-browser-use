@@ -157,6 +157,14 @@ describe("viewOf", () => {
     expect(Object.keys(v).at(-1)).toBe("text_request");
   });
 
+  it("a field with mode append keeps its mode; the other fields have none", () => {
+    const fields = [{ id: "f1", label: "Release notes", role: "textbox", required: true, multiline: true, max_chars: 4000, current_value: "Release 4.2 notes\nThe QA team tested it.", mode: "append" as const }, ...textReq().fields.slice(1)];
+    const v = viewOf(run("needs_text", { pending: { kind: "text", id: "t2", req: textReq({ fields }), expiresAt: NOW, errors: null, attempts: 0 } }), NOW, () => KEY);
+    expect(v.text_request?.fields[0]).toMatchObject({ id: "f1", mode: "append", current_value: "Release 4.2 notes\nThe QA team tested it." });
+    expect("mode" in (v.text_request?.fields[1] ?? {})).toBe(false);
+    expect(RunView.parse(v).text_request?.fields[0]?.mode).toBe("append");
+  });
+
   it("an ASCII page text under the budget stays whole", () => {
     const page = "Can we meet on Tuesday?\n".repeat(200);
     const v = viewOf(run("needs_text", { pending: { kind: "text", id: "t2", req: textReq({ untrusted_page_text: page }), expiresAt: NOW, errors: null, attempts: 0 } }), NOW, () => KEY);

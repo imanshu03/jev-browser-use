@@ -56,6 +56,28 @@ export interface Chrome {
 
 export type ActionKind = "click" | "fill" | "select" | "scroll" | "wait";
 
+/**
+ * Where a fill puts its text. `replace`: the field holds only the new text afterwards. `append`: the field keeps its
+ * text, and the new text goes at its end. An empty field is always replaced. Jev chooses the mode; the page places the
+ * caret with key-less editing commands and checks the result.
+ */
+export type EditMode = "replace" | "append";
+export interface EditPlan { mode: EditMode }
+
+/**
+ * The shape of a field, read at the fill. It chooses the separator of an append:
+ * - `input`: a single-line field (one space);
+ * - `textarea`: a line break in the text;
+ * - `composer`: a contenteditable with a send-like control near it, or with one block of text. A new line can send
+ *   there, so an append joins with one space, and a text with line breaks is refused;
+ * - `document`: a contenteditable with two or more blocks, a heading, or a list, and no send-like control. Each line
+ *   of the text goes into a new block, made with the key-less `insertParagraph` command.
+ */
+export type FieldShape = "input" | "textarea" | "composer" | "document";
+
+/** What a fill did. `mode` is the mode that ran (an empty field is replaced). `before` and `after` are the field text. */
+export interface EditResult { mode: EditMode; shape: FieldShape; before: string; after: string }
+
 /** One executable action the in-page script observed. `node` is the code-owned node identity, never a selector. */
 export interface Action {
   id: string;                         // "e1".."e250", "scroll_down", "scroll_up", "wait"
@@ -158,6 +180,21 @@ export class StalePage extends Error {
   }
 }
 
+/**
+ * A fill that the page refused: focus is not on the field, the selection is not where the edit needs it, or the field
+ * shape does not take the text. The message gives the reason. `changed`: the refusal came after the fill changed the
+ * page (a new line went in, or the field shows another value after the insert), so the fill must not run again.
+ * Without `changed`, nothing was typed.
+ */
+export class EditRefused extends Error {
+  readonly changed: boolean;
+  constructor(message: string, changed = false) {
+    super(message);
+    this.name = "EditRefused";
+    this.changed = changed;
+  }
+}
+
 export interface Page {
   readonly targetId: string;
   readonly sessionId: string;
@@ -165,8 +202,13 @@ export interface Page {
   observe(): Promise<Observation>;
   /** True when the page still matches `obs`. With a click, fill, or select action, compares the page key and that node's guard only. With a scroll action, the page key only. Without an action, the whole marker. */
   fresh(obs: Observation, action?: Action): Promise<boolean>;
-  /** Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws StalePage when anything changed; nothing is executed then. `text` is required for a fill. */
-  act(action: Action, obs: Observation, text?: string): Promise<void>;
+  /**
+   * Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws
+   * StalePage when anything changed; nothing is executed then. `text` is required for a fill. A fill uses `edit`
+   * (default: replace), sends no key that a page can read, types only while the field has focus, and returns what it
+   * did. It throws EditRefused when the field refuses the edit.
+   */
+  act(action: Action, obs: Observation, text?: string, edit?: EditPlan): Promise<EditResult | void>;
   /** Press one key on the focused element (for example "Enter", "Escape"). With `obs`, throws StalePage when the page key no longer matches the observation; nothing is pressed then. */
   press(key: string, obs?: Observation): Promise<void>;
   /** Navigate the tab and wait for document.readyState === "complete", polling every 20 ms, up to `timeoutMs`. */

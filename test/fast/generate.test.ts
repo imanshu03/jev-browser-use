@@ -74,6 +74,23 @@ describe("pickFields", () => {
     expect(labels(p)).toEqual(["Reply", "Subject", "Footer", "Extra"]);
     for (const l of ["Notes", "Cc", "Search mail", "Signature", "Password", "Summary", "Tags", "Send"]) expect(labels(p)).not.toContain(l);
   });
+  it("a target that holds text the run did not type gets a longer current_value with its lines, and an append sets mode", () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `Line ${i + 1} of the release notes`).join("\n\n");
+    const doc = el("e1", "fill", "Release notes", "textbox", { value: lines, form: 7, multiline: true });
+    const page2 = obs("https://a.b/", [doc, ...actions.slice(3)]);
+    const [append] = pickFields(page2, doc, none, same, { mode: "append" });
+    expect(append?.field.mode).toBe("append");
+    expect(append?.field.current_value.split("\n")).toHaveLength(30);
+    expect(append?.field.current_value.length).toBeGreaterThan(LIMITS.valueChars);
+    expect(append?.field.current_value.length).toBeLessThanOrEqual(LIMITS.heldValueChars);
+    const [replace, next] = pickFields(page2, doc, none, same, { mode: "replace" });
+    expect(replace?.field.mode).toBeUndefined();
+    expect(replace?.field.current_value).toBe(append?.field.current_value);
+    // Only the target: the extra fields keep the short form and no mode.
+    expect(next?.field).toMatchObject({ label: "Subject", current_value: "" });
+    expect(next?.field.mode).toBeUndefined();
+    expect(pickFields(page2, doc, none, same)[0]?.field.current_value.length).toBeLessThanOrEqual(LIMITS.valueChars);
+  });
   it("a target with a null form gives only f1", () => {
     const lone = el("e1", "fill", "Comment", "textbox", { value: "", form: null, multiline: true });
     expect(labels(pickFields(obs("https://a.b/", [lone, ...actions.slice(3)]), lone, none, same))).toEqual(["Comment"]);

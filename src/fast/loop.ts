@@ -18,11 +18,11 @@ import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
 import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord } from "../types.js";
 import { AUTH_HOST, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
-import type { Action, Chrome, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
-import { StalePage } from "./model.js";
+import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
+import { EditRefused, StalePage } from "./model.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
 import type { Decision, StepInput, StepMeta, Target, TargetOp } from "./policy.js";
-import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, readStep, readValue, top3 } from "./policy.js";
+import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, fieldLines, readEdit, readStep, readValue, top3 } from "./policy.js";
 
 export { actionKey };
 
@@ -63,8 +63,12 @@ interface StepCtx {
   action: ActionKind; value: string | null; valueConf: number | null; risk: RiskClass | null; gate: string;
 }
 
-/** `ran`: the action ran, and only the observation after it did not settle. */
-type Applied = { kind: "record"; rec: StepRecord; ran?: true } | { kind: "reask" } | { kind: "stale"; message: string; action?: Action };
+/**
+ * `ran`: the action ran, and only the observation after it did not settle. `appended`: the fill ran as an append.
+ * `refused`: the page refused a fill (EditRefused); `changed` says that the fill changed the page before the refusal.
+ */
+type Applied = { kind: "record"; rec: StepRecord; ran?: true; appended?: true } | { kind: "reask" } | { kind: "stale"; message: string; action?: Action }
+  | { kind: "refused"; message: string; changed: boolean; action: Action };
 
 /** The value a fill types: its span, and the observation and action to type it on. A text wait observes again. */
 type Typed = { kind: "span"; span: Span; obs: Observation; action: Action; gate: string | null } | { kind: "applied"; applied: Applied };
@@ -147,8 +151,30 @@ function holdsText(value: string, text: string): boolean {
   return inWords(lv, lw) || (lv.length >= CUT_MIN && lv.length * 3 >= lw.length && lw.startsWith(lv));
 }
 
+/**
+ * The check after an append: the field shows the typed text, and it still holds each line that it held before. Lines
+ * compare loosely: a page can add list marks or change quotes. Null when the fill kept the text; else what it lost.
+ */
+function appendLost(typed: string, r: EditResult): string | null {
+  if (!holdsText(r.after, typed)) return "the field does not show the typed text";
+  const now = loose(r.after);
+  const lost = fieldLines(r.before).filter((l) => loose(l) !== "" && !now.includes(loose(l)));
+  return lost.length === 0 ? null : `the field lost ${lost.length} line${lost.length === 1 ? "" : "s"} of its text, such as "${cutText(lost[0] ?? "", 40)}"`;
+}
+
 /** The name of a button that sends a message. */
 const SEND_BUTTON = /\b(?:send|post|reply|comment)\b/i;
+
+/** The name of a control that leaves a confirmation step without its action: a step with one asks before it acts. */
+const CANCEL_CONTROL = /^(?:cancel|no|not now|go back|keep editing|discard)\b/i;
+
+/**
+ * A step that a submit or destructive click of this run opened, and that the page still shows. The click did not finish
+ * its action: a "Save" that opens a "Save Changes" popover with "Confirm", a "Delete" that opens "Delete? Cancel /
+ * Delete". The step is a popup of the clicked control (it shows aria-expanded="true" now), or a new dialog or form with a
+ * cancel control. `buttons`: its new submit or destructive controls. `holds`: the DONE answers refused while it is open.
+ */
+interface OpenStep { doc: number | undefined; click: string; buttons: { node: number; label: string }[]; holds: number }
 
 const ACTION_OF: Record<string, ActionKind> = {
   CLICK: "click", TYPE_TEXT: "fill", SELECT: "select", SCROLL_DOWN: "scroll_down", SCROLL_UP: "scroll_up",
@@ -259,6 +285,12 @@ export class FastRunner {
   private readonly typedText = new Map<string, TypedText>();
   /** Ids of the spans that type a text again after a fill that did not stay. */
   private readonly retypes = new Set<string>();
+  /** The edit plan of the TYPE_TEXT decision in progress. A text request for its field says where the text goes. */
+  private editPlan: EditPlan | undefined;
+  /** `<doc>|<node>` -> the texts that an append of this run added to that field. An append of the same text again is not typed. */
+  private readonly appended = new Map<string, string[]>();
+  /** The step that the last submit or destructive click opened, while the page shows it. DONE waits for it. */
+  private openStep: OpenStep | null = null;
 
   constructor(deps: FastRunnerDeps) {
     this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => redact(s, this.spans)) };
@@ -465,6 +497,24 @@ export class FastRunner {
     return this.spans.filter((s) => s.source !== "generated" || (s.field?.key.startsWith(doc) ?? false));
   }
 
+  /**
+   * The multiline fields of `obs` that hold text that this run did not type. A field whose text is all this run's own (a
+   * text that a fill typed there, the record of a written text, or an unsent entry on it) is not one: a new text
+   * replaces it, as before, with no mode head.
+   */
+  private heldText(obs: Observation): Set<number> {
+    const out = new Set<number>();
+    for (const a of obs.actions) {
+      if (a.kind !== "fill" || a.multiline !== true || a.node === null || loose(a.value ?? "") === "") continue;
+      const key = `${obs.doc}|${a.node}`;
+      const own = [this.typedInto.get(key), this.typedText.get(key)?.text, ...this.unsent.filter((u) => u.doc === obs.doc && u.node === a.node).map((u) => u.text)]
+        .map((t) => loose(t ?? "")).filter((t) => t !== "");
+      const rest = own.reduce((v, t) => v.split(t).join(" "), loose(a.value ?? ""));
+      if (ALNUM.test(rest)) out.add(a.node);
+    }
+    return out;
+  }
+
   private stalled(): boolean {
     const last = this.history.slice(-LIMITS.stallActions);
     return last.length === LIMITS.stallActions && last.every((h) => h.page_changed === false && h.kind !== "wait" && h.kind !== "open");
@@ -497,13 +547,16 @@ export class FastRunner {
     let reasks = 0;
     let retryReason: string | undefined;
     let stale = 0;
+    let refusals = 0;
     for (;;) {
+      const held = this.heldText(obs);
       const input: StepInput = {
         task: this.cfg.task, goal: this.goal, obs, history: this.history, spans: this.offered(obs), keys: this.keys,
         bannedActionIds: this.bannedIds(obs), doneBanned: this.stepNo <= this.doneBannedUntil,
         ...(retryReason ? { retryReason } : {}),
         ...(this.deps.text ? { canGenerate: true } : {}),
         ...(this.typedText.size > 0 ? { textTyped: true } : {}),
+        ...(held.size > 0 ? { heldText: held } : {}),
       };
       let built: ReturnType<typeof buildStep>;
       try { built = buildStep(input); } catch (e) {
@@ -533,14 +586,15 @@ export class FastRunner {
       }
       // A fill of a field without a value head in the step request asks for its value in a second request.
       if (d.operation === "TYPE_TEXT" && d.target && !(d.target.key in built.meta.values)) {
-        let value: Decision["value"];
-        try { value = await this.askValue(input, d.target.key); } catch (e) {
+        let asked: { value: Decision["value"]; edit: Decision["edit"] };
+        try { asked = await this.askValue(input, d.target.key); } catch (e) {
           // A value request over budget is a page that is too large, as a step request over budget is.
           if (e instanceof BudgetError) return this.blocked(ctx, "page_too_large", `value request for "${d.target.label}": ${e.message}`, [], obs.url);
           throw e;
         }
         if (this.cancelled) return this.cancel(ctx, obs.url);
-        if (value !== undefined) d = { ...d, value };
+        if (asked.value !== undefined) d = { ...d, value: asked.value };
+        if (asked.edit !== undefined) d = { ...d, edit: asked.edit };
       }
       ctx.pageKind = d.pageKind; ctx.pageKindConf = d.pageKindConf;
       ctx.operation = d.operation ? OPERATION_OF[d.operation] ?? null : null;
@@ -569,6 +623,23 @@ export class FastRunner {
         ctx.action = "none"; ctx.value = null; ctx.valueConf = null; ctx.risk = null;
         continue;
       }
+      if (r.kind === "refused") {
+        // Nothing was typed. A focus or selection that moved can be a page that was still busy: observe and decide one
+        // time more. A second refusal blocks with its reason; it is not a changing page.
+        refusals += 1;
+        const label = cutText(r.action.label, LIMITS.nameChars);
+        this.log.warn(`step ${this.stepNo} fill of "${label}" refused (${refusals}/2): ${r.message}`);
+        if (refusals > 1) return this.blocked(ctx, "ambiguous", `the fill of "${label}" was refused: ${r.message}`, [], obs.url);
+        retryReason = `TYPE_TEXT on "${label}" was not executed: ${r.message}. Check the current page and choose the next useful action.`;
+        try {
+          obs = await this.observeSettled();
+        } catch (e) {
+          if (e instanceof StalePage) return this.blocked(ctx, "ambiguous", "page keeps changing", [], obs.url);
+          throw e;
+        }
+        ctx.url = obs.url; ctx.title = obs.title;
+        continue;
+      }
       stale += 1;
       this.log.warn(`step ${this.stepNo} stale page (${stale}/${LIMITS.fastStaleRetries}): ${r.message}`);
       if (r.action && /covered/i.test(r.message)) {
@@ -594,12 +665,16 @@ export class FastRunner {
     }
   }
 
-  /** The value request of one TYPE_TEXT key. Undefined when the field has no value to offer. Throws BudgetError when it is over budget. */
-  private async askValue(input: StepInput, key: string): Promise<Decision["value"]> {
+  /**
+   * The value request of one TYPE_TEXT key, with the mode head of a field that holds text that this run did not type.
+   * Undefined values when the field has no value to offer. Throws BudgetError when it is over budget.
+   */
+  private async askValue(input: StepInput, key: string): Promise<{ value: Decision["value"]; edit: Decision["edit"] }> {
     const built = buildValueStep(input, key);
-    if (!built) return undefined;
+    if (!built) return { value: undefined, edit: undefined };
     for (const c of built.meta.cuts) this.log.warn(`step ${this.stepNo} value request: ${c}`);
-    return readValue((await this.deps.oracle.ask("value", built.state, built.questions)).answers, built.meta, key);
+    const answers = (await this.deps.oracle.ask("value", built.state, built.questions)).answers;
+    return { value: readValue(answers, built.meta, key), edit: readEdit(answers, built.meta, key) };
   }
 
   /**
@@ -636,6 +711,34 @@ export class FastRunner {
     }
     const p = (d.operationProbs["PRESS_ENTER"] ?? 0) + (d.operationProbs["CLICK"] ?? 0) * (c.probs[c.key] ?? c.conf);
     return { target: c, p };
+  }
+
+  /**
+   * After a submit or destructive click: note the step that it opened (OpenStep), when the observation after it shows
+   * one on the same document. The step is a popup of the clicked control, or a new dialog or form with a cancel
+   * control, and it holds a new submit or destructive control.
+   */
+  private noteOpened(action: Action, before: Observation, after: Observation | null, risk: RiskClass): void {
+    if (!after || after.doc !== before.doc || action.node === null || (risk !== "submit" && risk !== "destructive")) return;
+    const had = new Set(before.actions.map((a) => a.node));
+    const forms = new Set(before.actions.map((a) => a.form ?? null));
+    const fresh = after.actions.filter((a) => a.kind === "click" && a.node !== null && a.node !== action.node && !had.has(a.node));
+    const was = before.actions.find((a) => a.node === action.node && a.kind === "click")?.expanded;
+    const popup = was !== "true" && after.actions.some((a) => a.node === action.node && a.kind === "click" && a.expanded === "true");
+    const dialogs = new Set(fresh.filter((a) => a.form != null && !forms.has(a.form) && CANCEL_CONTROL.test(a.label.trim())).map((a) => a.form));
+    const buttons = fresh.filter((a) => (popup || dialogs.has(a.form ?? null)) && riskOf("CLICK", a.label) !== "navigational")
+      .map((a) => ({ node: a.node as number, label: cutText(a.label, 40) }));
+    if (buttons.length === 0) return;
+    this.openStep = { doc: after.doc, click: cutText(action.label, 60), buttons, holds: 0 };
+    this.log.info(`step ${this.stepNo} "${this.openStep.click}" opened a step with ${buttons.map((b) => `"${b.label}"`).join(", ")}`);
+  }
+
+  /** The step that the last submit or destructive click opened, when `obs` still shows one of its controls; else null. */
+  private stillOpen(obs: Observation): OpenStep | null {
+    const o = this.openStep;
+    if (o && o.doc === obs.doc && o.buttons.some((b) => obs.actions.some((a) => a.kind === "click" && a.node === b.node))) return o;
+    this.openStep = null;
+    return null;
   }
 
   /** True when BLOCKED names a sign-in wall or a captcha and the page kind head gives that kind a real probability. */
@@ -676,6 +779,19 @@ export class FastRunner {
     }
     if (d.operation === null || !(d.operation in ACTION_OF)) return rec(this.blocked(ctx, "ambiguous", `no usable operation answer (${d.operation ?? "missing"})`, opTop, obs.url));
 
+    // A submit click that opened a confirmation step did not finish its action. DONE waits until that step is gone.
+    if (d.operation === "DONE" && this.goal === "act" && d.pDone >= GATES.done) {
+      const open = this.stillOpen(obs);
+      if (open) {
+        open.holds += 1;
+        const what = `the click on "${open.click}" opened a step that is still open, with ${open.buttons.slice(0, 3).map((b) => `"${b.label}"`).join(", ")}`;
+        this.log.info(`step ${this.stepNo} DONE@${d.pDone.toFixed(2)} refused (${open.holds}/${LIMITS.openStepHolds}): ${what}`);
+        if (open.holds > LIMITS.openStepHolds) return rec(this.blocked(ctx, "ambiguous", `${what}. The task is not done while that step is open; check the page`, opTop, obs.url));
+        this.doneBannedUntil = Math.max(this.doneBannedUntil, this.stepNo);
+        ctx.gate = `${what}. The click did not finish the action`;
+        return { kind: "reask" };
+      }
+    }
     if (d.operation === "DONE") return rec(await this.finish(d, obs, ctx));
     if (d.operation === "BLOCKED") {
       const kind = BLOCKED_OF[d.blockedReason ?? "other"] ?? "ambiguous";
@@ -795,8 +911,23 @@ export class FastRunner {
     let target = action;
     let at = obs;
     let gate = `ok ${t.conf.toFixed(2)} (${risk})`;
+    let plan: EditPlan | undefined;
     if (op === "TYPE_TEXT") {
-      const typed = await this.typedValue(d, t, action, obs, ctx, risk);
+      // A multiline field that holds text that this run did not type: Jev chose if the new text replaces that text or
+      // goes at its end. A low answer asks again; a replace of that text needs a higher one. There is no fallback to
+      // replace: a document that loses its text must not be saved or sent. A value of none blocks in typedValue.
+      if (action.node !== null && this.heldText(obs).has(action.node) && d.value !== undefined && d.value !== "none") {
+        const e = d.edit;
+        const name = e ? `${e.mode === "replace" ? "replace_all" : e.mode} ${e.conf.toFixed(2)}` : "missing";
+        const need = `the task must say if the new text replaces the text of "${cutText(t.label, 60)}" or goes at its end`;
+        if (!e || e.conf < GATES.editMode) { ctx.gate = `low_mode ${name} < ${GATES.editMode}; ${need}`; return { kind: "reask" }; }
+        if (e.mode === "replace" && e.conf < GATES.editReplace) { ctx.gate = `low_mode ${name} < ${GATES.editReplace}; ${need}`; return { kind: "reask" }; }
+        plan = { mode: e.mode };
+        this.log.info(`step ${this.stepNo} edit ${name} for [${action.id}]`);
+      }
+      this.editPlan = plan;
+      let typed: Typed;
+      try { typed = await this.typedValue(d, t, action, obs, ctx, risk); } finally { this.editPlan = undefined; }
       if (typed.kind === "applied") return typed.applied;
       ({ span: used, obs: at, action: target } = typed);
       if (typed.gate !== null) gate = typed.gate;
@@ -809,6 +940,15 @@ export class FastRunner {
       // History keeps the line breaks: a two-line message that reads as one line made Jev type it again.
       kept = used.secret || !(used.source === "generated" || this.deps.fromAssistant) ? shown : cutLines(this.log.redactor(text), LIMITS.spanChars);
       ctx.value = shown;
+      // An append is not idempotent: Jev sees only the start of a field, not the text that this run added at its end. A
+      // text that this run added, and that the field still ends with, is not typed again.
+      const added = this.appended.get(`${at.doc}|${target.node}`) ?? [];
+      if (plan?.mode === "append" && added.some((x) => loose(x) === loose(text as string)) && loose(target.value ?? "").endsWith(loose(text))) {
+        ctx.gate = `"${cutText(t.label, 60)}" already ends with this text, which this run added; it is not typed again`;
+        this.log.info(`step ${this.stepNo} ${ctx.gate}`);
+        this.history.push({ action: cutText(target.label, LIMITS.nameChars), kind: "fill (already added)", text: kept, page_changed: false, step: this.stepNo, url: at.url, operation: "TYPE_TEXT" });
+        return { kind: "record", rec: this.record(ctx, "skipped", "already added") };
+      }
     }
     if (op === "SELECT") { ctx.value = action.label.split(" → ").slice(1).join(" → ") || action.label; ctx.valueConf = t.conf; }
 
@@ -820,12 +960,18 @@ export class FastRunner {
     const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated);
     if (denied) return { kind: "record", rec: denied };
 
-    const r = await this.execute(op, target, text, shown, at, ctx, kept);
-    // A stale action did not run: the entries that the check dropped on the old observation come back.
-    if (r.kind === "stale") undo();
+    const r = await this.execute(op, target, text, shown, at, ctx, kept, plan);
+    // A stale action or a refused fill did not run: the entries that the check dropped on the old observation come back.
+    if (r.kind === "stale" || (r.kind === "refused" && !r.changed)) undo();
     // A fill whose next observation did not settle ran too: its text is in the page, and a later run must not send it
     // unseen.
-    if (used && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true);
+    if (used && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true, r.appended === true);
+    if (r.kind === "refused" && r.changed) {
+      // The fill stopped after it changed the page: part of the text can be in the field. Block before any save or send.
+      if (used && text !== null) this.filled(used, text, target, at, true, plan?.mode === "append");
+      return { kind: "record", rec: this.blocked(ctx, "ambiguous", `the fill of "${cutText(t.label, 60)}" did not go as planned: ${r.message}. Check the field before any save or send`, [], at.url), ran: true };
+    }
+    if (op === "CLICK" && r.kind === "record" && r.rec.result === "ok") this.noteOpened(target, at, this.held, risk);
     return r;
   }
 
@@ -918,7 +1064,7 @@ export class FastRunner {
     const bound = new Set<number>();
     for (const s of this.spans) if (s.field?.key.startsWith(doc)) bound.add(Number(s.field.key.slice(doc.length)));
     for (const k of this.typedText.keys()) if (k.startsWith(doc)) bound.add(Number(k.slice(doc.length)));
-    const picked = pickFields(obs, action, { banned: new Set([...this.bansFor(obs.url), ...this.stepBans]), bound }, this.log.redactor);
+    const picked = pickFields(obs, action, { banned: new Set([...this.bansFor(obs.url), ...this.stepBans]), bound }, this.log.redactor, this.editPlan);
     const fields = picked.map((p) => p.field);
     const req = buildTextRequest({ id: `t${++this.textRequests}`, task: this.cfg.task, obs, history: this.history, fields, redactor: this.log.redactor });
     this.log.info(`step ${this.stepNo} text request ${req.id}: ${fields.map((f) => `${f.id} "${f.label}"`).join(", ")}`);
@@ -976,8 +1122,10 @@ export class FastRunner {
    * held such text gated, and the entry then shows what the field holds now. A fill that did not stay keeps the
    * pending entries of its field: the page can hold their texts too.
    * `unknown`: the fill ran, but the observation after it did not settle. The entry is pending.
+   * `appended`: the fill added the text at the end of the field's text. It stayed only when the field shows the typed
+   * text: the field held text before, so a value that is not empty shows nothing.
    */
-  private filled(span: Span, typed: string, action: Action, obs: Observation, unknown = false): void {
+  private filled(span: Span, typed: string, action: Action, obs: Observation, unknown = false, appended = false): void {
     const generated = span.source === "generated";
     this.typedInto.set(`${obs.doc}|${action.node}`, typed);
     const mine = (u: Unsent): boolean => u.doc === obs.doc && u.node === action.node;
@@ -992,7 +1140,8 @@ export class FastRunner {
     const was = new Map(obs.texts ?? []);
     const held = same && (after.texts ?? []).some(([n, v]) => (!before.includes(n) || was.get(n) !== v) && holdsText(v, typed));
     // `unknown`: the fill ran, but no observation after it settled. Nothing shows where the text is now.
-    const stayed = !unknown && (!same || !shown || squash(shown.value ?? "") !== "" || held);
+    const shows = appended ? holdsText(shown?.value ?? "", typed) : squash(shown?.value ?? "") !== "";
+    const stayed = !unknown && (!same || !shown || shows || held);
     // A pending entry: the page can hold its text where the control does not show it. A fill that did not stay either
     // does not take that text out of the page, so the pending entry stays next to the new one.
     const kept = stayed ? [] : this.unsent.filter((u) => mine(u) && u.pending);
@@ -1248,8 +1397,11 @@ export class FastRunner {
     return null;
   }
 
-  /** Execute one operation, observe again, push history. `shown` is the redacted text for logs; `kept`, when set, for history. */
-  private async execute(op: string, action: Action | null, text: string | null, shown: string | null, obs: Observation, ctx: StepCtx, kept: string | null = shown): Promise<Applied> {
+  /**
+   * Execute one operation, observe again, push history. `shown` is the redacted text for logs; `kept`, when set, for
+   * history. `plan`: the edit plan of a fill (default replace).
+   */
+  private async execute(op: string, action: Action | null, text: string | null, shown: string | null, obs: Observation, ctx: StepCtx, kept: string | null = shown, plan?: EditPlan): Promise<Applied> {
     const page = this._page as Page;
     ctx.action = ACTION_OF[op] ?? "none";
     if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
@@ -1266,17 +1418,25 @@ export class FastRunner {
       if (!control && op !== "WAIT") return { kind: "record", rec: this.record(ctx, "failed", `${op} is not available on this page`) };
     }
     let next: Observation | null = null;
+    let edited: EditResult | void = undefined;
     try {
       if (op === "PRESS_ENTER") await page.press("Enter", obs);
       else if (op === "GO_BACK") await page.back(LIMITS.settleDomMs);
       else if (op === "WAIT") next = await this.waitForChange(obs, control);
-      else if (control) await page.act(control, obs, text ?? undefined);
+      else if (control) edited = await page.act(control, obs, text ?? undefined, plan);
     } catch (e) {
       if (e instanceof StalePage) {
         const a = control ?? action;
         return a ? { kind: "stale", message: e.message, action: a } : { kind: "stale", message: e.message };
       }
+      if (e instanceof EditRefused && control) return { kind: "refused", message: e.message, changed: e.changed, action: control };
       throw e;
+    }
+    // The mode that ran: an empty field is replaced. A page adapter without a result ran the plan.
+    const appended = op === "TYPE_TEXT" && text !== null && (edited ? edited.mode === "append" : plan?.mode === "append");
+    if (appended && control) {
+      const key = `${obs.doc}|${control.node}`;
+      this.appended.set(key, [...(this.appended.get(key) ?? []), text]);
     }
     if (action) {
       const sig = `${obs.url}|${actionKey(action)}`;
@@ -1288,7 +1448,8 @@ export class FastRunner {
     // so the next click still asks.
     if (op === "CLICK" || op === "PRESS_ENTER") this.unsent = this.unsent.map(({ pending: _pending, ...u }) => u);
 
-    const kind = op === "PRESS_ENTER" ? "key" : op === "GO_BACK" ? "back" : control ? control.kind : "wait";
+    // An append shows in history as "fill (append)": Jev sees only the start of the field, not the end that got the text.
+    const kind = op === "PRESS_ENTER" ? "key" : op === "GO_BACK" ? "back" : appended ? "fill (append)" : control ? control.kind : "wait";
     const entry: FastHistoryEntry = {
       action: cutText(action ? action.label : control && op !== "WAIT" ? control.label : op, LIMITS.nameChars),
       kind, text: kept, page_changed: null, step: this.stepNo, url: obs.url, operation: op,
@@ -1307,7 +1468,13 @@ export class FastRunner {
     entry.page_changed = next.fingerprint !== obs.fingerprint;
     entry.url = next.url;
     this.held = next;
-    return { kind: "record", rec: this.record(ctx, "ok", null) };
+    // An append that lost text of the field, or whose text the field does not show, must not be saved or sent.
+    const lost = appended && edited ? appendLost(text as string, edited) : null;
+    if (lost !== null) {
+      this.log.warn(`step ${this.stepNo} append check failed: ${lost}`);
+      return { kind: "record", rec: this.blocked(ctx, "ambiguous", `the fill of "${cutText(control?.label ?? "", 60)}" did not go as planned: ${lost}. Check the field before any save or send`, [], next.url), ran: true, appended: true };
+    }
+    return { kind: "record", rec: this.record(ctx, "ok", null), ...(appended ? { appended: true as const } : {}) };
   }
 
   private async finish(d: Decision, obs: Observation, ctx: StepCtx): Promise<StepRecord> {

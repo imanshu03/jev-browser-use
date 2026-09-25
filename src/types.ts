@@ -209,6 +209,7 @@ export const GATES = {
   site: 0.70, wantsSearch: 0.60, searchQuery: 0.50, goal: 0.50,
   extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,
   done: 0.50, answerLine: 0.20,       // fast engine: P(DONE) for act goals; answer_line confidence for extract goals
+  editMode: 0.60, editReplace: 0.80,  // fast engine: the mode head of a field that holds text the run did not type; a replace of that text
 } as const;
 
 export const LIMITS = {
@@ -239,6 +240,8 @@ export const LIMITS = {
   confirmTextChars: 6000,         // all unsent text in one dialog; more blocks needs_confirmation
   secretMinChars: 4,              // checkTexts ignores shorter secret values
   genSpanWords: 4,                // with generate offered, after_verb spans above this word count are left out
+  heldValueChars: 2000,           // current_value of a text request field that holds text the run did not type
+  openStepHolds: 2,               // DONE refusals while a step that a submit click opened is still open; then the run blocks
 } as const;
 
 export const ROLE_PRIORITY: Record<string, number> = {

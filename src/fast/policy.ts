@@ -14,7 +14,7 @@ import type { Answers } from "../jev.js";
 import { BudgetError, checkBudget, choiceOf, noulOf } from "../jev.js";
 import type { Goal, PageKind, Span } from "../types.js";
 import { CREDENTIAL_NAME, EXACT_AUTOCOMPLETE, EXACT_VALUE_NAME, LIMITS } from "../types.js";
-import type { Action, FastHistoryEntry, Observation } from "./model.js";
+import type { Action, EditMode, FastHistoryEntry, Observation } from "./model.js";
 
 /** Rules from scripts/proto.ts merged with jev-ultrafast NEXT_ACTION. Shared by the operation head and every target head. */
 export const RULES: string[] = [
@@ -152,6 +152,11 @@ export interface StepInput {
   canGenerate?: boolean;
   /** A fill typed text that the assistant wrote in this run. `typed_values` then leaves out the whole task and the clauses. */
   textTyped?: boolean;
+  /**
+   * Node ids of the multiline fields that hold text that this run did not type (`heldText` in loop.ts). The value head of
+   * such a field asks for the new text only, and a mode head asks if the new text replaces that text or goes at its end.
+   */
+  heldText?: ReadonlySet<number>;
 }
 
 /** Enter cannot submit an observed empty editor. Missing focus is tolerated by older adapters. */
@@ -186,6 +191,8 @@ export interface StepMeta {
   offered: string[];
   /** An offered field can take new text, and its value head offers `generate`. */
   generate: boolean;
+  /** TYPE_TEXT option keys with a mode head (`mode_<key>`): fields that hold text that this run did not type. */
+  modes: Record<string, true>;
 }
 
 export const PAGE_KINDS: Record<PageKind, string> = {
@@ -217,6 +224,21 @@ export const NONE_VALUE = "No offered value fits this field";
 export const VALUE_Q_GEN = "Which offered value should be typed into this field? Choose generate when this field needs new text that no offered value holds word for word. Choose none when no value fits this field.";
 export const GENERATE = "Write new text for this field. Choose this when the goal asks for a message, reply, comment, answer, or description for this field, or when the field needs a part of an offered value, and no offered value holds that text word for word.";
 export const TYPE_TEXT_GEN = "Enter or replace text in an editable field. Another question chooses the value from the offered typed_values, or asks the user's assistant to write new text.";
+// Texts used only while a field that holds text that this run did not type is offered (`StepInput.heldText`). The value
+// head of that field asks for the new text only, and the mode head decides where it goes. With "the value typed into
+// this field", a quoted line for the end of a document got 0.27-0.42 in plugin runs, because no offered value is the
+// document's final text; as "the new text" it got 0.71-0.75.
+export const TYPE_TEXT_HELD = "Enter text in an editable field, replace its text, or add to it. Another question chooses the value from the offered typed_values.";
+export const TYPE_TEXT_HELD_GEN = "Enter text in an editable field, replace its text, or add to it. Another question chooses the value from the offered typed_values, or asks the user's assistant to write new text.";
+export const VALUE_Q_NEW = "Which offered value is the new text to type into this field? Another question decides whether it replaces the current text or goes after it. Choose none when no value fits this field.";
+export const VALUE_Q_NEW_GEN = "Which offered value is the new text to type into this field? Another question decides whether it replaces the current text or goes after it. Choose generate when the new text must be written and no offered value holds it word for word. Choose none when no value fits this field.";
+export const MODE_Q = "The chosen field already holds text. How should the new text go into it?";
+export const MODES = {
+  replace_all: "Replace all of the current text: afterwards the field holds only the new text",
+  append: "Keep the current text and add the new text after it, at the end",
+} as const;
+/** Lines of a field that the mode head shows. */
+export const MODE_LINES = 40;
 export const BLOCKED_VALUE_GEN = "A field needs a password, code, or exact value that only the user can supply";
 
 /**
@@ -317,7 +339,7 @@ const same = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
  * - Every other field offers every task and --var span.
  * - Text written for another field is never offered: it can go only into its own field.
  */
-function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canGenerate: boolean): { question: ChoiceQuestion; head: ValueHead } | null {
+function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canGenerate: boolean, held: boolean): { question: ChoiceQuestion; head: ValueHead } | null {
   const c: ChoiceCriteria = {};
   const head: ValueHead = { spans: {}, generate: canGenerate && canWriteInto(a) };
   for (const s of offeredSpans(a, obs, spans, canGenerate)) {
@@ -329,10 +351,21 @@ function valueHead(key: string, a: Action, obs: Observation, spans: Span[], canG
   if (!gen && Object.keys(c).length === 0) return null;
   if (gen) c["generate"] = GENERATE;
   c["none"] = NONE_VALUE;
-  const field: Record<string, JsonValue> = { question: gen ? VALUE_Q_GEN : VALUE_Q, field: `[${key}] ${cutText(a.label, LIMITS.nameChars)}` };
+  const field: Record<string, JsonValue> = { question: held ? (gen ? VALUE_Q_NEW_GEN : VALUE_Q_NEW) : gen ? VALUE_Q_GEN : VALUE_Q, field: `[${key}] ${cutText(a.label, LIMITS.nameChars)}` };
   if (a.role !== undefined) field["role"] = a.role;
   if ((a.value ?? "") !== "") field["current_value"] = cutText(a.value ?? "", LIMITS.valueChars);
   return { question: choice(field, c), head };
+}
+
+/** The lines of a field value: without zero-width characters, squashed, not blank. */
+export function fieldLines(value: string): string[] {
+  return value.split("\n").map((l) => l.replace(/[​﻿]/g, "").replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+/** The mode head of a field that holds text that this run did not type: replace all of it, or add at its end. */
+function modeHead(key: string, a: Action, task: string): ChoiceQuestion {
+  const lines = fieldLines(a.value ?? "").slice(0, MODE_LINES).map((l) => cutText(l, LIMITS.valueChars));
+  return choice({ question: MODE_Q, goal: task, field: `[${key}] ${cutText(a.label, LIMITS.nameChars)}`, current_lines: lines }, { ...MODES });
 }
 
 /** The spans that the value head of field `a` offers, in order: the text written for it, then the task and --var spans. */
@@ -403,7 +436,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   const { task, goal, obs, history, spans, keys, bannedActionIds, doneBanned } = input;
   const space = actionSpace(obs.actions);
   const rules = rulesFor(goal);
-  const meta: StepMeta = { targets: { CLICK: {}, TYPE_TEXT: {}, SELECT: {} }, values: {}, lines: {}, labels: {}, cuts, offered: [], generate: false };
+  const meta: StepMeta = { targets: { CLICK: {}, TYPE_TEXT: {}, SELECT: {} }, values: {}, lines: {}, labels: {}, cuts, offered: [], generate: false, modes: {} };
 
   const elements = trim.maxElements === null ? space.elements : space.elements.slice(0, trim.maxElements);
   const maxIndex = trim.maxElements === null ? null : elements.length;
@@ -418,10 +451,13 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   const typeHead = heads.TYPE_TEXT;
   const typeKeys = typeHead ? Object.keys(typeHead.criteria) : [];
   meta.generate = input.canGenerate === true && typeKeys.some((k) => { const a = space.targets.TYPE_TEXT[k]; return a !== undefined && canWriteInto(a); });
+  // A field that holds text that this run did not type: the new text can replace that text or go at its end.
+  const held = (a: Action | undefined): boolean => a !== undefined && a.node !== null && input.heldText?.has(a.node) === true;
+  const holds = typeKeys.some((k) => held(space.targets.TYPE_TEXT[k]));
 
   const ops: Record<string, string> = {};
   if (heads.CLICK) ops["CLICK"] = "Click one element: a link, button, tab, menu item, autocomplete suggestion, calendar day, row, or option.";
-  if (heads.TYPE_TEXT) ops["TYPE_TEXT"] = meta.generate ? TYPE_TEXT_GEN : "Enter or replace text in an editable field. Another question chooses the value from the offered typed_values.";
+  if (heads.TYPE_TEXT) ops["TYPE_TEXT"] = holds ? (meta.generate ? TYPE_TEXT_HELD_GEN : TYPE_TEXT_HELD) : meta.generate ? TYPE_TEXT_GEN : "Enter or replace text in an editable field. Another question chooses the value from the offered typed_values.";
   if (heads.SELECT) ops["SELECT"] = "Select an observed dropdown value.";
   if (space.controls["SCROLL_DOWN"]) ops["SCROLL_DOWN"] = "Scroll down to reveal more content.";
   if (space.controls["SCROLL_UP"]) ops["SCROLL_UP"] = "Scroll up.";
@@ -448,10 +484,15 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   for (const k of order) {
     if (only === undefined && Object.keys(meta.values).length >= trim.valueHeads) break;
     const a = space.targets.TYPE_TEXT[k];
-    const v = a ? valueHead(k, a, obs, spans, input.canGenerate === true) : null;
+    const v = a ? valueHead(k, a, obs, spans, input.canGenerate === true, held(a)) : null;
     if (!v) continue;
     questions[`value_${k}`] = v.question;
     meta.values[k] = v.head;
+    // The mode head goes with the value head: a fill of a field without one asks for both in the value request.
+    if (a && held(a)) {
+      questions[`mode_${k}`] = modeHead(k, a, task);
+      meta.modes[k] = true;
+    }
   }
   if (only === undefined) {
     questions["page_kind"] = choice("What kind of page is this?", PAGE_KINDS);
@@ -567,6 +608,8 @@ export interface Decision {
   target?: Target;
   /** A span id, a request for assistant-written text (only when `generate` was offered), or none. */
   value?: { spanId: string; conf: number } | { generate: true; conf: number } | "none";
+  /** The mode head of a chosen field that holds text that this run did not type: replace that text, or add at its end. */
+  edit?: { mode: EditMode; conf: number; probs: Record<string, number> };
   /**
    * The click_target answer when the operation is PRESS_ENTER. Enter and a click on the form's submit button do the
    * same thing and share the operation probability; the loop can click that button when Enter alone is below its gate.
@@ -610,6 +653,8 @@ export function readStep(answers: Answers, meta: StepMeta, input: StepInput, ope
   if (targetOp === "TYPE_TEXT" && d.target) {
     const v = readValue(answers, meta, d.target.key);
     if (v !== undefined) d.value = v;
+    const e = readEdit(answers, meta, d.target.key);
+    if (e !== undefined) d.edit = e;
   }
   if (d.operation === "PRESS_ENTER") {
     const c = readTarget(answers, meta, "CLICK");
@@ -655,6 +700,14 @@ export function readValue(answers: Answers, meta: StepMeta, key: string): Decisi
   if (v.choice === "generate") return head.generate ? { generate: true, conf: v.confidence } : "none";
   const spanId = head.spans[v.choice];
   return v.choice === "none" || spanId === undefined ? "none" : { spanId, conf: v.confidence };
+}
+
+/** The answer of the mode head of one TYPE_TEXT key. Undefined when the field has no mode head or the answer is missing or unknown. */
+export function readEdit(answers: Answers, meta: StepMeta, key: string): Decision["edit"] {
+  const m = meta.modes[key] ? choiceOf(answers, `mode_${key}`) : null;
+  if (!m) return undefined;
+  const mode: EditMode | null = m.choice === "append" ? "append" : m.choice === "replace_all" ? "replace" : null;
+  return mode === null ? undefined : { mode, conf: m.confidence, probs: probsOf(m.probabilities) };
 }
 
 /** Top three probabilities as `{ label, p }`. */

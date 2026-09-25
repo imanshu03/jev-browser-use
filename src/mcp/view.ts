@@ -12,7 +12,7 @@ import { MCP } from "./limits.js";
 
 export const TOOL_NAMES = ["browse", "wait", "continue", "cancel", "close_browser"] as const;
 
-const Field = z.object({ id: z.string(), label: z.string(), role: z.string(), required: z.boolean(), multiline: z.boolean(), max_chars: z.number(), current_value: z.string() });
+const Field = z.object({ id: z.string(), label: z.string(), role: z.string(), required: z.boolean(), multiline: z.boolean(), max_chars: z.number(), current_value: z.string(), mode: z.enum(["append"]).optional() });
 
 export const RunView = z.object({            // key order is fixed; text_request is last
   run: z.string(), status: z.enum(RUN_STATUSES), next: z.string(), task: z.string(),
@@ -158,7 +158,7 @@ export function viewOf(run: Run, now: number, secret: () => string | null): RunV
     const q = p.req;
     view.text_request = {
       request: q.id, goal: text(q.goal), page: { url: flat(q.page.url), title: flat(q.page.title) },
-      fields: q.fields.map((f) => ({ id: f.id, label: flat(f.label), role: flat(f.role), required: f.required, multiline: f.multiline, max_chars: f.max_chars, current_value: text(f.current_value) })),
+      fields: q.fields.map((f) => ({ id: f.id, label: flat(f.label), role: flat(f.role), required: f.required, multiline: f.multiline, max_chars: f.max_chars, current_value: text(f.current_value), ...(f.mode ? { mode: f.mode } : {}) })),
       recent_actions: q.recent_actions.map((a) => ({ action: flat(a.action), kind: flat(a.kind), text: a.text === null ? null : flat(a.text) })),
       ...(p.errors ? { errors: Object.fromEntries(Object.entries(p.errors).map(([k, e]) => [k, flat(e)])) } : {}),
       expires_in_s: secs(p.expiresAt - now),

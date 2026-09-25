@@ -4,9 +4,10 @@
 // Copyright (c) 2026 Browser Use.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
-import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import type { Action, Chrome, EditMode, EditPlan, EditResult, Observation, Page, PageOptions } from "./model.js";
+import { EditRefused, StalePage } from "./model.js";
+import type { EditStep } from "./snapshot.js";
+import { DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, editScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -58,6 +59,14 @@ function docIdOf(raw: RawSnapshot): unknown {
   return Array.isArray(raw.page_key) && raw.page_key.length > 0 ? raw.page_key[0] : raw.url;
 }
 
+/** Whitespace runs become one space; zero-width characters go. For the compare of a field value after a fill. */
+const flat = (s: string): string => s.replace(/[​﻿]/g, "").replace(/\s+/g, " ").trim();
+
+/** The lines of a text that a document fill types: each line with text, in order. */
+export function textLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((l) => l.trim() !== "");
+}
+
 /** Alerts and beforeunload prompts are accepted; confirm and prompt dialogs are dismissed, as the legacy engine does. */
 export function dialogAccepts(type: unknown): boolean {
   return type === "alert" || type === "beforeunload";
@@ -67,7 +76,6 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   const { targetId, sessionId } = await chrome.newTarget("about:blank");
   const client = chrome.client;
   const stats = { browserMs: 0, calls: 0 };
-  const modifiers = process.platform === "darwin" ? 4 : 2;
   let pendingSettle: Action | null | undefined; // undefined = nothing pending; null = generic settle
   let closed = false;
   /** Identity of a document that stayed below readyState "complete" until the cap. The next observe on it does not wait again. */
@@ -142,6 +150,83 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await call("Input.dispatchMouseEvent", { type, x, y, ...extra });
   }
 
+  /** Wait for the editor between two steps of a fill (EDIT_SETTLE_SCRIPT). */
+  async function settleEdit(): Promise<void> {
+    const start = Date.now();
+    await evaluate(EDIT_SETTLE_SCRIPT, true);
+    stats.browserMs += Date.now() - start;
+  }
+
+  /**
+   * One browser editing command on the focused field, carried by a key event that no page handler knows
+   * ("Unidentified"). The page never sees Mod+A, End, or Enter: an editor cannot turn them into a block selection
+   * that moves focus to a hidden input (Plate), a send (a chat composer), or a dropped insert (Lexical). The browser
+   * runs the command and fires beforeinput as it does for a person. Then the editor settles.
+   */
+  async function command(name: string): Promise<void> {
+    await call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Unidentified", code: "", windowsVirtualKeyCode: 0, commands: [name] });
+    await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Unidentified", code: "", windowsVirtualKeyCode: 0 });
+    await settleEdit();
+  }
+
+  /** One step of a fill (`editScript`). A document that went away: StalePage before the first insert, else EditRefused. */
+  async function editStep(node: number, step: "read" | "check" | "blank", mode: EditMode, keep: string[], typed: boolean): Promise<EditStep> {
+    const r = await evaluate(editScript(node, step, mode, keep));
+    if (r.exception || !r.value || typeof r.value !== "object") {
+      if (typed) throw new EditRefused("the page changed during the fill", true);
+      throw new StalePage("Document changed during the fill. Observe again.");
+    }
+    return r.value as EditStep;
+  }
+
+  /**
+   * Type `text` into the field that the click focused, as `plan` says. Each step settles. Before any text goes in, focus
+   * must be on the field and the selection where the mode needs it: the text never goes into another element, such as
+   * a hidden input that took focus. An empty field is replaced. An append joins by the field shape (`FieldShape`).
+   * Throws EditRefused with the reason; without `changed`, nothing was typed.
+   */
+  async function editField(node: number, text: string, plan: EditPlan): Promise<EditResult> {
+    await settleEdit();
+    const read = await editStep(node, "read", plan.mode, [], false);
+    if (!read.ok) throw new EditRefused(`the fill did not start: ${read.why}`);
+    const shape = read.shape ?? (read.kind === "editable" ? "composer" : read.kind);
+    const mode: EditMode = read.blank ? "replace" : plan.mode;
+    // A line break can send in a composer. Refuse before any change.
+    if (mode === "append" && shape === "composer" && /\n/.test(text)) throw new EditRefused("the text has line breaks, and a new line can send the message in this field");
+    await command(mode === "replace" ? "selectAll" : "moveToEndOfDocument");
+    const ready = await editStep(node, "check", mode, [], false);
+    if (!ready.ok) throw new EditRefused(`the fill did not start: ${ready.why}`);
+    if (shape === "document" && (mode === "append" || /\n/.test(text))) {
+      // A document takes one block per line. A line break inside insertText makes a soft break (Plate) or drops the
+      // text after it (Lexical), so each line after the first goes into a new block.
+      const lines = textLines(text);
+      const keep = mode === "append" ? textLines(read.text) : [];
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 || (mode === "append" && !ready.caretBlank)) {
+          await command("insertParagraph");
+          const blank = await editStep(node, "blank", mode, keep, true);
+          if (!blank.ok) throw new EditRefused(`the fill stopped after a new line: ${blank.why}`, true);
+        }
+        await call("Input.insertText", { text: lines[i] as string });
+        if (i < lines.length - 1) { keep.push(lines[i] as string); await settleEdit(); }
+      }
+    } else {
+      let typed = text;
+      if (mode === "append") {
+        if (shape === "textarea") typed = (/\n\s*$/.test(read.text) ? "" : "\n") + text;
+        else if (!ready.caretBlank && !ready.spaceBefore) typed = " " + text;
+      }
+      await call("Input.insertText", { text: typed });
+    }
+    await settleEdit();
+    const after = await editStep(node, "read", mode, [], true);
+    // An input without a selection API (email, number) had no selection check. Its value must be the text now.
+    if (ready.selectable === false && mode === "replace" && !read.blank && flat(after.text) !== flat(text)) {
+      throw new EditRefused(`the field shows "${flat(after.text).slice(0, 60)}" after the fill, not the typed text`, true);
+    }
+    return { mode, shape, before: read.text, after: after.text };
+  }
+
   const page: Page = {
     targetId,
     sessionId,
@@ -203,7 +288,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       return JSON.stringify(r.value) === JSON.stringify(obs.marker);
     },
 
-    async act(action, obs, text) {
+    async act(action, obs, text, edit) {
       // A wait has no target and changes nothing. A page that keeps updating must not turn it into stale retries.
       if (action.kind === "wait") {
         await settleSleep(100);
@@ -235,9 +320,9 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         await mouse("mousePressed", x, y, { button: "left", clickCount: 1 });
         await mouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
         if (action.kind === "fill") {
-          await call("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers, commands: ["selectAll"] });
-          await call("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers });
-          await call("Input.insertText", { text: text as string });
+          // The next observe settles after the fill, also when the fill stopped part way.
+          pendingSettle = action;
+          return await editField(action.node, text as string, edit ?? { mode: "replace" });
         }
       }
       pendingSettle = action;
