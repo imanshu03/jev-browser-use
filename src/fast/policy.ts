@@ -89,12 +89,27 @@ export function actionKey(action: Action): string {
 }
 
 /**
+ * The chip-field evidence of a fill action (see `TokenFacts`). Strong: this run saw the field add a value as a chip, or
+ * the field is a combobox with a multiselect listbox. Weak: the chip shape, elements with a remove control before the
+ * field in its box. Null without evidence. A popup that opens next to the field with a fill is weak evidence too; the
+ * loop checks that one, because it needs the observation before the fill.
+ */
+export function tokenEvidence(a: Action): "strong" | "weak" | null {
+  const t = a.token;
+  if (a.kind !== "fill" || !t) return null;
+  if (t.learned || t.multi) return "strong";
+  return t.chips.length > 0 ? "weak" : null;
+}
+
+/**
  * True for a field that may take assistant-written text: a plain text box (a textarea, a contenteditable,
  * or an input of type text) whose label and autocomplete token do not ask for a credential or an exact
- * value such as a recipient, an amount, or a search query.
+ * value such as a recipient, an amount, or a search query. A chip field with strong evidence takes exact values
+ * (recipients, participants, tags) and never assistant-written text.
  */
 export function canWriteInto(a: Action): boolean {
   if (a.kind !== "fill" || a.role !== "textbox") return false;
+  if (tokenEvidence(a) === "strong") return false;
   if (a.inputType !== undefined && a.inputType !== "text") return false;
   if (a.autocomplete !== undefined && EXACT_AUTOCOMPLETE.test(a.autocomplete)) return false;
   const label = a.label.replace(/\s+/g, " ").trim();

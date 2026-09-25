@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
 import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
-import type { Action, Observation, Page, UnsentText } from "../../src/fast/model.js";
+import type { Action, Observation, Page, Popup, TokenFacts, UnsentText } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
 import type { RunnerHints, TextReply, TextSource } from "../../src/io.js";
 import { emptyResult } from "../../src/io.js";
@@ -3605,5 +3605,297 @@ describe("fills that keep a field's text, refused fills, and a step that a submi
       const menu = obs(URL, [el("e1", "click", "Options", "button", { node: 1, expanded: "true" }), el("e2", "click", "Save as PDF", "menuitem", { node: 50 })], "x", { doc: 5 });
       expect((await run(nav, menu, "Options")).outcome).toBe("done");
     });
+  });
+});
+
+describe("chip (token) fields", () => {
+  const UPLOAD = "https://app.example/upload";
+  const DOC = 1727000000002.5;
+  const FIRST = "Search org members or type a name...";
+  const SUBMIT = "Submit & Finalize (1 file)";
+  const CLOSED: Popup = { open: false, text: "", picks: [], busy: false };
+  type StepState = { retry_reason?: string; recent_actions: { action: string; kind: string; text: string | null; page_changed: boolean | null }[] };
+  type Decide = (q: Questions, state: StepState) => PartialAnswers;
+  interface ChipState {
+    draft: string; title: string; chips: string[]; focus: number | null;
+    /** The popup that a fill of the chip field opens, and the popup that shows now. */
+    popup: Popup | null; open: Popup | null;
+    /** The field takes a script Enter (React widgets). False: it reads only trusted keys. */
+    scriptEnter: boolean;
+    /** Enter adds the first option of an open list, not the typed text (react-select). */
+    enterPicks?: boolean;
+    /** The draft goes away when another control takes focus (react-select). */
+    clearOnBlur?: boolean;
+    multi?: boolean;
+    /** The form of the submit button. */
+    submitForm?: number;
+    /** The popup of the chip field stays open when Title takes focus, and it lies next to Title too. */
+    lingers?: boolean;
+    /** The options are role=option in a list with no form, and the first one is highlighted: Enter picks it (focus.enterOption). */
+    highlight?: boolean;
+    submitted: string | null;
+  }
+
+  /** The upload form: the chip field (node 1, named by its placeholder until it has a chip), Title, Submit, a Help link, and the popup options. */
+  function chipPage(s: ChipState): Observation {
+    const pop = s.focus === 1 ? s.open : null;
+    const token: TokenFacts = {
+      items: [[90, "Meeting Participants (Optional)", 0], ...s.chips.map((c, i): [number, string, number] => [100 + i, `${c} Remove participant`, 2])],
+      chips: s.chips.map((c) => `${c} Remove participant`),
+      ...(s.multi ? { multi: true as const } : {}),
+      ...(pop?.open ? { popup: true as const } : {}),
+    };
+    const actions = [
+      el("e1", "fill", s.chips.length === 0 ? FIRST : "textbox", "textbox", { node: 1, value: s.draft, form: 3, inputType: "text", token }),
+      el("e2", "fill", "Title (Optional)", "textbox", { node: 2, value: s.title, form: 3, inputType: "text",
+        token: { items: [[91, "Title (Optional)", 0]], chips: [], ...(s.lingers && s.focus === 2 && s.open?.open ? { popup: true as const } : {}) } }),
+      el("e3", "click", "Open Title (Optional)", "textbox", { node: 2, form: 3 }),
+      el("e4", "click", SUBMIT, "button", { node: 4, form: s.submitForm ?? 3 }),
+      el("e5", "click", "Help", "link", { node: 5, form: null }),
+      ...(pop?.picks ?? []).map((label, i) => el(`e${6 + i}`, "click", label, s.highlight ? "option" : "button", { node: 60 + i, form: s.highlight ? null : 9 })),
+    ];
+    const f = actions.find((a) => a.kind === "fill" && a.node === s.focus);
+    const values = ([[1, s.draft], [2, s.title]] as [number, string][]).filter(([, v]) => v.trim() !== "");
+    const text = ["Upload Source", ...s.chips, pop?.text ?? "", s.submitted !== null ? `Submitted: ${s.submitted}` : ""].filter(Boolean).join("\n");
+    return obs(UPLOAD, actions, text, {
+      doc: DOC, filled: values.map(([n]) => n), texts: values,
+      focus: f ? {
+        node: f.node as number, label: f.label, role: "textbox", submitLabel: SUBMIT, editable: true, value: f.value ?? "", form: 3, submitDefault: SUBMIT, multiline: false,
+        ...(s.highlight && f.node === 1 && pop?.picks[0] ? { enterOption: { node: 60, label: pop.picks[0] } } : {}),
+      } : null,
+    });
+  }
+
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as StepState) : {});
+  };
+  const fill = (label: string, id: string): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.8 }, type_text_value: { choice: id, confidence: 0.9 } });
+  const click = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const enter: Decide = () => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.85 } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const VARS = { a: "ann@example.com", b: "bob@example.com", title: "Weekly sync" };
+
+  function chips(steps: Decide[], state: Partial<ChipState> = {}, over: Partial<RunConfig> = {}, opts: SetupOpts & { popups?: (n: number) => Popup } = {}) {
+    const s: ChipState = { draft: "", title: "", chips: [], focus: null, popup: null, open: null, scriptEnter: true, submitted: null, ...state };
+    let reads = 0;
+    const add = (text: string): void => { s.chips.push(text); s.draft = ""; s.open = null; };
+    const t = setup("add the participants, set the title, then submit", {
+      pages: { u: chipPage(s) }, start: "u",
+      popup: (a, _current, focus) => {
+        if (focus && a.node !== null) s.focus = a.node;
+        if (opts.popups) return opts.popups(reads++);
+        return (s.focus === 1 ? s.open : null) ?? CLOSED;
+      },
+      commit: (a) => {
+        if (s.focus !== a.node) return { skipped: "focus" };
+        if (!s.scriptEnter || s.draft.trim() === "") return { prevented: false };
+        add(s.enterPicks && s.open?.picks[0] ? s.open.picks[0] : s.draft);
+        return { prevented: true };
+      },
+    }, seq(...steps), { url: UPLOAD, vars: VARS, maxSteps: 10, ...over }, opts);
+    t.page.observe = async () => { t.page.observes += 1; return chipPage(s); };
+    const act = t.page.act.bind(t.page);
+    t.page.act = async (a, o, text) => {
+      await act(a, o, text);
+      if (s.clearOnBlur && s.focus === 1 && a.node !== 1) s.draft = "";
+      if (a.kind === "fill" && a.node === 1) { s.draft = text ?? ""; s.focus = 1; s.open = s.popup; }
+      else if (a.node === 2) { if (a.kind === "fill") s.title = text ?? ""; s.focus = 2; }
+      else if (a.node === 4) { s.submitted = [...s.chips, s.title].join(" | "); s.focus = null; }
+      else if (a.node === 5) s.focus = null;
+      else if (a.node !== null && a.node >= 60) { add(a.label); s.focus = 1; }
+    };
+    t.page.press = async (key) => {
+      t.page.calls.push({ op: "press", key });
+      if (s.focus === 1 && s.draft.trim() !== "") add(s.enterPicks && s.open?.picks[0] ? s.open.picks[0] : s.draft);
+      else if (s.focus === 2) s.submitted = [...s.chips, s.title].join(" | ");
+    };
+    return { ...t, state: s };
+  }
+  const ops = (t: { page: { calls: { op: string; id?: string; kind?: string; text?: string }[] } }) => t.page.calls.filter((c) => c.op !== "navigate")
+    .map((c) => (c.op === "act" ? `${c.kind} ${c.id}${c.text !== undefined ? ` ${c.text}` : ""}` : c.op === "commit" ? `commit ${c.id}` : c.op));
+  const stepReqs = (t: { oracle: { requests: { name: string; state: unknown; questions: Questions }[] } }) =>
+    t.oracle.requests.filter((r) => r.name === "step").map((r) => ({ state: r.state as StepState, questions: r.questions }));
+  const NO_MEMBERS: Popup = { open: true, text: "No members found", picks: [], busy: false };
+  const MEMBER = "AL Ann Lee ann.lee@parallelloop.ai";
+
+  it("a field that added a value as a chip after Enter is learned; the next fill adds its value with a script Enter before Title", async () => {
+    const t = chips([fill(FIRST, "v_a"), enter, fill("textbox", "v_b"), fill("Title (Optional)", "v_title"), fill("Title (Optional)", "v_title"), click(SUBMIT), finish], { popup: NO_MEMBERS });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "press", "fill e1 bob@example.com", "commit e1", "fill e2 Weekly sync", "click e4"]);
+    expect(t.state.submitted).toBe("ann@example.com | bob@example.com | Weekly sync");
+    expect(t.log.lines.some((l) => /chip field: "Search org members or type a name\.\.\." added a value as a chip/.test(l))).toBe(true);
+    // The script Enter is in the history that Jev sees. The page changed, so the step asks again with no retry reason.
+    const after = stepReqs(t)[4]!.state;
+    expect(after.recent_actions.at(-1)).toEqual({ action: 'Enter in "textbox"', kind: "key", text: "bob@example.com", page_changed: true });
+    expect(after.retry_reason).toBeUndefined();
+    expect(r.steps.map((s) => `${s.action}:${s.result}`)).toEqual(["fill:ok", "press_key:ok", "fill:ok", "fill:ok", "click:ok", "none:done"]);
+    // The field had no evidence of a chip field yet: Jev's first Enter was a trusted Enter with the submit risk.
+    expect(r.steps[1]).toMatchObject({ risk: "submit" });
+  });
+
+  it("with options in the popup, code never presses Enter: a hint bans the fill for the re-ask, and Jev clicks the member", async () => {
+    const t = chips([fill("textbox", "v_n"), fill("Title (Optional)", "v_title"), click(MEMBER), fill("Title (Optional)", "v_title"), click(SUBMIT), finish],
+      { multi: true, chips: ["bob@example.com"], popup: { open: true, text: MEMBER, picks: [MEMBER], busy: false } }, { vars: { ...VARS, n: "Ann Lee" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 Ann Lee", "click e6", "fill e2 Weekly sync", "click e4"]);
+    expect(t.state.submitted).toBe(`bob@example.com | ${MEMBER} | Weekly sync`);
+    const reask = stepReqs(t)[2]!;
+    expect(reask.state.retry_reason).toContain('"textbox" holds "Ann Lee", which is not added yet. If it belongs there, click its matching suggestion or press Enter in that field');
+    expect(() => idx(reask.questions, "type_text_target", "Title (Optional)")).toThrow();
+  });
+
+  it("weak evidence (chips that the run did not add): one hint and no ban; the second submit goes on", async () => {
+    const t = chips([fill("textbox", "v_q"), click(SUBMIT), click(SUBMIT), finish], { chips: ["is:open"], scriptEnter: false }, { vars: { q: "login bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 login bug", "click e4"]);
+    expect(stepReqs(t)[2]!.state.retry_reason).toContain('"textbox" holds "login bug", which is not added yet');
+    expect(idx(stepReqs(t)[2]!.questions, "click_target", SUBMIT)).toBeTruthy();
+    expect(t.log.lines.filter((l) => /chip gate \(weak\)/.test(l))).toHaveLength(1);
+  });
+
+  it("a strong value that the field does not take: the hint bans the submit, and DONE then blocks; the form never goes out", async () => {
+    const t = chips([fill("textbox", "v_q"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], scriptEnter: false }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked).toMatchObject({ kind: "ambiguous", hint: 'typed value not added: "textbox" holds "bug", which is not added yet. The form is not sent without it' });
+    expect(ops(t)).toEqual(["fill e1 bug", "commit e1"]);
+    expect(t.state.submitted).toBeNull();
+    expect(() => idx(stepReqs(t)[2]!.questions, "click_target", SUBMIT)).toThrow();
+  });
+
+  it("a lost value (the page cleared the draft on blur) still gates the submit, then blocks", async () => {
+    const t = chips([fill("textbox", "v_q"), click("Help"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], clearOnBlur: true }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(stepReqs(t)[3]!.state.retry_reason).toContain('"textbox" lost "bug": the field is empty, and no chip holds it. If it belongs there, type it again, then click its matching suggestion or press Enter in that field');
+    expect(r.blocked?.hint).toContain('typed value not added: "textbox" lost "bug"');
+    expect(t.state.submitted).toBeNull();
+  });
+
+  it("a fill that replaces a value not added yet adds that value first; a submit adds the last one", async () => {
+    const t = chips([fill("textbox", "v_a"), fill("textbox", "v_b"), fill("textbox", "v_b"), click(SUBMIT), click(SUBMIT), finish], { multi: true, chips: ["carol@example.com"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "commit e1", "fill e1 bob@example.com", "commit e1", "click e4"]);
+    expect(t.state.submitted).toBe("carol@example.com | ann@example.com | bob@example.com | ");
+  });
+
+  it("a popup that the chip field showed before a fill of Title, and that lies next to Title after it, did not open with that fill", async () => {
+    const t = chips([fill(FIRST, "v_a"), enter, fill("Title (Optional)", "v_title"), click(SUBMIT), finish], { popup: NO_MEMBERS, lingers: true });
+    // The page keeps the popup open after the Enter (a late search result), so it is open when Title takes focus.
+    const press = t.page.press.bind(t.page);
+    t.page.press = async (key, o) => { await press(key, o); t.state.open = NO_MEMBERS; };
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "press", "fill e2 Weekly sync", "click e4"]);
+    expect(t.log.lines.some((l) => /chip gate/.test(l))).toBe(false);
+  });
+
+  it("a draft that this run did not type and a secret never gate; a submit of another form does not, DONE does", async () => {
+    const preset = chips([click(SUBMIT), finish], { multi: true, chips: ["x"], draft: "carol@example.com", focus: 1 });
+    expect((await preset.runner.run()).outcome).toBe("done");
+    expect(ops(preset)).toEqual(["click e4"]);
+    const other = chips([fill("textbox", "v_b"), click(SUBMIT), finish], { multi: true, chips: ["x"], submitForm: 4 });
+    expect((await other.runner.run()).outcome).toBe("done");
+    expect(ops(other)).toEqual(["fill e1 bob@example.com", "click e4", "commit e1"]);
+    const secret = chips([fill("textbox", "v_token"), click(SUBMIT), finish], { multi: true, chips: ["x"] }, { vars: { token: "s3cr3t-value" } });
+    expect((await secret.runner.run()).outcome).toBe("done");
+    expect(ops(secret)).toEqual(["fill e1 s3cr3t-value", "click e4"]);
+  });
+
+  it("Jev's Enter in a strong chip field is a script Enter with the data_entry risk; a field that ignores it gets the trusted Enter", async () => {
+    const script = chips([fill("textbox", "v_b"), enter, finish], { multi: true, chips: ["x"] }, { confirm: "always" });
+    const r = await script.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(script)).toEqual(["fill e1 bob@example.com", "commit e1"]);
+    expect(r.steps[1]).toMatchObject({ operation: "PRESS_KEY", action: "press_key", value: "Enter", risk: "data_entry", gate: "ok 0.85 (data_entry) script Enter added", result: "ok" });
+    expect(stepReqs(script)[2]!.state.recent_actions.at(-1)).toEqual({ action: "PRESS_ENTER", kind: "key", text: null, page_changed: true });
+    // A search box with filter chips: the script Enter does nothing, so Jev's Enter reaches the page as a trusted key.
+    const trusted = chips([fill("textbox", "v_b"), enter, finish], { multi: true, chips: ["x"], scriptEnter: false });
+    const r2 = await trusted.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(ops(trusted)).toEqual(["fill e1 bob@example.com", "commit e1", "press"]);
+    expect(r2.steps[1]).toMatchObject({ risk: "submit", result: "ok" });
+    expect(trusted.state.chips).toEqual(["x", "bob@example.com"]);
+  });
+
+  it("Jev's Enter with options open that adds another value than the typed one blocks", async () => {
+    const t = chips([fill("textbox", "v_q"), enter, finish],
+      { multi: true, chips: ["frontend"], enterPicks: true, popup: { open: true, text: "debug\nCreate \"bug\"", picks: ["debug", "Create \"bug\""], busy: false } }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toMatch(/^Enter in "textbox" added "debug[^"]*", not "bug"$/);
+  });
+
+  it("a click that picks the pending value does not wait for it: a 'Create' option, and the option that Enter picks", async () => {
+    // 'Create "bug"' has the submit risk ("create"). Its list has no form, so every form is in scope, and the entry of
+    // "bug" gated the click that adds it.
+    const create = chips([fill("textbox", "v_q"), click('Create "bug"'), finish],
+      { multi: true, chips: ["frontend"], highlight: true, popup: { open: true, text: 'Create "bug"\ndebug', picks: ['Create "bug"', "debug"], busy: false } }, { vars: { q: "bug" } });
+    expect((await create.runner.run()).outcome).toBe("done");
+    expect(ops(create)).toEqual(["fill e1 bug", "click e6"]);
+    expect(create.log.lines.some((l) => /chip gate/.test(l))).toBe(false);
+    // Enter with a highlighted option: the trusted Enter, whose label names the option. No script Enter.
+    const member: Partial<ChipState> = { multi: true, chips: ["x"], highlight: true, enterPicks: true, popup: { open: true, text: MEMBER, picks: [MEMBER], busy: false } };
+    const vars = { vars: { ...VARS, n: "Ann Lee" } };
+    const pick = chips([fill("textbox", "v_n"), enter, finish], member, vars);
+    const r = await pick.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(pick)).toEqual(["fill e1 Ann Lee", "press"]);
+    expect(r.steps[1]).toMatchObject({ risk: "submit", result: "ok" });
+    expect(pick.state.chips).toEqual(["x", MEMBER]);
+    // Enter below its gate becomes a click on the option that it picks, at the Enter's submit risk. The entry of "Ann
+    // Lee" does not gate that click.
+    const low: Decide = (q) => ({
+      page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.45, probabilities: { PRESS_ENTER: 0.45, CLICK: 0.45, DONE: 0.1 } },
+      click_target: { choice: idx(q, "click_target", MEMBER), confidence: 0.9, probabilities: { [idx(q, "click_target", MEMBER)]: 0.95 } },
+    });
+    const clicked = chips([fill("textbox", "v_n"), low, finish], member, vars);
+    const r2 = await clicked.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(ops(clicked)).toEqual(["fill e1 Ann Lee", "click e6"]);
+    expect(r2.steps[1]).toMatchObject({ operation: "CLICK", risk: "submit", result: "ok" });
+    // A submit button of the form of the field still waits for the value.
+    const submit = chips([fill("textbox", "v_q"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], scriptEnter: false }, { vars: { q: "Submit" } });
+    expect((await submit.runner.run()).outcome).toBe("blocked");
+    expect(submit.state.submitted).toBeNull();
+  });
+
+  it("Enter in another field of the form runs the gate first: the script Enter goes to the chip field, then Jev asks again", async () => {
+    const t = chips([fill("textbox", "v_b"), click("Open Title (Optional)"), enter, click(SUBMIT), finish], { multi: true, chips: ["x"], title: "Weekly sync" });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 bob@example.com", "click e3", "commit e1", "click e4"]);
+    // The gate focused the chip field for its script Enter.
+    expect(t.page.popups[0]).toBe(true);
+    expect(t.state.submitted).toBe("x | bob@example.com | Weekly sync");
+  });
+
+  it("the gate reads the popup once, on a page that settled after its input: a popup that still loads gets the hint, not a script Enter", async () => {
+    const searching: Popup = { open: true, text: "Searching members...", picks: [], busy: true };
+    const listed: Popup = { open: true, text: MEMBER, picks: [MEMBER], busy: false };
+    const t = chips([fill("textbox", "v_n"), fill("Title (Optional)", "v_title"), click(MEMBER), fill("Title (Optional)", "v_title"), click(SUBMIT), finish],
+      { multi: true, chips: ["bob@example.com"], popup: listed }, { vars: { ...VARS, n: "Ann Lee" } }, { popups: () => searching });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    // One read, with focus: a script Enter could follow. The popup loads, so there is no script Enter. The hint bans
+    // the Title fill, and Jev clicks the member.
+    expect(t.page.popups).toEqual([true]);
+    expect(ops(t)).toEqual(["fill e1 Ann Lee", "click e6", "fill e2 Weekly sync", "click e4"]);
+    expect(stepReqs(t)[2]!.state.retry_reason).toContain('"textbox" holds "Ann Lee", which is not added yet');
+  });
+
+  it("a learned chip field takes no assistant-written text, and its value head offers no generate", async () => {
+    const t = chips([fill("textbox", "v_b"), finish], { multi: true, chips: ["x"] }, {}, { text: fakeText([]) });
+    await t.runner.run();
+    const q = stepReqs(t)[0]!.questions;
+    expect(Object.keys((valueQ(q, "textbox") as ChoiceQuestion).criteria)).not.toContain("generate");
+    expect(Object.keys((valueQ(q, "Title (Optional)") as ChoiceQuestion).criteria)).toContain("generate");
+    expect(JSON.stringify(t.oracle.requests)).not.toMatch(/"(items|chips|multi|learned)":/);
   });
 });

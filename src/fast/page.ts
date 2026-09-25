@@ -4,11 +4,11 @@
 // Copyright (c) 2026 Browser Use.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import type { Action, Chrome, EditMode, EditPlan, EditResult, Observation, Page, PageOptions } from "./model.js";
+import type { Action, Chrome, EditMode, EditPlan, EditResult, Observation, Page, PageOptions, Popup } from "./model.js";
 import { LIMITS } from "../types.js";
 import { EditRefused, StalePage } from "./model.js";
 import type { EditStep } from "./snapshot.js";
-import { CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, editScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import { CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, pageKeyGuardScript, popupScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -241,6 +241,14 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await evaluate(settleScript(null), true);
   }
 
+  /** The settle of an input now, not at the next observe: the causal settle when the arm held, else the frame settle. */
+  async function settleNow(): Promise<void> {
+    if (causalPending) {
+      causalPending = false;
+      await causalSettle();
+    } else await evaluate(settleScript(null), true);
+  }
+
   /** Wait for the editor between two steps of a fill (EDIT_SETTLE_SCRIPT). */
   async function settleEdit(): Promise<void> {
     await evaluate(EDIT_SETTLE_SCRIPT, true);
@@ -436,6 +444,38 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       await call("Input.dispatchKeyEvent", { ...base, type: "keyDown", ...(def.text !== undefined ? { text: def.text, unmodifiedText: def.text } : {}) });
       await call("Input.dispatchKeyEvent", { ...base, type: "keyUp" });
       pendingSettle = null;
+    },
+
+    async popup(action, focus) {
+      if (typeof action.node !== "number") return null;
+      const read = async (move: boolean): Promise<Popup | null> => {
+        const r = await evaluate(popupScript(action, move));
+        return r.exception || r.value === null ? null : (r.value as Popup);
+      };
+      // The observation of the decision settled after the last input, so one read is enough. Focus is an input: a page
+      // can open the popup or start a search on it. The causal settle follows it, as it follows a click; then read again.
+      if (focus !== true) return read(false);
+      await arm(null);
+      const first = await read(true);
+      await settleNow();
+      return first === null ? null : read(false);
+    },
+
+    async commit(action, obs) {
+      // The key goes to the field the decision saw: same document, URL, values, and the same field guard.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Field changed since this decision. Observe again.");
+      // The widget adds the chip in its key handler and can then search or render late: the causal settle follows.
+      await arm(null);
+      const r = await evaluate(commitScript(action));
+      const res = r.exception || r.value === null || typeof r.value !== "object" ? null : (r.value as { prevented: boolean } | { skipped: "gone" | "focus" });
+      if (res !== null && "prevented" in res) {
+        pendingSettle = null;
+        return res;
+      }
+      // No key went out: the arm ends here, not at the next observe.
+      await settleNow();
+      if (res === null) throw new StalePage("Document changed during evaluation");
+      return res;
     },
 
     async back(timeoutMs) {

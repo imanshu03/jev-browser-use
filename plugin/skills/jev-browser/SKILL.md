@@ -36,6 +36,8 @@ The user can let Jev act with no dialogs for one task. Then every click, Enter, 
 - When the run ends, tell the user each action in `result.unattended`: the action, the host, and each text. A text with `left: true` left the page with that action. A `destructive` or `submit` action can send its texts also with `left: false`, because some pages keep the text in the field after a send. An entry with `result: "failed"` may have run. `replaced_chars` tells how many characters of old text a fill replaced.
 - Password and one-time-code fields still stop the run, because they need a value that only the user can type. A field that needs an exact value that the user did not give also stops the run. When no person can sign in, a sign-in page stops the run at once.
 
+If `result.blocked.hint` starts with `typed value not added`, the form was not sent. A recipients, participants, or tags field still holds a value that it did not add as a chip. Tell the user the field and the value from the hint. Put each recipient, participant, or tag in quotes in the task: Jev types them. You do not write them.
+
 ## Write text
 
 - Write the text that the task asks for, as the user would write it. Write only the field text, with no notes and no placeholders.

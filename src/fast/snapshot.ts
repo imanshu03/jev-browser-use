@@ -9,7 +9,8 @@
 // counter, so element node ids stay the same as in the reference. The focus also carries its `form` and the
 // name of the form's default button, `submitDefault`, and `multiline`, for the Enter-to-click rule, and
 // `enterOption`, the option that Enter picks. The snapshot also returns `busy`. The settle after a fill, a key, or a
-// click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP.
+// click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP. A
+// single-line text input also carries its chip facts, `token` (see TokenFacts in model.ts); they never reach Jev either.
 import { COMPOSER_SEND_WORDS, LIMITS } from "../types.js";
 import type { Action } from "./model.js";
 
@@ -23,6 +24,10 @@ const MARKED = '[data-selected="true"],[data-highlighted]:not([data-highlighted=
 const BUSY = '[aria-busy="true"],[role="progressbar"]:not([aria-valuenow])';
 /** In-page source: the option texts of a popup, the signature that shows a change of its options. */
 const POPUP_SIG = `p=>[...p.querySelectorAll(${JSON.stringify(OPTION)})].map(o=>o.textContent).join('\\n').slice(0,4000)`;
+/** Popups next to a chip field: the suggestion popups, dialogs (a popover of search results), and Radix popper wrappers. */
+const NEAR_POPUP = `${POPUP},[role="dialog"],[data-radix-popper-content-wrapper]`;
+/** The names of a send or submit control, which ends the box of a chip field: COMPOSER_SEND_WORDS and "submit". */
+const BOX_SEND = String.raw`\b(?:${[...COMPOSER_SEND_WORDS, "submit"].join("|")})\b`;
 
 /**
  * Read visible content and controls in one evaluation. Node identity lives in `window.__jevFast`:
@@ -140,6 +145,96 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const f=cache.focus(), e=document.activeElement, pick=f?.editable ? cache.pick(e) : null;
     return [cache.pageKey(),f,f ? cache.guard(e) : null,pick ? pick.pops.map(p=>(p.innerText||'').slice(0,4000)) : null];
   };
+  // Chip (token) fields. See TokenFacts in model.ts. Items have their own id counter, so element node ids do not change.
+  const items = cache.items ||= {ids:new WeakMap(), next:1};
+  const itemId = e => {
+    if (!items.ids.has(e)) items.ids.set(e,items.next++);
+    return items.ids.get(e);
+  };
+  const OTHER_FIELD='input:not([type="hidden"]),textarea,select,[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"],'+
+    '[role="textbox"],[role="combobox"],[role="searchbox"],[role="spinbutton"],[role="checkbox"],[role="radio"],[role="switch"],[role="slider"]';
+  const REMOVE=/^(?:remove|delete|clear|deselect|unselect|dismiss)\b|^[x×✕✖⨯]$/i, SEND=new RegExp(${JSON.stringify(BOX_SEND)},'i');
+  const NEAR=${JSON.stringify(NEAR_POPUP)};
+  // The own box of a single-line text input: the highest ancestor, up to 3 levels up, that holds no other field and no
+  // send or submit control. It does not go past a table cell or row. Null for other fields, and when the parent already
+  // holds another field or such a control.
+  cache.tokenBox=e=>{
+    if (e?.tagName!=='INPUT' || !['text','email','search','url','tel'].includes(e.type) || e.getAttribute('aria-multiline')==='true') return null;
+    let box=null;
+    for (let a=e.parentElement,d=0; a && d<3 && a!==document.body; a=a.parentElement,d++) {
+      if ([...a.querySelectorAll(OTHER_FIELD)].some(x=>x!==e && !x.contains(e)) ||
+        [...a.querySelectorAll('button,input[type="submit"],input[type="image"],[role="button"]')]
+          .some(b=>b.form && ['submit','image'].includes(b.type) || SEND.test(name(b)))) break;
+      box=a;
+      if (a.matches('td,th,tr,[role="cell"],[role="gridcell"],[role="row"]')) break;
+    }
+    return box;
+  };
+  // 2: a remove name; 1: an icon-only button; 0: another control.
+  const removeKind=b=>{
+    const n=(b.getAttribute('aria-label')||b.getAttribute('title')||b.textContent||'').trim();
+    return REMOVE.test(n) ? 2 : n==='' && b.querySelector('svg,img') ? 1 : 0;
+  };
+  const ITEM_ATTR=/^(?:title|aria-label|data-[\w-]*(?:value|mail|name|label|title|text|user|tag)[\w-]*)$/i;
+  // Text nodes, not innerText: CSS text-transform changes innerText. The text of a remove control is left out. An item
+  // with more than 40 elements is not a chip (a message list before a chat input): it gets its cut text only.
+  const tokenItem=(x,field)=>{
+    if (x.getElementsByTagName('*').length>40) return [itemId(x),(x.textContent||'').slice(0,400).replace(/\s+/g,' ').trim().slice(0,200),0];
+    const controls=[x,...x.querySelectorAll('button,[role="button"]')].filter(b=>b.matches('button,[role="button"]'));
+    const kinds=controls.map(removeKind), removers=controls.filter((b,i)=>kinds[i]>0);
+    const words=[], walker=document.createTreeWalker(x,NodeFilter.SHOW_TEXT); let n;
+    while ((n=walker.nextNode())) { const t=n.textContent.trim(); if (t && !removers.some(b=>b.contains(n))) words.push(t); }
+    const own=words.join(' ').replace(/\s+/g,' ').trim(), attrs=[];
+    for (const y of [x,...x.querySelectorAll('*')].slice(0,40))
+      for (const at of y.attributes) if (ITEM_ATTR.test(at.name) && at.value.trim()) attrs.push(at.value.trim());
+    let kind=Math.max(0,...kinds);
+    if (x.matches('[data-tag-index]') || x.querySelector('[data-tag-index]')) kind=2;
+    if (x.matches('label,legend') || x.querySelector('label,legend') || own.toLowerCase()===field.toLowerCase()) kind=0;
+    return [itemId(x),[own,...attrs].join(' ').replace(/\s+/g,' ').slice(0,200),kind];
+  };
+  // The open popups next to a field: the elements it controls; and, only while it has focus, a listbox, menu, or dialog
+  // at its box (48 px up or down) and a positioned element with text after the field in its box (an inline suggestion
+  // list). A popup found by its place belongs to the focused field: a list under one field also lies next to the field
+  // below it. A popup in its closing state (data-state="closed" during the exit animation) is not open.
+  cache.popupsOf=(e,box,all)=>{
+    const out=[];
+    const add=p=>{
+      if (p?.isConnected && !p.contains(e) && visible(p) && !p.closest('[data-state="closed"]') && !p.querySelector(':scope > [data-state="closed"]') &&
+        !out.some(o=>o.contains(p)||p.contains(o))) out.push(p);
+    };
+    for (const x of [e,e.closest('[role="combobox"]')])
+      for (const id of ((x?.getAttribute('aria-controls')||'')+' '+(x?.getAttribute('aria-owns')||'')).split(/\s+/)) if (id) add(document.getElementById(id));
+    if (document.activeElement!==e) return out;
+    const r=(box||e).getBoundingClientRect();
+    for (const p of all||document.querySelectorAll(NEAR)) {
+      const q=p.getBoundingClientRect();
+      if (q.width>0 && q.height>0 && q.left<r.right && q.right>r.left && q.top<r.bottom+48 && q.bottom>r.top-48) add(p);
+    }
+    if (box) for (const p of box.querySelectorAll('*'))
+      if (e.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING && !p.matches('button,a,input,[role="button"]') &&
+        ['absolute','fixed'].includes(getComputedStyle(p).position) && p.innerText?.trim()) add(p);
+    return out;
+  };
+  const tokenFacts=(e,popups)=>{
+    const box=cache.tokenBox(e);
+    if (!box) return null;
+    const field=name(e), levels=[];
+    for (let c=e; c!==box; c=c.parentElement) {
+      const before=[];
+      for (let s=c.parentElement.firstElementChild; s && s!==c; s=s.nextElementSibling) before.push(s);
+      levels.unshift(before);
+    }
+    const found=levels.flat().filter(x=>!x.matches('script,style,template') && visible(x))
+      .map(x=>tokenItem(x,field)).filter(([,t,k])=>t || k).slice(-20);
+    const combo=e.getAttribute('role')==='combobox' || e.hasAttribute('aria-haspopup');
+    const chips=found.filter(([,t,k])=>t && (k===2 || k===1 && combo)).map(([,t])=>t);
+    const owner=e.closest('[role="combobox"]');
+    const lists=[e,owner].flatMap(x=>((x?.getAttribute('aria-controls')||'')+' '+(x?.getAttribute('aria-owns')||'')).split(/\s+/))
+      .filter(Boolean).map(id=>document.getElementById(id)).filter(Boolean);
+    const multi=Boolean(owner) && lists.some(l=>l.matches('[role="listbox"][aria-multiselectable="true"]') || l.querySelector('[role="listbox"][aria-multiselectable="true"]'));
+    const popup=cache.popupsOf(e,box,popups).length>0 || e.getAttribute('aria-expanded')==='true';
+    return {items:found,chips,...(multi?{multi:true}:{}),...(popup?{popup:true}:{})};
+  };
   const clippedRect=e=>{
     const r=e.getBoundingClientRect();
     let left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);
@@ -166,7 +261,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     }
     return null;
   };
-  const actions=[];
+  const actions=[], popups=[...document.querySelectorAll(NEAR)].filter(visible);
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), clip=clippedRect(e), x=clip.x+clip.w/2, y=clip.y+clip.h/2, rname=role(e);
@@ -194,7 +289,8 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
           (rname==='combobox' && ['INPUT','TEXTAREA'].includes(e.tagName)));
       const value='value' in e ? String(e.value) :
         e.isContentEditable || rname==='combobox' ? e.innerText.trim() : '';
-      actions.push({...base,kind:editable?'fill':'click',value});
+      const token=editable ? tokenFacts(e,popups) : null;
+      actions.push({...base,kind:editable?'fill':'click',value,...(token?{token}:{})});
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
@@ -392,6 +488,60 @@ export function actScript(action: Action): string {
     e.dispatchEvent(new Event('change',{bubbles:true}));
   }
   return {x,y};
+})(${arg})`;
+}
+
+/**
+ * Read the popup next to a chip field (`cache.popupsOf` of the last snapshot): open, its text, the texts of its
+ * clickable options, and busy. With `focus`, focus the field first. Null when the node is gone.
+ */
+export function popupScript(action: Action, focus: boolean): string {
+  const arg = JSON.stringify({ node: action.node, focus });
+  return `(a => {
+  const c=window.__jevFast, e=c?.nodes.get(a.node);
+  if (!e?.isConnected || !c.popupsOf) return null;
+  if (a.focus && document.activeElement!==e) e.focus();
+  const shown=x=>x.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  const PICK='button,a[href],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"],[role="gridcell"],[role="button"]';
+  const popups=c.popupsOf(e,c.tokenBox(e)), picks=[];
+  for (const p of popups) for (const x of p.querySelectorAll(PICK)) {
+    const outer=x.parentElement?.closest(PICK);
+    if (picks.length>=20 || (outer && p.contains(outer)) || x.matches(':disabled') || x.closest('[aria-disabled="true"]') || !shown(x)) continue;
+    const t=(x.getAttribute('aria-label')||x.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200);
+    if (t) picks.push(t);
+  }
+  const text=popups.map(p=>p.innerText||'').join('\\n').replace(/[ \\t]+/g,' ').trim().slice(0,2000);
+  // An expanded field whose popup the script cannot find reads as busy: its options are unknown.
+  const lost=e.getAttribute('aria-expanded')==='true' && popups.length===0;
+  const busy=lost || e.getAttribute('aria-busy')==='true' || /\\b(?:loading|searching)\\b/i.test(text) ||
+    popups.some(p=>p.matches('[aria-busy="true"]') || p.querySelector('[aria-busy="true"],[role="progressbar"],[class*="spin"]'));
+  return {open:popups.length>0 || lost,text,picks,busy};
+})(${arg})`;
+}
+
+/**
+ * A script Enter on a focused chip field: keydown, then keypress when the keydown was not handled, then keyup. The
+ * events are not trusted, so they have no default action: they never submit a form. Only the page's own key handler
+ * can act on them. `prevented` is true when a handler called preventDefault.
+ */
+export function commitScript(action: Action): string {
+  const arg = JSON.stringify({ node: action.node });
+  return `(a => {
+  const e=window.__jevFast?.nodes.get(a.node);
+  if (!e?.isConnected) return {skipped:'gone'};
+  if (document.activeElement!==e) return {skipped:'focus'};
+  const key=type=>{
+    const ev=new KeyboardEvent(type,{key:'Enter',code:'Enter',bubbles:true,cancelable:true,composed:true});
+    for (const k of ['keyCode','which']) Object.defineProperty(ev,k,{get:()=>13});
+    Object.defineProperty(ev,'charCode',{get:()=>type==='keypress' ? 13 : 0});
+    return ev;
+  };
+  const down=key('keydown');
+  e.dispatchEvent(down);
+  let prevented=down.defaultPrevented;
+  if (!prevented && e.isConnected) { const press=key('keypress'); e.dispatchEvent(press); prevented=press.defaultPrevented; }
+  if (e.isConnected) e.dispatchEvent(key('keyup'));
+  return {prevented};
 })(${arg})`;
 }
 

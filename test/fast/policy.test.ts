@@ -6,9 +6,9 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, fieldLines, readEdit, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
-import type { Observation } from "../../src/fast/model.js";
+import type { Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
 
 const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
@@ -718,5 +718,40 @@ describe("sends and the var fallback", () => {
     const banned = buildStep(at({ canGenerate: true, doneBanned: true, sentTexts: [{ field: "Reply", text: "Tuesday works." }] }));
     expect(criteriaKeys(banned.questions["operation"])).not.toContain("DONE");
     expect((banned.state as Record<string, unknown>)["sent_texts"]).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+  });
+});
+
+describe("chip (token) fields", () => {
+  const facts = (over: Partial<TokenFacts> = {}): TokenFacts => ({ items: [[1, "Meeting Participants (Optional)", 0]], chips: [], ...over });
+  const field = (token?: TokenFacts) => el("e1", "fill", "textbox", "textbox", { node: 1, value: "", inputType: "text", ...(token ? { token } : {}) });
+
+  it("tokenEvidence: strong for a learned field or a multiselect listbox, weak for the chip shape, null otherwise", () => {
+    expect(tokenEvidence(field(facts({ learned: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ multi: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ chips: ["ann@example.com Remove participant"] })))).toBe("weak");
+    // An open popup alone is not evidence here: the loop counts only a popup that opened with a fill.
+    expect(tokenEvidence(field(facts({ popup: true })))).toBeNull();
+    expect(tokenEvidence(field(facts()))).toBeNull();
+    expect(tokenEvidence(field())).toBeNull();
+    expect(tokenEvidence({ ...field(facts({ learned: true })), kind: "click" })).toBeNull();
+  });
+
+  it("canWriteInto: false only on strong evidence; the chip shape alone keeps a text field writable", () => {
+    expect(canWriteInto(field(facts({ learned: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ multi: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ chips: ["Default branch"] })))).toBe(true);
+    expect(canWriteInto(field(facts({ popup: true })))).toBe(true);
+  });
+
+  it("the chip facts never reach the request; a strong field's value head offers no generate", () => {
+    const page = obs("https://a.b/upload", [
+      field(facts({ learned: true, chips: ["ann@example.com Remove participant"], popup: true })),
+      el("e2", "fill", "Title", "textbox", { node: 2, value: "", inputType: "text", token: facts() }),
+    ]);
+    const b = buildStep(input({ obs: page, canGenerate: true, spans: [span("s1", "bob@example.com")] }));
+    const request = JSON.stringify([b.state, b.questions]);
+    for (const key of ["token", "items", "chips", "learned", "multi", "popup"]) expect(request).not.toContain(`"${key}":`);
+    expect(criteriaKeys(b.questions["value_1"])).not.toContain("generate");
+    expect(criteriaKeys(b.questions["value_2"])).toContain("generate");
   });
 });

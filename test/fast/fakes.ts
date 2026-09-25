@@ -1,5 +1,5 @@
 // Scripted fakes for the fast engine: Page, Chrome, and Observation builders. No Chrome and no network.
-import type { Action, ActionKind, Chrome, EditPlan, EditResult, Observation, Page } from "../../src/fast/model.js";
+import type { Action, ActionKind, Chrome, EditPlan, EditResult, Observation, Page, Popup } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
 
 /** One executable action. `id` defaults to `e<n>` by position when `obs()` assigns it. */
@@ -22,7 +22,7 @@ export function obs(url: string, actions: Action[], text = "page", over: Partial
   };
 }
 
-export interface ActCall { op: "act" | "press" | "back" | "navigate"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan }
+export interface ActCall { op: "act" | "press" | "back" | "navigate" | "commit"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan }
 
 export interface PageScript {
   pages: Record<string, Observation>;
@@ -33,10 +33,16 @@ export interface PageScript {
   staleTimes?: number;
   /** The result of a fill, or an EditRefused to throw. Undefined: the fill returns nothing (an adapter without results). */
   edits?: (call: ActCall, action: Action) => EditResult | EditRefused | undefined;
+  /** The popup next to a chip field on the current page; `focus` as `Page.popup` got it. Default: closed. */
+  popup?: (action: Action, current: string, focus: boolean) => Popup | null;
+  /** The result of a script Enter (`commit`, recorded as op "commit"). Default: not handled. */
+  commit?: (action: Action, current: string) => { prevented: boolean } | { skipped: "gone" | "focus" };
 }
 
 export interface FakePage extends Page {
   calls: ActCall[];
+  /** The focus argument of each popup read. */
+  popups: boolean[];
   observes: number;
   current: string;
   closed: boolean;
@@ -45,7 +51,7 @@ export interface FakePage extends Page {
 export function fakePage(script: PageScript): FakePage {
   let stale = script.staleTimes ?? 0;
   const p = {
-    targetId: "t1", sessionId: "s1", calls: [] as ActCall[], observes: 0, current: script.start, closed: false,
+    targetId: "t1", sessionId: "s1", calls: [] as ActCall[], popups: [] as boolean[], observes: 0, current: script.start, closed: false,
     stats: { browserMs: 0, calls: 0 },
     page(): Observation { const o = script.pages[p.current]; if (!o) throw new Error(`fake page ${p.current} missing`); return o; },
     move(call: ActCall): void {
@@ -66,6 +72,15 @@ export function fakePage(script: PageScript): FakePage {
       return result;
     },
     async press(key: string) { p.move({ op: "press", key }); },
+    async popup(action: Action, focus?: boolean): Promise<Popup | null> {
+      p.popups.push(focus === true);
+      return script.popup ? script.popup(action, p.current, focus === true) : { open: false, text: "", picks: [], busy: false };
+    },
+    async commit(action: Action) {
+      const r = script.commit ? script.commit(action, p.current) : { prevented: false };
+      p.move({ op: "commit", id: action.id });
+      return r;
+    },
     async navigate(url: string) { p.move({ op: "navigate", url }); },
     async back() { p.move({ op: "back" }); },
     async url() { return p.page().url; },
