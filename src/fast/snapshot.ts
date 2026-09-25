@@ -346,12 +346,14 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   const inline=x=>/^inline/.test(getComputedStyle(x).display);
   if (a.step==='read') {
     if (kind!=='editable') return out(true,'',{shape:kind});
-    // A send-like control in the field's form or dialog, or else in its 5 nearest containers: a new line can send there.
+    // A send-like control in the field's form or dialog, or else in the containers around the field that hold no other
+    // text field (up to 6): a new line can send there.
     const send=new RegExp(a.send,'i');
     const name=b=>b.getAttribute('aria-label')||b.innerText||b.value||b.getAttribute('title')||'';
+    const fields='textarea,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"],input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"],input[type="number"]';
     const scope=e.closest('form,[role="form"],dialog,[role="dialog"]');
     const roots=scope ? [scope] : [];
-    for (let p=e.parentElement,i=0;p && !scope && i<5;p=p.parentElement,i++) roots.push(p);
+    for (let p=e.parentElement,i=0;p && !scope && i<6 && ![...p.querySelectorAll(fields)].some(f=>f!==e && !e.contains(f) && !f.contains(e));p=p.parentElement,i++) roots.push(p);
     const sends=roots.some(r=>[...r.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"]')]
       .some(b=>!e.contains(b) && send.test(name(b))));
     // Blocks with text, below the wrappers that hold all of them (Draft.js puts one wrapper around the blocks).
