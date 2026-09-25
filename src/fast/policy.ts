@@ -218,6 +218,12 @@ export const VALUE_Q_GEN = "Which offered value should be typed into this field?
 export const GENERATE = "Write new text for this field. Choose this when the goal asks for a message, reply, comment, answer, or description for this field, or when the field needs a part of an offered value, and no offered value holds that text word for word.";
 export const TYPE_TEXT_GEN = "Enter or replace text in an editable field. Another question chooses the value from the offered typed_values, or asks the user's assistant to write new text.";
 export const BLOCKED_VALUE_GEN = "A field needs a password, code, or exact value that only the user can supply";
+/**
+ * The PRESS_ENTER text while the focused field has a highlighted option. On the command page after a search, with 3
+ * asks each: a send task chose Enter at 0.87-0.91 and an open task at 0.28-0.32 (it clicked the result at 0.67-0.70).
+ * "When focus.enter_picks is set, Enter picks that option instead of submitting" gave Enter only 0.60-0.64 for the send.
+ */
+export const ENTER_PICKS = "Press Enter to pick focus.enter_picks. Enter picks no other option.";
 
 /**
  * Task fragments that Jev would choose as the message while `generate` is offered: a clause, the whole task, and a
@@ -386,12 +392,16 @@ function targetCriteria(op: TargetOp, group: Record<string, Action>, banned: Set
   return { criteria, ids, labels };
 }
 
-/** The focus in the state, with its texts cut. The form facts (`form`, `submitDefault`, `multiline`) are for the loop only. */
+/**
+ * The focus in the state, with its texts cut. The form facts (`form`, `submitDefault`, `multiline`) are for the loop
+ * only. The option that Enter picks shows as `enter_picks`, its label only.
+ */
 function focusState(f: NonNullable<Observation["focus"]>): Record<string, JsonValue> {
   const out: Record<string, JsonValue> = {};
   for (const [k, v] of Object.entries(f)) {
     if (k === "form" || k === "submitDefault" || k === "multiline" || v === undefined) continue;
-    if (k === "label" || k === "submitLabel") out[k] = cutText(String(v), LIMITS.nameChars);
+    if (k === "enterOption") out["enter_picks"] = cutText((v as { label: string }).label, LIMITS.nameChars);
+    else if (k === "label" || k === "submitLabel") out[k] = cutText(String(v), LIMITS.nameChars);
     else if (k === "value") out[k] = cutText(String(v), LIMITS.valueChars);
     else out[k] = v as JsonValue;
   }
@@ -426,7 +436,8 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string): 
   if (space.controls["SCROLL_DOWN"]) ops["SCROLL_DOWN"] = "Scroll down to reveal more content.";
   if (space.controls["SCROLL_UP"]) ops["SCROLL_UP"] = "Scroll up.";
   ops["WAIT"] = "Wait for the page to finish loading.";
-  if (canPressEnter(obs)) ops["PRESS_ENTER"] = "Press Enter to submit the focused field.";
+  // The option label stays in the state (focus.enter_picks), out of the options of the operation question.
+  if (canPressEnter(obs)) ops["PRESS_ENTER"] = obs.focus?.enterOption ? ENTER_PICKS : "Press Enter to submit the focused field.";
   ops["GO_BACK"] = "Go back to the previous page.";
   if (!doneBanned) ops["DONE"] = "Every requirement is visibly satisfied, or the detailed view needed to answer the goal is visible.";
   ops["BLOCKED"] = "No supported operation can make progress.";

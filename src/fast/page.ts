@@ -5,8 +5,9 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
+import { LIMITS } from "../types.js";
 import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import { CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -24,6 +25,15 @@ const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Delete: { code: "Delete", vk: 46 },
   Space: { code: "Space", vk: 32, text: " " },
 };
+
+/**
+ * Inputs whose settle follows the work that they start: the timers in the page (`causalArmScript`) and the requests
+ * over CDP. A key press is always one of them. A scroll and a select keep the frame settle.
+ */
+const CAUSAL_KINDS: ReadonlySet<string> = new Set(["fill", "click"]);
+
+/** Request types that the causal settle waits for. A document counts only in the main frame: a navigation. */
+const COUNTED_REQUESTS: ReadonlySet<string> = new Set(["Fetch", "XHR"]);
 
 /** JSON with keys sorted at every level. The fingerprint must not depend on key order. */
 export function stableStringify(value: unknown): string {
@@ -69,6 +79,13 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   const stats = { browserMs: 0, calls: 0 };
   const modifiers = process.platform === "darwin" ? 4 : 2;
   let pendingSettle: Action | null | undefined; // undefined = nothing pending; null = generic settle
+  /** The pending settle is causal: the input armed the tracker in the page. */
+  let causalPending = false;
+  /**
+   * The requests of the causal settle. The Network domain is on only from the arm to the end of the settle, and only
+   * the requests that start in that time count. `ended`: a counted request ended since the last check.
+   */
+  const net = { on: false, armed: false, requests: new Set<string>(), ended: false };
   let closed = false;
   /** Identity of a document that stayed below readyState "complete" until the cap. The next observe on it does not wait again. */
   let acceptedDoc: { id: unknown } | null = null;
@@ -84,6 +101,16 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     opts.log.warn(`dialog ${String(type)} ${accept ? "accepted" : "dismissed"}: ${message}`);
     call("Page.handleJavaScriptDialog", { accept }).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
   });
+  const offRequest = client.on("Network.requestWillBeSent", (params, sid) => {
+    if (sid !== sessionId || !net.armed) return;
+    const type = String(params["type"] ?? "");
+    if (COUNTED_REQUESTS.has(type) || (type === "Document" && params["frameId"] === targetId)) net.requests.add(String(params["requestId"]));
+  });
+  const ended = (params: Record<string, unknown>, sid?: string): void => {
+    if (sid === sessionId && net.requests.delete(String(params["requestId"]))) net.ended = true;
+  };
+  const offFinished = client.on("Network.loadingFinished", ended);
+  const offFailed = client.on("Network.loadingFailed", ended);
 
   async function call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const start = Date.now();
@@ -142,6 +169,70 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await call("Input.dispatchMouseEvent", { type, x, y, ...extra });
   }
 
+  /**
+   * Arm the causal settle right before an input: the Network domain goes on, and the page tracks new timers. `node` is
+   * the field of a fill. When the page does not arm (a document that is going away), the frame settle runs instead.
+   */
+  async function arm(node: number | null): Promise<void> {
+    if (!net.on) {
+      try {
+        // The settle reads request events only. Chrome keeps no bodies for them.
+        await call("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 });
+        net.on = true;
+      } catch (e) {
+        if (client.closed) throw e;
+        opts.log.debug(`settle without request tracking: ${(e as Error).message}`);
+      }
+    }
+    net.requests.clear();
+    net.ended = false;
+    net.armed = true;
+    const r = await evaluate(causalArmScript(node));
+    causalPending = !r.exception && r.value === true;
+    if (!causalPending) net.armed = false;
+  }
+
+  /**
+   * The causal settle: two frames, then a check every `causalPollMs` until the timers that the input started ran, the
+   * requests that started since the arm ended, their follow windows closed, and no new busy marker shows. A busy marker
+   * alone holds the settle for at most `causalBusyMs`: a long job (a draft, a streamed reply) keeps its marker. Then two
+   * frames for the last render. At most `causalCapMs`. A document without the armed tracker (a navigation) ends the
+   * wait: the readiness poll of `observe` takes over.
+   */
+  async function causalSettle(): Promise<void> {
+    const start = Date.now();
+    let busySince: number | null = null;
+    try {
+      await evaluate(settleScript(null), true);
+      for (let close = true; ; close = false) {
+        const extend = net.ended;
+        net.ended = false;
+        const r = await evaluate(causalStateScript(close, extend));
+        const s = r.value as { pending: number; follow: number; busy: boolean } | null;
+        if (r.exception || s === null || typeof s !== "object") break;
+        const working = s.pending > 0 || s.follow > 0 || net.requests.size > 0 || net.ended;
+        if (!working && !s.busy) break;
+        busySince = working ? null : busySince ?? Date.now();
+        if (busySince !== null && Date.now() - busySince >= LIMITS.causalBusyMs) break;
+        if (Date.now() - start >= LIMITS.causalCapMs) {
+          opts.log.debug(`settle stopped at the ${LIMITS.causalCapMs} ms cap: ${s.pending} timers, ${net.requests.size} requests${s.busy ? ", busy" : ""}`);
+          break;
+        }
+        await settleSleep(LIMITS.causalPollMs);
+      }
+    } finally {
+      net.armed = false;
+      net.requests.clear();
+      net.ended = false;
+      if (net.on) {
+        net.on = false;
+        await call("Network.disable").catch((e: Error) => { if (client.closed) throw e; });
+      }
+      await evaluate(CAUSAL_END_SCRIPT);
+    }
+    await evaluate(settleScript(null), true);
+  }
+
   const page: Page = {
     targetId,
     sessionId,
@@ -157,8 +248,11 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       const start = Date.now();
       if (pendingSettle !== undefined) {
         const action = pendingSettle;
+        const causal = causalPending;
         pendingSettle = undefined;
-        await evaluate(settleScript(action), true);
+        causalPending = false;
+        if (causal) await causalSettle();
+        else await evaluate(settleScript(action), true);
       }
       const deadline = start + opts.settleTimeoutMs;
       let polls = 0;
@@ -231,6 +325,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       if (!target) throw new StalePage("Target changed or is covered. Observe again.");
       if (action.kind !== "select") {
         const { x, y } = target;
+        if (CAUSAL_KINDS.has(action.kind)) await arm(action.kind === "fill" ? action.node : null);
         await mouse("mouseMoved", x, y);
         await mouse("mousePressed", x, y, { button: "left", clickCount: 1 });
         await mouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
@@ -254,6 +349,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         if (!fresh) throw new StalePage("Page or focus changed since this decision. Observe again.");
       }
       const base: Record<string, unknown> = { key, code: def.code, windowsVirtualKeyCode: def.vk, nativeVirtualKeyCode: def.vk };
+      await arm(null);
       await call("Input.dispatchKeyEvent", { ...base, type: "keyDown", ...(def.text !== undefined ? { text: def.text, unmodifiedText: def.text } : {}) });
       await call("Input.dispatchKeyEvent", { ...base, type: "keyUp" });
       pendingSettle = null;
@@ -284,6 +380,9 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       if (closed) return;
       closed = true;
       offDialog();
+      offRequest();
+      offFinished();
+      offFailed();
       await chrome.closeTarget(targetId);
     },
   };

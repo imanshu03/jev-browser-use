@@ -7,8 +7,22 @@
 // the field facts `form`, `multiline`, `inputType`, `autocomplete`, and `maxLength`. Code uses these
 // facts to decide where assistant-written text may go; they never reach Jev. Forms get ids from their own
 // counter, so element node ids stay the same as in the reference. The focus also carries its `form` and the
-// name of the form's default button, `submitDefault`, and `multiline`, for the Enter-to-click rule.
+// name of the form's default button, `submitDefault`, and `multiline`, for the Enter-to-click rule, and
+// `enterOption`, the option that Enter picks. The snapshot also returns `busy`. The settle after a fill, a key, or a
+// click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP.
+import { LIMITS } from "../types.js";
 import type { Action } from "./model.js";
+
+/** Options of a suggestion popup. */
+const OPTION = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"],[role="gridcell"]';
+/** Suggestion popups: ARIA popups and cmdk lists. */
+const POPUP = '[role="listbox"],[role="menu"],[role="grid"],[role="tree"],[cmdk-list]';
+/** Marks of the highlighted option: cmdk, Radix, Ariakit, Headless UI, React Aria. */
+const MARKED = '[data-selected="true"],[data-highlighted]:not([data-highlighted="false"]),[data-active-item],[data-focus]:not([data-focus="false"]),[data-focused="true"],[data-active="true"]';
+/** Markers of work in progress. Class names are left out: many pages keep a "loading" or "spinner" class. */
+const BUSY = '[aria-busy="true"],[role="progressbar"]:not([aria-valuenow])';
+/** In-page source: the option texts of a popup, the signature that shows a change of its options. */
+const POPUP_SIG = `p=>[...p.querySelectorAll(${JSON.stringify(OPTION)})].map(o=>o.textContent).join('\\n').slice(0,4000)`;
 
 /**
  * Read visible content and controls in one evaluation. Node identity lives in `window.__jevFast`:
@@ -17,6 +31,7 @@ import type { Action } from "./model.js";
  */
 export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   if (!document.body) return null;
+  const OPTION=${JSON.stringify(OPTION)}, POPUP=${JSON.stringify(POPUP)}, MARKED=${JSON.stringify(MARKED)}, BUSY=${JSON.stringify(BUSY)};
   const cache = window.__jevFast ||= {ids:new WeakMap(), nodes:new Map(), next:1};
   const identity = e => {
     if (!cache.ids.has(e)) cache.ids.set(e,cache.next++);
@@ -73,10 +88,40 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const submits=controls.filter(b=>!b.matches(':disabled'));
     const editable=safe(e) && (e.isContentEditable || ['TEXTAREA','INPUT'].includes(e.tagName) && ['textbox','searchbox','spinbutton','combobox'].includes(role(e)));
     const owner=e.form || e.closest('form,[role="form"],dialog,[role="dialog"]');
+    const pick=editable ? cache.pick(e) : null;
     return {node:identity(e),label:name(e),role:role(e),submitLabel:submits.map(b=>name(b)).join(' | '),
       editable,value:editable ? ('value' in e ? String(e.value) : e.innerText) : '',
       form:owner ? formId(owner) : null,submitDefault:controls[0] && !controls[0].matches(':disabled') ? name(controls[0]) : '',
-      multiline:e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true'};
+      multiline:e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true',
+      ...(pick?.option ? {enterOption:{node:identity(pick.option),label:name(pick.option)}} : {})};
+  };
+  // The option that Enter in the focused field picks, and the popups that Enter acts on. In this order: the active
+  // descendant of the field or its combobox; the highlighted option of a popup that the field controls; the highlighted
+  // option of a popup whose options changed in the settle after the last fill into the field. The last one finds a
+  // portaled or detached list (cmdk, mention menus) that no ARIA link names. There a bare aria-selected counts only on
+  // a cmdk item: in other lists it can mark the chosen row, not the highlight.
+  cache.pick=e=>{
+    const byId=id=>id ? document.getElementById(id) : null;
+    const usable=o=>o.matches(OPTION) && visible(o) && o.getAttribute('aria-disabled')!=='true';
+    const hosts=[e,e.closest('[role="combobox"]')].filter(Boolean);
+    for (const h of hosts) {
+      const o=byId(h.getAttribute('aria-activedescendant'));
+      if (o && usable(o)) return {option:o,pops:[o.closest(POPUP)||o]};
+    }
+    const ids=hosts.flatMap(h=>[h.getAttribute('aria-controls'),h.getAttribute('aria-owns')].join(' ').split(/\s+/)).filter(Boolean);
+    let pops=ids.map(byId).filter(p=>p && visible(p)).map(p=>p.matches(POPUP) ? p : p.querySelector(POPUP)).filter(Boolean);
+    let loose='[aria-selected="true"]';
+    if (!pops.length) {
+      const c=window.__jevCausal;
+      pops=c?.field && (c.field===e || c.field.contains(e)) ? (c.changed||[]).filter(p=>p.isConnected && visible(p)) : [];
+      loose='[cmdk-item][aria-selected="true"]';
+    }
+    if (!pops.length) return null;
+    for (const p of pops) {
+      const o=[...p.querySelectorAll(MARKED)].find(usable) || [...p.querySelectorAll(loose)].find(usable);
+      if (o) return {option:o,pops};
+    }
+    return {option:null,pops};
   };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select,[contenteditable]')].filter(safe)
@@ -90,7 +135,11 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
-  cache.keyGuard=()=>[cache.pageKey(),cache.focus(),cache.focus() ? cache.guard(document.activeElement) : null];
+  // Enter acts on the suggestion popup of the focused field too: an Enter decided on an old popup is stale.
+  cache.keyGuard=()=>{
+    const f=cache.focus(), e=document.activeElement, pick=f?.editable ? cache.pick(e) : null;
+    return [cache.pageKey(),f,f ? cache.guard(e) : null,pick ? pick.pops.map(p=>(p.innerText||'').slice(0,4000)) : null];
+  };
   const clippedRect=e=>{
     const r=e.getBoundingClientRect();
     let left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);
@@ -179,15 +228,17 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
     scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,focus:cache.focus(),key_guard:cache.keyGuard(),
     readyState:document.readyState,doc:performance.timeOrigin,filled:filled.map(c=>c[0]),
-    texts:filled.filter(c=>{const e=cache.nodes.get(c[0]);return e && visible(e);}).map(c=>[c[0],c[1]])};
+    texts:filled.filter(c=>{const e=cache.nodes.get(c[0]);return e && visible(e);}).map(c=>[c[0],c[1]]),
+    busy:[...document.querySelectorAll(BUSY)].some(visible)};
 })()`;
 
 /** The semantic marker of the whole page, or null when the document has no body. */
 export const MARKER_SCRIPT: string = `(() => { const state=${SNAPSHOT_SCRIPT}; return state?.marker ?? null; })()`;
 
 /**
- * Post-input settle. Resolves after two animation frames or 50 ms. A fill in an editable
- * combobox waits for visible options instead, up to 200 ms. `null` means a generic settle.
+ * Post-input settle without the causal tracker (a scroll, a select, or a document where the arm failed), and the two
+ * frames around a causal settle. Resolves after two animation frames or 50 ms. A fill in an editable combobox waits
+ * for visible options instead, up to 200 ms. `null` means a generic settle.
  */
 export function settleScript(action: Action | null): string {
   const arg = JSON.stringify(action === null ? { kind: "key", node: null } : { kind: action.kind, node: action.node });
@@ -196,7 +247,8 @@ export function settleScript(action: Action | null): string {
   const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
   let frames=0, stopped=false;
   const finish=()=>{stopped=true;resolve()};
-  setTimeout(finish,autocomplete ? 200 : 50);
+  // The native timer: the causal tracker must not count the settle's own timer as work of the input.
+  (window.__jevCausal?.native || setTimeout).call(window,finish,autocomplete ? 200 : 50);
   const ready=()=>{
     if (stopped) return;
     const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
@@ -213,6 +265,91 @@ export function settleScript(action: Action | null): string {
   requestAnimationFrame(ready);
 }))(` + arg + `)`;
 }
+
+/**
+ * Arm the causal settle right before a fill, a key, or a click. Installed once per document: proxies around setTimeout,
+ * setInterval, and their clear functions. While armed, a new timer shorter than `causalTimerMaxMs` is work that the
+ * input started when it is created during the input, in a tracked callback, or in the follow window (`causalFollowMs`)
+ * after one. The follow window gets past the React scheduler, which runs the effect of a debounced state change in a message
+ * task, not a timer. Poll chains stop: a timer more than `causalGenerations` deep does not count, nor a callback that
+ * schedules itself again with no shorter delay (a debounce that waits again for its rest counts). An interval counts
+ * until its first run. Requests are not wrapped: the page layer counts them over CDP, which the page cannot see.
+ * `node` is the field of a fill. The script keeps the option texts of each popup, so the end can tell which popups the
+ * fill changed. Returns true when armed.
+ */
+export function causalArmScript(node: number | null): string {
+  const arg = JSON.stringify({ node, follow: LIMITS.causalFollowMs, max: LIMITS.causalTimerMaxMs, gens: LIMITS.causalGenerations });
+  return String.raw`(o => {
+  const W=window, POPUP=${JSON.stringify(POPUP)}, BUSY=${JSON.stringify(BUSY)}, sig=${POPUP_SIG};
+  let s=W.__jevCausal;
+  if (!s) {
+    s=W.__jevCausal={armed:false,until:0,depth:0,cur:0,last:0,timers:new Map(),seen:new WeakMap(),busy:new WeakSet(),fill:null,field:null,changed:[],native:W.setTimeout};
+    const tracking=()=>s.armed && (s.depth>0 || performance.now()<s.until);
+    const wrap=native=>new Proxy(native,{apply(fn,self,args){
+      const cb=args[0], delay=Number(args[1])||0;
+      if (!tracking() || typeof cb!=='function' || delay>=s.max) return Reflect.apply(fn,self,args);
+      const gen=(s.depth>0 ? s.cur : s.last)+1, prior=s.seen.get(cb);
+      if (gen>s.gens || (prior!==undefined && delay>=prior)) return Reflect.apply(fn,self,args);
+      s.seen.set(cb,delay);
+      let id, first=true;
+      const run=function(...rest){
+        if (!first) return cb.apply(this,rest);
+        first=false; s.timers.delete(id); s.depth++;
+        const cur=s.cur; s.cur=gen;
+        try { return cb.apply(this,rest); }
+        finally { s.depth--; s.cur=cur; s.last=Math.max(s.last,gen); if (s.armed) s.until=Math.max(s.until,performance.now()+s.follow); }
+      };
+      id=Reflect.apply(fn,self,[run,...args.slice(1)]);
+      s.timers.set(id,gen);
+      return id;
+    }});
+    const clear=native=>new Proxy(native,{apply(fn,self,args){ s.timers.delete(args[0]); return Reflect.apply(fn,self,args); }});
+    W.setTimeout=wrap(W.setTimeout); W.setInterval=wrap(W.setInterval);
+    W.clearTimeout=clear(W.clearTimeout); W.clearInterval=clear(W.clearInterval);
+  }
+  s.follow=o.follow; s.max=o.max; s.gens=o.gens;
+  s.timers.clear(); s.seen=new WeakMap(); s.cur=0; s.last=0;
+  s.busy=new WeakSet(document.querySelectorAll(BUSY));
+  const field=o.node===null ? null : W.__jevFast?.nodes.get(o.node);
+  s.fill=field ? {field,before:new Map([...document.querySelectorAll(POPUP)].map(p=>[p,sig(p)]))} : null;
+  s.armed=true; s.until=Infinity;
+  return true;
+})(` + arg + `)`;
+}
+
+/**
+ * The state of an armed causal settle: `pending` tracked timers, the rest of the follow window in ms, and `busy` when an
+ * aria-busy or indeterminate progressbar shows that was not there at the arm. `close` ends the input window (the
+ * settle calls it after two frames). `extend` opens a follow window: a counted request ended, and its response handler
+ * can start more work. Null when the document has no armed tracker (it navigated away).
+ */
+export function causalStateScript(close: boolean, extend: boolean): string {
+  return `((close,extend) => {
+  const s=window.__jevCausal;
+  if (!s || !s.armed) return null;
+  const now=performance.now();
+  if (close) s.until=Math.min(s.until,now);
+  if (extend) s.until=Math.max(s.until,now+s.follow);
+  const busy=[...document.querySelectorAll(${JSON.stringify(BUSY)})].some(e=>!s.busy.has(e) && e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
+  return {pending:s.timers.size,follow:Math.max(0,Math.round(s.until-now)),busy};
+})(${close},${extend})`;
+}
+
+/**
+ * End the causal settle: new timers no longer count. After a fill, the popups whose options changed since the arm are
+ * kept with the field, for `enterOption`.
+ */
+export const CAUSAL_END_SCRIPT: string = `(() => {
+  const s=window.__jevCausal;
+  if (!s) return null;
+  s.armed=false; s.until=0; s.timers.clear();
+  if (s.fill) {
+    const f=s.fill, sig=${POPUP_SIG};
+    s.fill=null; s.field=f.field;
+    s.changed=[...document.querySelectorAll(${JSON.stringify(POPUP)})].filter(p=>{ const now=sig(p); return now!=='' && f.before.get(p)!==now; });
+  }
+  return true;
+})()`;
 
 /**
  * Resolve the target of a click, fill, or select right before input. Returns `{x, y}` at the

@@ -2751,3 +2751,146 @@ describe("value requests", () => {
     expect(r.outcome).toBe("done");
   });
 });
+
+describe("the option that Enter picks", () => {
+  const DASH_URL = "https://app.example/dash";
+  const ASK = "Ask AI: “Q3 Roadmap” press ↵ to chat";
+  const OPEN = "Q3 Roadmap press ↵ to open";
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const bar = (submitLabel = "Send message", pick = ASK): Observation => obs(DASH_URL, [
+    el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "Q3 Roadmap", multiline: true, form: 3 }),
+    el("e2", "click", "Send message", "button", { form: 3 }),
+    el("e14", "click", pick, "option", { selected: "true" }),
+    el("e15", "click", OPEN, "option", { selected: "false" }),
+  ], "Q3 Roadmap", { focus: { node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel, editable: true, value: "Q3 Roadmap", form: 3, multiline: true, enterOption: { node: 14, label: pick } } });
+  const sent = obs(DASH_URL, [el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "", multiline: true })], "Chat\nQ3 Roadmap");
+  const run = (first: (q: Questions) => PartialAnswers, page = bar(), human = fakeHuman({ interactive: true, confirm: [true] })) => {
+    let n = 0;
+    return setup("open https://app.example/dash and send Q3 Roadmap to the AI chat", { pages: { b: page, s: sent }, start: "b", transitions: (c) => (c.op === "press" || (c.op === "act" && c.id === "e14") ? "s" : undefined) },
+      (name, _state, q) => (name !== "step" ? {} : n++ === 0 ? first(q) : done), { maxSteps: 3 }, { human });
+  };
+  const enter = (enterP: number, clickP: number, click: string) => (q: Questions): PartialAnswers => ({
+    page_kind: "task_page",
+    operation: { choice: "PRESS_ENTER", confidence: enterP, probabilities: { PRESS_ENTER: enterP, CLICK: clickP, DONE: Number((1 - enterP - clickP).toFixed(2)) } },
+    click_target: { choice: idx(q, "click_target", click), confidence: 0.9, probabilities: { [idx(q, "click_target", click)]: 0.95 } },
+  });
+
+  it("the Enter label, the risk, and the dialog name the option that Enter picks", async () => {
+    const t = run(enter(0.9, 0.05, OPEN));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([{ op: "press", key: "Enter" }]);
+    expect(t.human.prompts).toEqual([`confirm:About to press Enter on "Q3 Roadmap | Send message | picks ${ASK}" on ${DASH_URL}. Type y to allow: `]);
+    expect(r.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "destructive", gate: "confirmed", result: "ok" });
+  });
+
+  it("an option with a destructive name makes Enter destructive in a form without a send button", async () => {
+    const t = run(enter(0.6, 0.05, OPEN), bar("", "Delete project"));
+    await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([]);
+    expect(t.log.lines.some((l) => /retry 1\/1: Enter confidence 0\.60 below 0\.7/.test(l))).toBe(true);
+    // Without the option, the same Enter is a submit: 0.60 passes its gate.
+    const plain = bar("");
+    const { enterOption: _pick, ...focus } = plain.focus!;
+    const t2 = run(enter(0.6, 0.05, OPEN), { ...plain, focus });
+    await t2.runner.run();
+    expect(t2.page.calls.filter((c) => c.op === "press")).toHaveLength(1);
+  });
+
+  it("Enter below its gate and a click on the option that Enter picks share the probability; the run clicks the option at the Enter's risk", async () => {
+    const t = run(enter(0.5, 0.4, ASK));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([{ op: "act", id: "e14", kind: "click" }]);
+    expect(t.log.lines.some((l) => l.includes(`Enter and a click on "${ASK}" have 0.88 together; clicking it`))).toBe(true);
+    expect(r.steps[0]).toMatchObject({ operation: "CLICK", risk: "destructive", gate: "confirmed", result: "ok" });
+    expect(t.human.prompts[0]).toContain(`click option "${ASK}"`);
+  });
+
+  it("Enter never turns into a click on another option: the run asks again and sends no key", async () => {
+    const t = run(enter(0.5, 0.4, OPEN));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([]);
+    expect(t.log.lines.some((l) => /retry 1\/1: Enter confidence 0\.50 below 0\.7/.test(l))).toBe(true);
+    expect(r.steps[0]?.jev_requests).toBe(2);
+  });
+});
+
+describe("the end check: DONE and BLOCKED on a page that changed during the request", () => {
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const blocked = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.6, probabilities: { BLOCKED: 0.6, WAIT: 0.4 } }, blocked_reason: "impossible" } as const;
+  /** A page whose `fresh()` answers from `answers` in order, then true. */
+  const changing = (answers: boolean[], first: PartialAnswers, second: PartialAnswers | ((q: Questions) => PartialAnswers)) => {
+    let n = 0;
+    const t = setup("open https://app.example/dash and open the project", { pages: { d: DASH }, start: "d" },
+      (name, _state, q) => (name !== "step" ? {} : n++ === 0 ? first : typeof second === "function" ? second(q) : second), { maxSteps: 2 });
+    const checks: unknown[] = [];
+    t.page.fresh = async (_o, action) => { checks.push(action); return answers.shift() ?? true; };
+    return { t, checks };
+  };
+
+  it("DONE on a changed page observes again and asks again; the second DONE ends the run", async () => {
+    const { t, checks } = changing([false], done, done);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(checks).toEqual([undefined]);
+    expect(t.oracle.requests.filter((x) => x.name === "step")).toHaveLength(2);
+    expect(t.page.observes).toBe(2);
+    expect(r.steps).toHaveLength(1);
+    expect(t.log.lines.some((l) => /step 1 DONE@0\.90 on a page that changed during the request; asking again/.test(l))).toBe(true);
+  });
+
+  it("the check runs once per step: a page that stays changed ends on the second decision", async () => {
+    const { t, checks } = changing([false, false, false], done, done);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(checks).toHaveLength(1);
+  });
+
+  it("BLOCKED on a changed page asks again, and the new decision runs", async () => {
+    const { t } = changing([false], blocked, (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Licious"), confidence: 0.9 } }));
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ operation: "CLICK", result: "ok", jev_requests: 2 });
+    expect(t.page.calls.filter((c) => c.op === "act")[0]).toEqual({ op: "act", id: "e1", kind: "click" });
+  });
+
+  it("a page that did not change ends at once with one request", async () => {
+    const { t, checks } = changing([], blocked, done);
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("impossible");
+    expect(checks).toEqual([undefined]);
+    expect(t.oracle.requests.filter((x) => x.name === "step")).toHaveLength(1);
+  });
+});
+
+describe("WAIT polls until the page holds still", () => {
+  const LIST = "https://app.example/list";
+  const before = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nOld row");
+  const spinner = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nLoading", { busy: true });
+  const loading = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nLoading");
+  const results = obs(LIST, [el("e2", "click", "Q3 roadmap review", "button")], "rows\nQ3 roadmap review");
+  const DONE_ = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const NOT_YET = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" } as const;
+
+  /** WAIT on `before`; each observe after it returns the next page of `sequence`. The step after the wait reads its page. */
+  const waitThenRead = (sequence: Observation[]) => {
+    let n = 0;
+    const t = setup("open https://app.example/list and open Q3 roadmap review", { pages: { b: before }, start: "b" },
+      (name, state) => (name !== "step" ? {} : n++ === 0 ? { page_kind: "task_page", operation: "WAIT" } : (state as { page: { text: string } }).page.text.includes("Q3") ? DONE_ : NOT_YET), { maxSteps: 3 });
+    const observe = t.page.observe.bind(t.page);
+    t.page.observe = async () => { await observe(); return sequence.length > 1 ? sequence.shift()! : sequence[0]!; };
+    return t;
+  };
+
+  it("a first change that shows a busy marker does not end the wait: the next step sees the results", async () => {
+    const t = waitThenRead([before, spinner, results, results]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.observes).toBe(4);
+  });
+
+  it("a change without a busy marker ends the wait when one more observation shows the same page", async () => {
+    const t = waitThenRead([before, loading, results, results]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.observes).toBe(4);
+  });
+});

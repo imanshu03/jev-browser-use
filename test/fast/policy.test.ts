@@ -6,7 +6,7 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, ENTER_PICKS, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Observation } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
@@ -238,6 +238,38 @@ describe("Enter readiness", () => {
     expect(criteriaKeys(buildStep(input({ obs: page })).questions.operation)).toContain("PRESS_ENTER");
     page.focus = null;
     expect(criteriaKeys(buildStep(input({ obs: page })).questions.operation)).not.toContain("PRESS_ENTER");
+  });
+});
+
+describe("the option that Enter picks", () => {
+  const LABEL = "Ask AI: “Q3 Roadmap” press ↵ to chat";
+  const page = (enterOption?: { node: number; label: string }): Observation => obs("https://app.example/dash", [
+    el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "Q3 Roadmap", multiline: true }),
+    el("e14", "click", LABEL, "option", { selected: "true" }),
+    el("e15", "click", "Q3 Roadmap press ↵ to open", "option", { selected: "false" }),
+  ], "Q3 Roadmap", { focus: { node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel: "Send message", editable: true, value: "Q3 Roadmap", multiline: true, ...(enterOption ? { enterOption } : {}) } });
+
+  it("the state shows the option label as focus.enter_picks, never its node; the Enter text names focus.enter_picks and holds no page text", () => {
+    const built = buildStep(input({ task: "open the Q3 Roadmap artifact", obs: page({ node: 14, label: LABEL }) }));
+    const focus = (built.state as { focus: Record<string, unknown> }).focus;
+    expect(focus).toEqual({ node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel: "Send message", editable: true, value: "Q3 Roadmap", enter_picks: LABEL });
+    const enter = (built.questions.operation as ChoiceQuestion).criteria["PRESS_ENTER"];
+    expect(enter).toBe(ENTER_PICKS);
+    expect(JSON.stringify(built.questions.operation)).not.toContain("Ask AI");
+  });
+
+  it("a long option label is cut, and without an option the Enter text and the focus stay as before", () => {
+    const long = "Ask AI: " + "x".repeat(200);
+    const built = buildStep(input({ obs: page({ node: 14, label: long }) }));
+    expect(((built.state as { focus: { enter_picks: string } }).focus.enter_picks).length).toBeLessThanOrEqual(LIMITS.nameChars);
+    const plain = buildStep(input({ obs: page() }));
+    expect((plain.questions.operation as ChoiceQuestion).criteria["PRESS_ENTER"]).toBe("Press Enter to submit the focused field.");
+    expect((plain.state as { focus: Record<string, unknown> }).focus).not.toHaveProperty("enter_picks");
+  });
+
+  it("a secret in the option label is redacted like the page", () => {
+    const built = buildStep(input({ obs: page({ node: 14, label: "Ask AI: s3cr3tvalue" }), spans: [span("v_token", "s3cr3tvalue", true, "var")] }));
+    expect(JSON.stringify(built.state)).not.toContain("s3cr3tvalue");
   });
 });
 

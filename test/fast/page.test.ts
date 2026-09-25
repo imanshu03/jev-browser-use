@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { CdpClient, Chrome } from "../../src/fast/model.js";
 import { StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
-import { SNAPSHOT_SCRIPT } from "../../src/fast/snapshot.js";
+import { CAUSAL_END_SCRIPT, SNAPSHOT_SCRIPT, causalArmScript } from "../../src/fast/snapshot.js";
+import { LIMITS } from "../../src/types.js";
 import { fakeLogger } from "../fakes.js";
 
 function rawSnapshot(url: string, readyState: string, text: string) {
@@ -213,6 +214,151 @@ describe("openPage freshness", () => {
     expect(c.sent.filter((s) => s.method === "Input.dispatchKeyEvent")).toHaveLength(2);
     await page.press("Enter");
     expect(c.sent.filter((s) => s.method === "Input.dispatchKeyEvent")).toHaveLength(4);
+  });
+});
+
+describe("openPage causal settle", () => {
+  const key = [123, "https://example.test/search", 0, 0, 1280, 860, []];
+  const guard = [7, "searchbox", "Search", "", null, null, false, false, null, null, null, null, null, "Search"];
+  const snap = { ...rawSnapshot("https://example.test/search", "complete", "rows"), page_key: key, guards: { "7": guard }, marker: null };
+  const fill = { id: "e1", kind: "fill" as const, node: 7, role: "searchbox", label: "Search", value: "" };
+  type State = { pending: number; follow: number; busy: boolean } | null;
+
+  /**
+   * A page whose tracker answers `states` in order (the last one repeats). `onState(n)` runs at the n-th check, before
+   * the answer: a test emits request events there.
+   */
+  function tracked(states: State[], onState: (n: number, emit: (event: string, params: Record<string, unknown>, sid?: string) => void) => void = () => undefined) {
+    let checks = 0;
+    const exprs: string[] = [];
+    const c = scriptedChrome((expr) => {
+      exprs.push(expr);
+      if (expr === SNAPSHOT_SCRIPT) return snap;
+      if (/c\.guard\(c\.nodes\.get\(7\)\)/.test(expr)) return [key, guard];
+      if (/c\.pageKey\(\)/.test(expr)) return key;
+      if (/__jevFast\?\.nodes\.get\(action\.node\)/.test(expr)) return { x: 10, y: 10 };
+      if (expr === causalArmScript(7) || expr === causalArmScript(null)) return true;
+      if (expr.startsWith("((close,extend)")) {
+        checks += 1;
+        onState(checks, (event, params, sid = "s1") => c.client.emit(event, params, sid));
+        return states.length > 1 ? states.shift() : states[0];
+      }
+      if (expr === CAUSAL_END_SCRIPT) return true;
+      return null;
+    });
+    return { c, exprs, checks: () => checks };
+  }
+  const idle: State = { pending: 0, follow: 0, busy: false };
+  const methods = (c: ReturnType<typeof scriptedChrome>) => c.sent.map((s) => s.method === "Runtime.evaluate" ? (String(s.params["expression"]).startsWith("((close,extend)") ? "state" : s.params["expression"] === CAUSAL_END_SCRIPT ? "end" : String(s.params["expression"]).includes("__jevCausal={") ? "arm" : "eval") : s.method);
+
+  it("a fill turns Network on and arms the tracker before the mouse events; the settle ends when the tracker is idle, then Network goes off", async () => {
+    const t = tracked([{ pending: 1, follow: 0, busy: false }, { pending: 0, follow: 30, busy: false }, idle]);
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.act(fill, obs, "roadmap");
+    const order = methods(t.c);
+    expect(order.indexOf("Network.enable")).toBeLessThan(order.indexOf("arm"));
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("Input.dispatchMouseEvent"));
+    expect(t.c.sent.find((s) => s.method === "Network.enable")?.params).toEqual({ maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 });
+    await page.observe();
+    expect(t.checks()).toBe(3);
+    // The first check closes the input window; no request ended, so no check extends it.
+    expect(t.exprs.filter((e) => e.startsWith("((close,extend)")).map((e) => e.match(/\((true|false),(true|false)\)$/)?.[0])).toEqual(["(true,false)", "(false,false)", "(false,false)"]);
+    const after = methods(t.c).slice(order.length);
+    expect(after.filter((m) => m !== "eval")).toEqual(["state", "state", "state", "Network.disable", "end"]);
+  });
+
+  it("a Fetch or XHR request that starts after the arm holds the settle until it ends; its end opens a follow window", async () => {
+    let finishedAt = 0;
+    const t = tracked([idle], (n, emit) => {
+      if (n === 1) {
+        emit("Network.requestWillBeSent", { requestId: "r1", type: "Fetch", frameId: "t1" });
+        emit("Network.requestWillBeSent", { requestId: "r2", type: "Image", frameId: "t1" });
+        emit("Network.requestWillBeSent", { requestId: "r3", type: "XHR", frameId: "t1" }, "s2");
+      }
+      if (n === 3) { emit("Network.loadingFinished", { requestId: "r1" }); finishedAt = n; }
+    });
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.act(fill, obs, "roadmap");
+    await page.observe();
+    expect(finishedAt).toBe(3);
+    // Checks 1-3 see the request in flight; it ends during check 3. Check 4 opens the follow window for the response
+    // handler (this fake tracker then answers idle).
+    expect(t.checks()).toBe(4);
+    expect(t.exprs.filter((e) => e.startsWith("((close,extend)")).map((e) => e.endsWith("(false,true)"))).toEqual([false, false, false, true]);
+  });
+
+  it("a document request of the main frame counts (a navigation); a request before the arm does not", async () => {
+    const t = tracked([idle], (n, emit) => { if (n === 1) emit("Network.requestWillBeSent", { requestId: "d1", type: "Document", frameId: "t1" }); if (n === 2) emit("Network.loadingFailed", { requestId: "d1" }); });
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    t.c.client.emit("Network.requestWillBeSent", { requestId: "early", type: "Fetch", frameId: "t1" }, "s1");
+    const obs = await page.observe();
+    await page.press("Enter", obs);
+    await page.observe();
+    expect(t.checks()).toBe(3);
+  });
+
+  it("a document without the armed tracker (a navigation) ends the settle at the first check", async () => {
+    const t = tracked([null]);
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.press("Enter", obs);
+    const t0 = Date.now();
+    await page.observe();
+    expect(Date.now() - t0).toBeLessThan(200);
+    expect(t.checks()).toBe(1);
+    expect(methods(t.c)).toContain("Network.disable");
+  });
+
+  it("work that never ends stops at the cap", async () => {
+    const t = tracked([{ pending: 1, follow: 0, busy: true }]);
+    const log = fakeLogger();
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log });
+    const obs = await page.observe();
+    await page.act(fill, obs, "roadmap");
+    const t0 = Date.now();
+    const after = await page.observe();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(LIMITS.causalCapMs);
+    expect(Date.now() - t0).toBeLessThan(LIMITS.causalCapMs + 500);
+    expect(after.ms).toBeGreaterThanOrEqual(LIMITS.causalCapMs);
+    expect(log.lines.some((l) => l.includes(`settle stopped at the ${LIMITS.causalCapMs} ms cap: 1 timers, 0 requests, busy`))).toBe(true);
+  });
+
+  it("a busy marker alone holds the settle for causalBusyMs, not until the cap", async () => {
+    const t = tracked([{ pending: 1, follow: 0, busy: true }, { pending: 0, follow: 0, busy: true }]);
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.act(fill, obs, "roadmap");
+    const t0 = Date.now();
+    await page.observe();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(LIMITS.causalBusyMs);
+    expect(Date.now() - t0).toBeLessThan(LIMITS.causalBusyMs + 400);
+  });
+
+  it("a scroll and a select keep the frame settle; a key press arms before keyDown; a Network error leaves the timer tracking on", async () => {
+    const t = tracked([idle]);
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.act({ id: "scroll_down", kind: "scroll", node: null, label: "Scroll down", delta: 560 }, obs);
+    await page.observe();
+    expect(methods(t.c)).not.toContain("arm");
+    await page.press("Enter", obs);
+    const order = methods(t.c);
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("Input.dispatchKeyEvent"));
+    await page.observe();
+    expect(t.checks()).toBe(1);
+    const failing = tracked([idle]);
+    const send = failing.c.client.send.bind(failing.c.client);
+    failing.c.client.send = async (method, params, sid) => { if (method === "Network.enable") throw cdpError("Network.enable failed"); return send(method, params, sid); };
+    const log = fakeLogger();
+    const p2 = await openPage(failing.c.chrome, { settleTimeoutMs: 500, log });
+    const o2 = await p2.observe();
+    await p2.act(fill, o2, "roadmap");
+    await p2.observe();
+    expect(failing.checks()).toBe(1);
+    expect(methods(failing.c)).not.toContain("Network.disable");
+    expect(log.lines.some((l) => l.includes("settle without request tracking: Network.enable failed"))).toBe(true);
   });
 });
 
