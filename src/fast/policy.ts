@@ -38,9 +38,10 @@ export const EXTRACT_RULE = "The answer must be visible on screen; SCROLL_DOWN w
 
 /**
  * Extra rule for a task that asks to mention someone (a `mention` span). With the field facts (`mentions`, option
- * `checked`, no "on" checkbox rows) and this rule, Jev clicked Mention 5 of 5 times after the text (0.79), "Done (1)" with
- * a staged option 5 of 5 times (0.90-0.96), and Send after the chip (0.96). The facts alone made Jev type the text again
- * (TYPE_TEXT 0.66), and without the facts Jev sent a staged option with no chip.
+ * `checked`, no "on" checkbox rows) and this rule, on the chat fixture (4 asks each), Jev clicked Mention after the text
+ * at 0.88-0.93, "Done (1)" with a checked option at 0.89-0.92, and Send after the chip (target 0.93-0.96). A quoted task
+ * with no mention did not change (Send at 1.00). The facts alone made Jev type the text again (TYPE_TEXT 0.66), and
+ * without the facts Jev sent a checked option with no chip.
  */
 export const MENTION_RULE = "To mention or tag someone, add the person with the message field's mention picker: click the field's Mention or @ button, choose the name, and confirm the choice with the picker's Done or Add button when it has one. A checked item in an open picker is not added yet. The field's mentions list shows each added mention; typed text such as a name or \"@name\" is not a mention. Send only when the field lists every requested mention.";
 
@@ -132,13 +133,17 @@ function mentionsOf(a: Action, intent: boolean): string[] | "none" | undefined {
  * True for a field that may take assistant-written text: a plain text box (a textarea, a contenteditable,
  * or an input of type text) whose label and autocomplete token do not ask for a credential or an exact
  * value such as a recipient, an amount, or a search query.
+ * A search box has one line. In a multiline field the word "search" does not make it an exact-value field: the composer
+ * "Search or ask AI anything..." takes messages. Its name was its text after the first fill, so it took new text only
+ * then, after the whole task had gone in as its first value. Now its name stays its placeholder.
  */
 export function canWriteInto(a: Action): boolean {
   if (a.kind !== "fill" || a.role !== "textbox") return false;
   if (a.inputType !== undefined && a.inputType !== "text") return false;
   if (a.autocomplete !== undefined && EXACT_AUTOCOMPLETE.test(a.autocomplete)) return false;
   const label = a.label.replace(/\s+/g, " ").trim();
-  return !CREDENTIAL_NAME.test(label) && !EXACT_VALUE_NAME.test(label);
+  const exact = a.multiline === true ? label.replace(/\bsearch\b/gi, " ") : label;
+  return !CREDENTIAL_NAME.test(label) && !EXACT_VALUE_NAME.test(exact);
 }
 
 /**
