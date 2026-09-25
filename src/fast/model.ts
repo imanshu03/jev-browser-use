@@ -96,6 +96,11 @@ export interface Observation {
     submitDefault?: string;
     /** The focused element is a textarea, a contenteditable, or aria-multiline. Never sent to Jev. */
     multiline?: boolean;
+    /**
+     * The option that Enter in the focused field picks: the active or highlighted option of its suggestion popup. Jev
+     * sees only the label, as `enter_picks`. Absent when Enter picks no option.
+     */
+    enterOption?: { node: number; label: string };
   } | null;
   /** Semantic marker of the whole page. Opaque. Used by `Page.fresh`. */
   marker: unknown;
@@ -116,6 +121,8 @@ export interface Observation {
   filled?: number[];
   /** Node id and value of each rendered form control, in view or not, whose value is not blank. A control that is hidden, aria-hidden, or inert is not in the list. Never sent to Jev. */
   texts?: [number, string][];
+  /** A visible aria-busy element or indeterminate progressbar shows work in progress. WAIT polls on while it shows. Never sent to Jev. */
+  busy?: boolean;
 }
 
 /**
@@ -161,7 +168,11 @@ export class StalePage extends Error {
 export interface Page {
   readonly targetId: string;
   readonly sessionId: string;
-  /** Read the page with one in-page evaluation. Waits first for any pending post-input settle (2 animation frames or 50 ms; 200 ms for a combobox). Retries while the document is navigating, up to `settleTimeoutMs`. */
+  /**
+   * Read the page with one in-page evaluation. Waits first for any pending post-input settle. After a fill, a click, or
+   * a key, the settle waits for the timers and requests that the input started, at most `LIMITS.causalCapMs`; after
+   * other input, 2 animation frames or 50 ms. Retries while the document is navigating, up to `settleTimeoutMs`.
+   */
   observe(): Promise<Observation>;
   /** True when the page still matches `obs`. With a click, fill, or select action, compares the page key and that node's guard only. With a scroll action, the page key only. Without an action, the whole marker. */
   fresh(obs: Observation, action?: Action): Promise<boolean>;

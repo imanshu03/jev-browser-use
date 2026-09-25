@@ -224,7 +224,14 @@ export const LIMITS = {
   openTimeoutMs: 60_000, settleDomMs: 10_000, settleIdleMs: 5_000, settlePauseMs: 400, expandWaitMs: 300,
   coveredRetryMs: 300, coveredSecondRetryMs: 1000, pausePollMs: 5_000, confirmPromptMs: 120_000,
   scrollPx: 600, waitIdleMs: 5_000, waitPauseMs: 1_000,
-  fastWaitMs: 1_500, waitPollMs: 100,   // fast engine WAIT: poll until the page changes, at most fastWaitMs
+  fastWaitMs: 1_500, waitPollMs: 100,   // fast engine WAIT: poll until the page changes and holds still, at most fastWaitMs
+  // Fast engine causal settle after input: wait for the timers and requests that the input started.
+  causalCapMs: 3_000,             // the whole settle, from the input to the last check
+  causalTimerMaxMs: 1_000,        // a timer of this delay or longer is not work that the input started (a toast, an idle poll)
+  causalBusyMs: 500,              // a busy marker alone holds the settle this long: a long job keeps its marker
+  causalFollowMs: 60,             // after a tracked callback or a counted request, new timers still count this long
+  causalGenerations: 4,           // timers that a tracked callback starts count up to this depth; a poll chain stops
+  causalPollMs: 10,               // the page layer checks the tracker and the requests this often
   titleChars: 200, urlChars: 2000,       // fast engine state caps for page.title and page.url
   // Fast engine.
   fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,

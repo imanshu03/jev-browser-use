@@ -227,6 +227,8 @@ export class FastRunner {
   /** Covered-target stales per `url|actionKey`. At LIMITS.coveredPerPage the target is banned on that page. */
   private readonly coveredCounts = new Map<string, number>();
   private doneBannedUntil = 0;
+  /** The step whose DONE or BLOCKED decision had its freshness check. The check runs once per step. */
+  private endChecked = 0;
   /** Executions per `url|actionKey`. */
   private readonly sigCounts = new Map<string, number>();
   /** WAIT operations executed per URL. Capped at LIMITS.waitsPerPage, then a scroll takes its place. */
@@ -638,6 +640,21 @@ export class FastRunner {
     return { target: c, p };
   }
 
+  /**
+   * The option that Enter picks (focus.enterOption), when the click_target head chose it while the operation head chose
+   * PRESS_ENTER, and the probability of the two together. Enter and a click on that option do the same thing, as with
+   * the submit button. Null for any other element: Enter never turns into a click on another option.
+   */
+  private pickedOption(d: Decision, obs: Observation): { target: Target; p: number } | null {
+    const c = d.click;
+    const pick = obs.focus?.enterOption;
+    if (!c || !pick) return null;
+    const option = obs.actions.find((a) => a.id === c.actionId);
+    if (!option || option.kind !== "click" || option.node !== pick.node) return null;
+    const p = (d.operationProbs["PRESS_ENTER"] ?? 0) + (d.operationProbs["CLICK"] ?? 0) * (c.probs[c.key] ?? c.conf);
+    return { target: c, p };
+  }
+
   /** True when BLOCKED names a sign-in wall or a captcha and the page kind head gives that kind a real probability. */
   private wallReason(d: Decision): boolean {
     if (d.blockedReason === "needs_sign_in") return (d.pageKindProbs["sign_in_wall"] ?? 0) >= GATES.signInProb;
@@ -676,6 +693,15 @@ export class FastRunner {
     }
     if (d.operation === null || !(d.operation in ACTION_OF)) return rec(this.blocked(ctx, "ambiguous", `no usable operation answer (${d.operation ?? "missing"})`, opTop, obs.url));
 
+    // DONE and BLOCKED end the run on the observation of the request. When the page changed during the request (late
+    // search results, a save that finished), observe again and ask again, once per step.
+    if ((d.operation === "DONE" || d.operation === "BLOCKED") && this.endChecked !== this.stepNo) {
+      this.endChecked = this.stepNo;
+      if (!(await (this._page as Page).fresh(obs))) {
+        this.log.info(`step ${this.stepNo} ${d.operation}@${d.operationConf.toFixed(2)} on a page that changed during the request; asking again`);
+        return { kind: "stale", message: `the page changed during the ${d.operation} request` };
+      }
+    }
     if (d.operation === "DONE") return rec(await this.finish(d, obs, ctx));
     if (d.operation === "BLOCKED") {
       const kind = BLOCKED_OF[d.blockedReason ?? "other"] ?? "ambiguous";
@@ -688,14 +714,16 @@ export class FastRunner {
         ctx.gate = "Enter unavailable: focus an input and fill required text before submitting";
         return { kind: "reask" };
       }
-      const label = [obs.focus?.label, obs.focus?.submitLabel].filter(Boolean).join(" | ");
+      // Enter in a field with a highlighted option picks that option. The label, the risk, and the dialog name it.
+      const pick = obs.focus?.enterOption;
+      const label = [obs.focus?.label, obs.focus?.submitLabel, pick ? `picks ${pick.label}` : ""].filter(Boolean).join(" | ");
       // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit.
       const risk: RiskClass = riskOf("CLICK", label) === "destructive" ? "destructive" : "submit";
       ctx.risk = risk;
       ctx.action = "press_key";
       ctx.value = "Enter";
       if (d.operationConf < THRESHOLDS[risk].target) {
-        const submit = this.submitButton(d, obs);
+        const submit = this.submitButton(d, obs) ?? this.pickedOption(d, obs);
         if (submit && submit.p >= THRESHOLDS[risk].target) {
           // The click then passes its own gates: the target confidence, the runner-up, and the confirmation.
           this.log.info(`step ${this.stepNo} Enter@${d.operationConf.toFixed(2)} below ${THRESHOLDS[risk].target}; Enter and a click on "${submit.target.label}" have ${submit.p.toFixed(2)} together; clicking it`);
@@ -729,7 +757,11 @@ export class FastRunner {
     return this.execute(d.operation, null, null, null, obs, ctx);
   }
 
-  /** WAIT: run the page's wait action (100 ms), then observe every `waitPollMs` until the page changes, at most `fastWaitMs`. */
+  /**
+   * WAIT: run the page's wait action (100 ms), then observe every `waitPollMs` until the page changed and holds still:
+   * two observations in a row are the same, and no busy marker shows. A first change can be a spinner, not the result.
+   * At most `fastWaitMs`.
+   */
   private async waitForChange(obs: Observation, control: Action | null): Promise<Observation> {
     const page = this._page as Page;
     const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -737,9 +769,12 @@ export class FastRunner {
     else await sleep(LIMITS.waitPollMs);
     const polls = Math.max(1, Math.ceil(LIMITS.fastWaitMs / LIMITS.waitPollMs));
     const t0 = Date.now();
+    let prev = obs;
     let next = await this.observeSettled();
-    for (let i = 1; i < polls && next.fingerprint === obs.fingerprint && Date.now() - t0 < LIMITS.fastWaitMs; i++) {
+    const still = (): boolean => next.fingerprint !== obs.fingerprint && next.fingerprint === prev.fingerprint && next.busy !== true;
+    for (let i = 1; i < polls && !still() && Date.now() - t0 < LIMITS.fastWaitMs; i++) {
       await sleep(LIMITS.waitPollMs);
+      prev = next;
       next = await this.observeSettled();
     }
     return next;

@@ -13,6 +13,7 @@ import type { Action, Chrome, Observation, Page } from "../../src/fast/model.js"
 import { StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
 import { canPressEnter } from "../../src/fast/policy.js";
+import { LIMITS } from "../../src/types.js";
 import { fakeLogger } from "../fakes.js";
 
 const FIXTURES = path.resolve(__dirname, "../fixtures/live");
@@ -379,8 +380,153 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): field
     const { buildStep } = await import("../../src/fast/policy.js");
     const obs = await page.observe();
     const request = JSON.stringify(buildStep({ task: "reply to Ann", goal: "act", obs, history: [], spans: [], keys: [], bannedActionIds: new Set(), doneBanned: false, canGenerate: true }));
-    for (const key of ["maxLength", "inputType", "multiline", "autocomplete", "form", "doc", "filled", "texts"]) expect(request).not.toContain(`"${key}":`);
+    for (const key of ["maxLength", "inputType", "multiline", "autocomplete", "form", "doc", "filled", "texts", "busy", "enterOption"]) expect(request).not.toContain(`"${key}":`);
     expect(request).toContain("\"generate\"");
+  });
+});
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the settle after input and the option that Enter picks", () => {
+  let chrome: Chrome;
+  let page: Page;
+  let web: http.Server;
+  let base = "";
+  const log = fakeLogger();
+  const evaluate = async (expression: string) => {
+    const result = await chrome.client.send("Runtime.evaluate", { expression, returnByValue: true }, page.sessionId);
+    return (result["result"] as { value?: unknown })?.value;
+  };
+  /** Open a fixture, fill one field, and observe: the observation after the settle and the settle time. */
+  const fillAndObserve = async (file: string, label: string, text: string): Promise<{ before: Observation; after: Observation; ms: number }> => {
+    await page.navigate(`${base}/${file}`, NAV_MS);
+    const before = await page.observe();
+    const t0 = Date.now();
+    await page.act(find(before, "fill", label), before, text);
+    const after = await page.observe();
+    return { before, after, ms: Date.now() - t0 };
+  };
+
+  beforeAll(async () => {
+    // The fixtures over HTTP, so that the page can send real requests. /api/wait answers after `ms`; /landed.html
+    // answers after 300 ms.
+    web = http.createServer((req, res) => {
+      const u = new URL(req.url ?? "/", "http://fixture");
+      if (u.pathname === "/api/wait") { setTimeout(() => res.end("ok"), Number(u.searchParams.get("ms") ?? 0)); return; }
+      if (u.pathname === "/landed.html") { setTimeout(() => { res.setHeader("content-type", "text/html"); res.end("<title>Landed</title><p>Landed</p>"); }, 300); return; }
+      const file = path.join(FIXTURES, path.basename(u.pathname));
+      if (!fs.existsSync(file)) { res.statusCode = 404; res.end(); return; }
+      res.setHeader("content-type", "text/html");
+      res.end(fs.readFileSync(file));
+    });
+    await new Promise<void>((r) => web.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${(web.address() as AddressInfo).port}`;
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+    web?.closeAllConnections();
+    await new Promise<void>((r) => (web ? web.close(() => r()) : r()));
+  });
+
+  it("the observation after a debounced search fill shows the new rows: debounce 300 ms, request 250 ms, old rows kept, no marker", async () => {
+    const { after, ms } = await fillAndObserve("search-debounce.html", "Search workflows", "roadmap");
+    expect(after.text).toContain("Open Q3 roadmap review");
+    expect(after.text).not.toContain("Open Weekly metrics digest");
+    expect(after.ms).toBeGreaterThanOrEqual(500);
+    expect(ms).toBeLessThan(LIMITS.causalCapMs);
+  });
+
+  it("a slow search (debounce 500 ms, request 800 ms) shows its rows before the cap", async () => {
+    const { after, ms } = await fillAndObserve("search-debounce.html?deb=500&lat=800", "Search workflows", "roadmap");
+    expect(after.text).toContain("Open Q3 roadmap review");
+    expect(after.text).not.toContain("Open Sales call notes");
+    expect(ms).toBeLessThan(LIMITS.causalCapMs);
+  });
+
+  it.each([
+    ["lodash", "a debounce that waits again for its rest", 650],
+    ["interval", "an RxJS-like interval debounce", 550],
+    ["direct", "a request that starts in the input event (counted over CDP only)", 600],
+  ])("mode %s (%s) shows the new rows", async (mode, _what, min) => {
+    const { after } = await fillAndObserve(`search-debounce.html?mode=${mode}&lat=${mode === "direct" ? 600 : 250}`, "Search workflows", "notes");
+    expect(after.text).toContain("Open Release notes writer");
+    expect(after.text).not.toContain("Open Q3 roadmap review");
+    expect(after.ms).toBeGreaterThanOrEqual(min);
+  });
+
+  it("a fill that starts no work ends within a few frames, also next to a poll that runs from load", async () => {
+    for (const file of ["search-debounce.html", "search-debounce.html?poll=1"]) {
+      const { after, ms } = await fillAndObserve(file, "Note", "hello");
+      expect(find(after, "fill", "Note").value).toBe("hello");
+      expect(ms).toBeLessThan(file.includes("poll") ? 400 : 250);
+    }
+  });
+
+  it("a new aria-busy marker holds the settle until it goes", async () => {
+    const { after, ms } = await fillAndObserve("search-debounce.html?busy=1", "Note", "hello");
+    expect(after.text).toContain("saved");
+    expect(ms).toBeGreaterThanOrEqual(400);
+    expect(after.busy).toBe(false);
+  });
+
+  it.each(["named", "arrow"])("a %s poll chain that the input starts stops long before the cap", async (chain) => {
+    // named: a callback that schedules itself again every 800 ms stops at its second timer. arrow: a new function each
+    // 300 ms stops at the generation limit.
+    const { after, ms } = await fillAndObserve(`search-debounce.html?chain=${chain}`, "Note", "hello");
+    expect(after.text).toMatch(/tick \d/);
+    expect(ms).toBeLessThan(2000);
+  });
+
+  it("an Enter that navigates does not hang, and the observation shows the new page", async () => {
+    await page.navigate(`${base}/search-debounce.html`, NAV_MS);
+    const obs = await page.observe();
+    await page.act(find(obs, "fill", "Go to"), obs, "home");
+    const filled = await page.observe();
+    const t0 = Date.now();
+    await page.press("Enter", filled);
+    const after = await page.observe();
+    expect(Date.now() - t0).toBeLessThan(LIMITS.causalCapMs);
+    expect(after.url).toContain("/landed.html?to=home");
+    expect(after.text).toContain("Landed");
+  });
+
+  it("the composer of a detached cmdk list gives the option that Enter picks; Enter picks it", async () => {
+    const { after } = await fillAndObserve("command-menu.html", "Ask anything", "Q3 Roadmap");
+    expect(after.text).toContain("Q3 Roadmap");
+    expect(after.focus?.enterOption?.label).toBe("Ask AI: Q3 Roadmap");
+    expect(after.actions.find((a) => a.label === "Ask AI: Q3 Roadmap")?.node).toBe(after.focus?.enterOption?.node);
+    await page.press("Enter", after);
+    expect(await evaluate("window.picked")).toBe("ask");
+  });
+
+  it("an Enter decided before the popup changed is stale: the key guard holds the popup text", async () => {
+    const { after } = await fillAndObserve("command-menu.html", "Ask anything", "Q3 Roadmap");
+    expect(after.focus?.enterOption).toBeTruthy();
+    // Another item of the list changes. Focus, the field value, and the highlighted item stay the same.
+    await evaluate(`document.querySelectorAll('[cmdk-item]')[1].textContent='Q3 Roadmap Review Notes'`);
+    await expect(page.press("Enter", after)).rejects.toBeInstanceOf(StalePage);
+    expect(await evaluate("window.picked ?? null")).toBeNull();
+    const fresh = await page.observe();
+    expect(fresh.focus?.enterOption).toEqual(after.focus?.enterOption);
+    await page.press("Enter", fresh);
+    expect(await evaluate("window.picked")).toBe("ask");
+  });
+
+  it("a mention popup that the page portals to the body gives its highlighted option", async () => {
+    const { after } = await fillAndObserve("command-menu.html", "Comment", "Thanks @an");
+    expect(after.focus?.label).toBeTruthy();
+    expect(after.focus?.enterOption?.label).toBe("Ann Lee");
+  });
+
+  it("an ARIA combobox gives its active descendant; a filter box above an unrelated listbox gives no option", async () => {
+    const combo = await fillAndObserve("combobox.html", "City", "Be");
+    expect(combo.after.focus?.enterOption?.label).toBe("Berlin");
+    const filter = await fillAndObserve("combobox.html", "Filter folders", "dr");
+    expect(filter.after.text).toContain("Drafts");
+    expect(filter.after.focus?.enterOption).toBeUndefined();
   });
 });
 
