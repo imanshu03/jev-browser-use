@@ -1,5 +1,5 @@
 // Scripted fakes for the fast engine: Page, Chrome, and Observation builders. No Chrome and no network.
-import type { Action, ActionKind, Chrome, EditPlan, EditResult, Observation, Page, Popup } from "../../src/fast/model.js";
+import type { Action, ActionKind, Chrome, DatePlan, EditPlan, EditResult, Observation, Page, Popup } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
 
 /** One executable action. `id` defaults to `e<n>` by position when `obs()` assigns it. */
@@ -22,7 +22,7 @@ export function obs(url: string, actions: Action[], text = "page", over: Partial
   };
 }
 
-export interface ActCall { op: "act" | "press" | "back" | "navigate" | "commit"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan }
+export interface ActCall { op: "act" | "press" | "back" | "navigate" | "commit" | "setDate"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan; plan?: DatePlan }
 
 export interface PageScript {
   pages: Record<string, Observation>;
@@ -70,6 +70,10 @@ export function fakePage(script: PageScript): FakePage {
       if (result instanceof EditRefused) { if (!result.changed) throw result; p.move(call); throw result; }
       p.move(call);
       return result;
+    },
+    async setDate(action: Action, _obs: Observation, plan: DatePlan) {
+      if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
+      p.move({ op: "setDate", id: action.id, plan });
     },
     async press(key: string) { p.move({ op: "press", key }); },
     async popup(action: Action, focus?: boolean): Promise<Popup | null> {

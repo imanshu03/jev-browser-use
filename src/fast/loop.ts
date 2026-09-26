@@ -20,6 +20,7 @@ import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, Run
 import { AUTH_HOST, COMPOSER_SEND_WORDS, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SEND_WORDS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
 import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
 import { EditRefused, StalePage } from "./model.js";
+import { assignDates, confirmsDates, dateGate, datePlan, inBounds, shownOf, wantOf } from "./dates.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
 import type { Decision, StepInput, StepMeta, Target, TargetOp, ValueAsk, ValueHead } from "./policy.js";
 import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, fieldLines, mentionIntent, mentionMatches, readEdit, readStep, readValue, tokenEvidence, top3 } from "./policy.js";
@@ -260,6 +261,7 @@ const NO_CONFIRM_HINT = "run on a TTY with confirmation enabled";
 const SECRET_SHOWN = "<secret>";
 const VALUE_HINT = "pass --var key=value (or /var key=value in chat)";
 const UNATTENDED_WALL_HINT = "an autonomous run with no person at a TTY does not wait for a sign-in; sign in first (run with --headed on a TTY), then run again";
+const DATE_HINT = "give the date in the task, for example 1 September 2026 or 2026-09-01";
 const CANCELLED = "the run was cancelled";
 
 function hit(label: string, words: string[]): boolean {
@@ -918,7 +920,8 @@ export class FastRunner {
    * types a var at confidence 1 and never offers `generate`.
    */
   private fallbackVars(value: Decision["value"], head: ValueHead): string[] {
-    if (value === undefined || value === "none" || value.conf >= THRESHOLDS.data_entry.value) return [];
+    // A date head offers no `generate`, and only the dates that fit its field: its answer stays.
+    if (head.date === true || value === undefined || value === "none" || value.conf >= THRESHOLDS.data_entry.value) return [];
     const low = "generate" in value || (this.deps.fromAssistant === true && this.spans.find((s) => s.id === value.spanId)?.source === "var");
     if (!low) return [];
     return Object.values(head.spans).filter((id) => {
@@ -1067,6 +1070,15 @@ export class FastRunner {
       }
     }
     if (d.operation === "DONE") {
+      // A date field that does not show the task date that Jev's value heads give it, or a calendar range that is not the
+      // task range: the goal is not done. The re-ask does not offer DONE. This check reads the observation only; it comes
+      // before the chip gate, which can focus a field and close a picker.
+      const unset = this.goal === "act" ? this.datesUnset(d, obs, "page") : null;
+      if (unset) {
+        ctx.gate = `date_unset: ${unset}`;
+        this.doneBannedUntil = Math.max(this.doneBannedUntil, this.stepNo);
+        return { kind: "reask" };
+      }
       // A value typed into a chip field that is not added yet: DONE asks first (tokenGate).
       if (this.goal === "act") {
         const gated = await this.tokenGate(true, this.pendingTokens(obs, null), obs, ctx, () => { this.doneBannedUntil = Math.max(this.doneBannedUntil, this.stepNo); });
@@ -1107,6 +1119,13 @@ export class FastRunner {
       const stray = this.strayChip(obs, focusForm, focusNode);
       if (stray !== null) {
         ctx.gate = stray;
+        return { kind: "reask" };
+      }
+      // Enter in a form or dialog whose date fields do not show their task dates can confirm the picker too. It reads the
+      // observation only, so it comes before the chip gate.
+      const unset = this.datesUnset(d, obs, focusForm);
+      if (unset) {
+        ctx.gate = `date_unset: ${unset}`;
         return { kind: "reask" };
       }
       // Enter in another field can send the form: a value typed into a chip field of that form and not added yet asks first.
@@ -1251,6 +1270,17 @@ export class FastRunner {
         return { kind: "reask" };
       }
     }
+    // A button in the form or dialog of a date field can confirm the picker ("Update", "Done", "OK", "Apply"). It waits
+    // until the date fields show the task dates that Jev's value heads give them, and a calendar range shows the task range.
+    // Like the mention gates, it reads the observation only, so it comes before the chip gate.
+    if (op === "CLICK" && action.form !== undefined && action.form !== null && confirmsDates(action, action.form, obs)) {
+      const unset = this.datesUnset(d, obs, action.form);
+      if (unset) {
+        ctx.gate = `date_unset: ${unset}`;
+        this.stepBans.add(key);
+        return { kind: "reask" };
+      }
+    }
     // A value typed into a chip field that is not added yet: a fill of another field or a submit asks first (tokenGate).
     // A click that picks that value does not wait for it: an option or a control outside the form of the field whose
     // label holds the value ('Create "bug"', or the option that Enter picks). A control of that form still waits.
@@ -1342,8 +1372,9 @@ export class FastRunner {
     const gated = op === "CLICK" ? this.pruneUnsent(obs) : [];
     const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated, { obs: at, form: action.form }, sends ? this.sentFields(at, action.form ?? null, null) : []);
     if (denied) return { kind: "record", rec: denied };
-    // An autonomous fill that replaces text that the run did not type is in the audit: nobody saw the old text go.
-    if (op === "TYPE_TEXT" && text !== null && this.cfg.confirm === "autonomous" && !this.cfg.dryRun) {
+    // An autonomous fill that replaces text that the run did not type is in the audit: nobody saw the old text go. A date
+    // field holds no text: code types a task date in its own form and reads it back (typeDate).
+    if (op === "TYPE_TEXT" && text !== null && target.date === undefined && this.cfg.confirm === "autonomous" && !this.cfg.dryRun) {
       // An append keeps the old text: it replaces nothing.
       const replaced = plan?.mode === "append" ? 0 : this.replacedChars(target, at);
       if (replaced > 0) {
@@ -1352,7 +1383,8 @@ export class FastRunner {
       }
     }
 
-    const r = await this.execute(op, target, text, shown, at, ctx, kept, plan);
+    // A date field gets its date through Page.setDate, in the field's own format. It never holds assistant text.
+    const r = target.date !== undefined && used !== null ? await this.typeDate(target, used, at, ctx, shown ?? used.text) : await this.execute(op, target, text, shown, at, ctx, kept, plan);
     // A stale action or a refused fill did not run: the entries that the check dropped on the old observation come back.
     if (r.kind === "stale" || (r.kind === "refused" && !r.changed)) undo();
     // A click on a send control (Send, Post, Reply, Comment, Publish, Share) with unsent text in a field can send it. A
@@ -1360,8 +1392,8 @@ export class FastRunner {
     else if (op === "CLICK" && ran(r) && gated.length > 0 && hit(t.label, SEND_WORDS)) this.watchSend(gated, `click "${cutText(t.label, LIMITS.nameChars)}"`);
     // A fill whose next observation did not settle ran too: its text is in the page, and a later run must not send it
     // unseen.
-    if (used && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true, r.appended === true);
-    if (used && text !== null && r.kind === "record" && r.rec.result === "ok") this.tokenTyped(used, text, target, at);
+    if (used && target.date === undefined && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) this.filled(used, text, target, at, r.ran === true, r.appended === true);
+    if (used && target.date === undefined && text !== null && r.kind === "record" && r.rec.result === "ok") this.tokenTyped(used, text, target, at);
     if (r.kind === "refused" && r.changed) {
       // The fill stopped after it changed the page: part of the text can be in the field. Block before any save or send.
       if (used && text !== null) this.filled(used, text, target, at, true, plan?.mode === "append");
@@ -1382,7 +1414,7 @@ export class FastRunner {
     if (chosen && "generate" in chosen) return this.generate(chosen.conf, t, action, obs, ctx, risk, top);
 
     const span = chosen ? this.spans.find((s) => s.id === chosen.spanId) : undefined;
-    if (!chosen || !span) return block("needs_credential", this.credentialHint(`field "${t.label}"`, isCredential(action, t.label)));
+    if (!chosen || !span) return block("needs_credential", action.date !== undefined ? this.dateHint(t.label) : this.credentialHint(`field "${t.label}"`, isCredential(action, t.label)));
     // A --var value is the user's own word for this run. A span cut from the task needs Jev's confidence, and so does a
     // var that an assistant wrote: in a plugin run it is the assistant's text, not the user's own word.
     const valueConf = span.source === "var" && !this.deps.fromAssistant ? 1 : chosen.conf;
@@ -1403,6 +1435,12 @@ export class FastRunner {
       ctx.gate = `generated value ${span.id} belongs to "${span.field?.label ?? ""}"`;
       return REASK;
     }
+    // A date field takes only a task date that fits it, inside the input's min and max. The value head offers no other.
+    if (action.date !== undefined) {
+      const want = wantOf(action, span);
+      if (want === null) return block("needs_credential", this.dateHint(t.label));
+      if (!inBounds(action, want)) return block("impossible", `date field "${t.label}" takes ${[action.date.min ? `dates from ${action.date.min}` : "", action.date.max ? `to ${action.date.max}` : ""].filter(Boolean).join(" ")}; ${span.text} is outside them`);
+    }
     // One text per field: a text from a later request for a field that already got its text is never typed.
     const rec = span.source === "generated" ? this.typedText.get(`${obs.doc}|${action.node}`) : undefined;
     if (rec && span.field?.request !== rec.request) {
@@ -1411,6 +1449,85 @@ export class FastRunner {
       return REASK;
     }
     return { kind: "span", span, obs, action, gate: null };
+  }
+
+  /** The block hint of a date field without a task date that fits it. An ambiguous numeric date of the task names the fix. */
+  private dateHint(label: string): string {
+    const ambiguous = this.spans.find((s) => s.date?.ambiguous !== undefined);
+    if (ambiguous) return `date field "${label}" cannot take ${ambiguous.text}: its day and month can change places. Write the month as a word or use YYYY-MM-DD`;
+    return `date field "${label}" needs a date: ${DATE_HINT}`;
+  }
+
+  /** The date gate text for `scope` from the date value heads of decision `d` (see `dateGate` in dates.ts), or null. */
+  private datesUnset(d: Decision, obs: Observation, scope: number | null | "page"): string | null {
+    const assigned = assignDates(d.dateValues ?? {}, obs, this.offered(obs));
+    return dateGate(obs, assigned, this.offered(obs), scope);
+  }
+
+  /**
+   * TYPE_TEXT into a date field. Code types the task date in the field's own form (Page.setDate), then reads the field
+   * back. A wrong read-back gets one more pass, in another part order when one is as good. When the field still shows
+   * another value, the step records date_mismatch, and history shows the value of the field. The field is not banned:
+   * Jev sees its value and can type the date again.
+   */
+  private async typeDate(action: Action, span: Span, obs: Observation, ctx: StepCtx, shown: string): Promise<Applied> {
+    const page = this._page as Page;
+    const want = wantOf(action, span) as string;
+    ctx.action = "fill";
+    // A fill ends the watch of an earlier send, as in execute().
+    if (this.sendWatch && this.sendWatch.step < this.stepNo) this.sendWatch = null;
+    if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
+    if (this.cfg.dryRun) {
+      ctx.gate += " dry_run";
+      this.log.info(`step ${this.stepNo} dry-run: TYPE_TEXT [${action.id}] "${action.label}" value="${shown}" date=${want}`);
+      return { kind: "record", rec: this.record(ctx, "skipped", "dry_run") };
+    }
+    const label = cutText(action.label, LIMITS.nameChars);
+    const entry: FastHistoryEntry = { action: label, kind: "fill", text: shown, page_changed: null, step: this.stepNo, url: obs.url, operation: "TYPE_TEXT" };
+    let field = action;
+    let at = obs;
+    let order: string | undefined;
+    for (let pass = 1; pass <= 2; pass++) {
+      const planned = datePlan(field, at, want, order);
+      if (!planned) break;
+      try {
+        await page.setDate(field, at, planned.plan);
+      } catch (e) {
+        if (!(e instanceof StalePage)) throw e;
+        // Nothing was typed in this pass. After a first pass that ran, the field shows what that pass left.
+        if (pass === 1) return { kind: "stale", message: e.message, action: field };
+        break;
+      }
+      order = planned.order;
+      if (pass === 1) {
+        const sig = `${obs.url}|${actionKey(action)}`;
+        this.sigCounts.set(sig, (this.sigCounts.get(sig) ?? 0) + 1);
+        this.history.push(entry);
+      }
+      let next: Observation;
+      try {
+        next = await this.observeSettled();
+      } catch (e) {
+        if (e instanceof StalePage) return { kind: "record", rec: this.blocked(ctx, "ambiguous", "page keeps changing", [], obs.url), ran: true };
+        throw e;
+      }
+      entry.page_changed = next.fingerprint !== obs.fingerprint;
+      entry.url = next.url;
+      this.held = next;
+      // A field that went away (a picker that closed) cannot be read back.
+      const now = next.actions.find((a) => a.node === field.node && a.date !== undefined);
+      if (!now || shownOf(now) === want) {
+        ctx.gate += ` date ${want}${pass > 1 ? " second pass" : ""}`;
+        return { kind: "record", rec: this.record(ctx, "ok", null) };
+      }
+      this.log.warn(`step ${this.stepNo} date field "${label}" shows ${now.value ?? ""} after the parts ${planned.order}, not ${want}${pass === 1 ? "; typing it again" : ""}`);
+      field = now;
+      at = next;
+    }
+    const value = (field.value ?? "").trim() || "nothing";
+    ctx.gate = `date_mismatch: "${label}" shows ${value}, not ${span.text}`;
+    this.history.push({ action: label, kind: "date_mismatch", text: `the field shows ${value}`, page_changed: false, step: this.stepNo, url: at.url, operation: "TYPE_TEXT" });
+    return { kind: "record", rec: this.record(ctx, "failed", ctx.gate) };
   }
 
   /** The `generate` choice: the gates, the cache, one text request, and a new observation after the wait. */

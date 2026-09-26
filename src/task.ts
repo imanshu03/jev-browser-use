@@ -1,6 +1,6 @@
 // Deterministic text work on the task string. No network.
 import type { ProfileEntry } from "./browser.js";
-import type { Span } from "./types.js";
+import type { DateFact, Span } from "./types.js";
 import { LIMITS, SECRET_KEY } from "./types.js";
 
 export const VALUE_VERBS = ["search for", "search", "look up", "type", "enter", "fill in", "fill", "write", "put",
@@ -435,11 +435,144 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   }
   // R6 whole task
   add(task, "whole_task", 0);
+  markDates(task, out);
   return out;
 }
 
+/** A --var key that names the start or the end of a date range: "start", "from_date", "check_in", "end_date", "to". */
+const VAR_START = /(?:^|[_-])(?:start|from|begin|check_?in)(?:[_-]|$)/i;
+const VAR_END = /(?:^|[_-])(?:end|to|until|check_?out)(?:[_-]|$)/i;
+
 export function varSpans(vars: Record<string, string>): Span[] {
-  return Object.entries(vars).map(([k, v]) => ({ id: `v_${k}`, text: v, source: "var" as const, secret: SECRET_KEY.test(k) }));
+  return Object.entries(vars).map(([k, v]) => {
+    const span: Span = { id: `v_${k}`, text: v, source: "var" as const, secret: SECRET_KEY.test(k) };
+    const date = span.secret ? null : parseDate(v);
+    if (date) {
+      span.date = date;
+      if (VAR_START.test(k) !== VAR_END.test(k)) span.dateRole = VAR_START.test(k) ? "start" : "end";
+    }
+    return span;
+  });
+}
+
+/** A month name, its short form, or "Sept", with an optional dot. Group 1 is the name. */
+const MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+/** A day number with an optional ordinal suffix. Group 1 is the number. */
+const DAY = "(\\d{1,2})(?:st|nd|rd|th)?";
+const WEEKDAY = /^(sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?)\.?,?\s+/i;
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DAY_MONTH = new RegExp(`^${DAY}\\s+(?:of\\s+)?${MONTH}(?:,?\\s+(\\d{4}))?$`, "i");
+const MONTH_DAY = new RegExp(`^${MONTH}\\s+${DAY}(?:,?\\s+(\\d{4}))?$`, "i");
+
+/** The number of days in month `m` (1-12) of year `y`. */
+export function daysIn(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/** A real calendar date with a four-digit year. */
+export function isDate(y: number, m: number, d: number): boolean {
+  return Number.isInteger(y) && Number.isInteger(m) && Number.isInteger(d) && y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= daysIn(y, m);
+}
+
+/** A month and a day without a year ("Sep 1", "1st of September"), or null. */
+function dayMonth(text: string): { m: number; d: number } | null {
+  const t = text.trim().replace(/\s+/g, " ").replace(WEEKDAY, "");
+  const a = t.match(DAY_MONTH);
+  const b = a ? null : t.match(MONTH_DAY);
+  if ((a && a[3] !== undefined) || (b && b[3] !== undefined)) return null;
+  const m = MONTHS.indexOf(((a ? a[2] : b?.[1]) ?? "").slice(0, 3).toLowerCase()) + 1;
+  const d = Number(a ? a[1] : b?.[2]);
+  return (a || b) && m > 0 && d >= 1 && d <= daysIn(2024, m) ? { m, d } : null;
+}
+
+/**
+ * The date that `text` names as a whole, or null. It reads:
+ * - ISO dates, and dates that start with the year ("2026-09-01", "2026/9/1");
+ * - numeric dates with "/", ".", or "-" and a four-digit year ("9/15/2026", "15.9.2026");
+ * - month names, short names, and "Sept" in either order, with an ordinal, "of", a weekday, and commas ("1 September
+ *   2026", "September 1st, 2026", "Tuesday, September 1st, 2026", "1st of September 2026").
+ * A date that does not exist ("31 September 2026"), a wrong weekday, a two-digit year, and a date without a year give
+ * null. A numeric date whose first two numbers can both be a month ("9/1/2026") is `ambiguous`: see DateFact.
+ */
+export function parseDate(text: string): DateFact | null {
+  let t = text.trim().replace(/\s+/g, " ").replace(/[.,;]$/, "");
+  const ymd = t.match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/);
+  if (ymd) {
+    const [y, m, d] = [Number(ymd[1]), Number(ymd[3]), Number(ymd[4])];
+    return isDate(y, m, d) ? { y, m, d } : null;
+  }
+  const num = t.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/);
+  if (num) {
+    const [a, sep, b, y] = [Number(num[1]), num[2] as string, Number(num[3]), Number(num[4])];
+    if (a > 12 && isDate(y, b, a)) return { y, m: b, d: a };
+    if (b > 12 && isDate(y, a, b)) return { y, m: a, d: b };
+    if (a === b && isDate(y, a, b)) return { y, m: a, d: b };
+    // Both numbers can be a month: 9/1/2026 is 1 September or 9 January. Only a field of the same shape reads it.
+    return a <= 12 && b <= 12 && isDate(y, a, b) && isDate(y, b, a) ? { y, m: a, d: b, ambiguous: sep } : null;
+  }
+  const wd = t.match(WEEKDAY);
+  if (wd) t = t.slice(wd[0].length);
+  const a = t.match(DAY_MONTH);
+  const b = a ? null : t.match(MONTH_DAY);
+  const year = a ? a[3] : b?.[3];
+  if ((!a && !b) || year === undefined) return null;
+  const y = Number(year);
+  const m = MONTHS.indexOf(((a ? a[2] : b?.[1]) ?? "").slice(0, 3).toLowerCase()) + 1;
+  const d = Number(a ? a[1] : b?.[2]);
+  if (!isDate(y, m, d)) return null;
+  if (wd && WEEKDAYS.indexOf((wd[1] ?? "").slice(0, 3).toLowerCase()) !== new Date(Date.UTC(y, m - 1, d)).getUTCDay()) return null;
+  return { y, m, d };
+}
+
+const RANGE_WORD = /^(?:to|until|till|through|thru|-|\u2013|\u2014)$/;
+const START_WORDS = /\b(?:start(?:s|ing)?|begin(?:s|ning)?|check-?in|from)(?:\s+(?:date|day|on|at|to|as|is|=|:))*\s*$/;
+const END_WORDS = /\b(?:end(?:s|ing)?|check-?out|until)(?:\s+(?:date|day|on|at|to|as|is|=|:))*\s*$/;
+const before = (a: DateFact, b: DateFact): boolean => a.y * 10_000 + a.m * 100 + a.d <= b.y * 10_000 + b.m * 100 + b.d;
+
+/**
+ * Date facts on the spans whose whole text is a date, and range roles. "from A to B", "between A and B", "A – B", and
+ * "A until B" make A the start and B the end. So do "start" and "end" (or "check-in" and "check-out") in the words just
+ * before two dates. A start or an end without a year takes the year of the other one ("between Sep 1 and Sep 15, 2026").
+ * No span is added or removed: new spans would change typed_values and the operation head.
+ */
+function markDates(task: string, spans: Span[]): void {
+  for (const s of spans) {
+    const date = s.secret || s.source === "whole_task" ? null : parseDate(s.text);
+    if (date) s.date = date;
+  }
+  const low = task.toLowerCase();
+  const found = spans
+    .filter((s) => !s.secret && s.source !== "whole_task" && s.source !== "clause" && (s.date !== undefined || dayMonth(s.text) !== null))
+    .map((s) => ({ s, at: low.indexOf(s.text.toLowerCase()) }))
+    .filter((f) => f.at >= 0)
+    .sort((x, y) => x.at - y.at || y.s.text.length - x.s.text.length);
+  // A date inside a longer date ("September 1" in "September 1, 2026") is not a date of its own.
+  const dates = found.filter((f, i) => !found.some((g, j) => j !== i && g.at <= f.at && g.at + g.s.text.length >= f.at + f.s.text.length && g.s.text.length > f.s.text.length));
+  const pair = (start: Span, end: Span): void => {
+    // A date without a year takes the year of its partner: the start is not after the end.
+    const sd = start.date ?? null;
+    const ed = end.date ?? null;
+    if (!sd && ed && !ed.ambiguous) { const dm = dayMonth(start.text); if (dm) { const y = dm.m * 100 + dm.d > ed.m * 100 + ed.d ? ed.y - 1 : ed.y; if (isDate(y, dm.m, dm.d)) start.date = { y, m: dm.m, d: dm.d }; } }
+    if (!ed && sd && !sd.ambiguous) { const dm = dayMonth(end.text); if (dm) { const y = dm.m * 100 + dm.d < sd.m * 100 + sd.d ? sd.y + 1 : sd.y; if (isDate(y, dm.m, dm.d)) end.date = { y, m: dm.m, d: dm.d }; } }
+    if (!start.date || !end.date) return;
+    if (!start.date.ambiguous && !end.date.ambiguous && !before(start.date, end.date)) return;
+    start.dateRole = "start";
+    end.dateRole = "end";
+  };
+  for (let i = 0; i + 1 < dates.length; i++) {
+    const p = dates[i] as { s: Span; at: number };
+    const q = dates[i + 1] as { s: Span; at: number };
+    if (p.s.dateRole || q.s.dateRole) continue;
+    // Quote marks around the dates do not count: 'from "1 September 2026" to "15 September 2026"'.
+    const between = low.slice(p.at + p.s.text.length, q.at).replace(/["\u201c\u201d\u2018\u2019']/g, "").trim();
+    const lead = low.slice(Math.max(0, p.at - 40), p.at).replace(/["\u201c\u201d\u2018\u2019']/g, "");
+    if (RANGE_WORD.test(between) || (between === "and" && /\bbetween\s*$/.test(lead))) pair(p.s, q.s);
+  }
+  // "start date 1 Sep 2026 and end date 15 Sep 2026": one start word and one end word.
+  const starts = dates.filter((f) => !f.s.dateRole && START_WORDS.test(low.slice(Math.max(0, f.at - 40), f.at)));
+  const ends = dates.filter((f) => !f.s.dateRole && END_WORDS.test(low.slice(Math.max(0, f.at - 40), f.at)));
+  if (starts.length === 1 && ends.length === 1 && starts[0] !== ends[0]) pair((starts[0] as { s: Span }).s, (ends[0] as { s: Span }).s);
 }
 
 const KEY_WORD = /\b(Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Arrow(?:Up|Down|Left|Right)|Page(?:Up|Down)|Home|End|F\d{1,2})\b/g;

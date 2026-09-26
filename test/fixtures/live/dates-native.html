@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Native date fixture</title>
+<style>body { font: 13px sans-serif; margin: 8px; } label, input { display: block; margin: 2px 0; } fieldset input { display: inline-block; width: 40px; }</style>
+</head>
+<body>
+<form id="f">
+  <label for="due">Due date</label><input id="due" type="date" value="2026-08-24" min="2026-01-01" max="2026-12-31">
+  <label for="dt">Meeting</label><input id="dt" type="datetime-local">
+  <label for="mo">Billing month</label><input id="mo" type="month">
+  <label for="tm">Start time</label><input id="tm" type="time">
+  <label for="wk">Week</label><input id="wk" type="week">
+  <!-- A GOV.UK date input: a fieldset with a legend, and Day, Month, and Year inputs. -->
+  <fieldset>
+    <legend>Date of birth</legend>
+    <label for="dd" style="display:inline">Day</label><input id="dd" name="dob-day" inputmode="numeric" maxlength="2">
+    <label for="mm" style="display:inline">Month</label><input id="mm" name="dob-month" inputmode="numeric" maxlength="2">
+    <label for="yy" style="display:inline">Year</label><input id="yy" name="dob-year" inputmode="numeric" maxlength="4" style="width:60px">
+  </fieldset>
+  <button type="button">Save</button>
+</form>
+<script>
+window.log = [];
+for (const e of document.querySelectorAll("input")) {
+  e.addEventListener("input", () => window.log.push(`${e.id} input ${e.value}`));
+  e.addEventListener("change", () => window.log.push(`${e.id} change ${e.value}`));
+}
+</script>
+</body>
+</html>

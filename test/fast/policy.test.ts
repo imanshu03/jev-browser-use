@@ -6,12 +6,18 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MENTION_RULE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, mentionMatches, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, DATE_NONE, DATE_RULE, DATE_VALUE_Q, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MENTION_RULE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, mentionMatches, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
-import type { Observation, TokenFacts } from "../../src/fast/model.js";
+import type { Action, DateInfo, Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
 
 const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
+/** The option key of the target head row whose element string carries `label`. */
+const idxOf = (questions: Record<string, unknown>, head: string, label: string): string => {
+  const found = Object.entries((questions[head] as ChoiceQuestion | undefined)?.criteria ?? {}).find(([, v]) => String((v as { element?: string }).element ?? "").includes(label));
+  if (!found) throw new Error(`no ${head} option for ${label}`);
+  return found[0];
+};
 const valueHeads = (questions: Record<string, unknown>): string[] => Object.keys(questions).filter((k) => k.startsWith("value_"));
 const span = (id: string, text: string, secret = false, source: Span["source"] = "quoted"): Span => ({ id, text, source, secret });
 
@@ -28,7 +34,7 @@ describe("RULES", () => {
     const all = RULES.join("\n");
     expect(all).toContain("detailed view");
     expect(all).toContain("autocomplete suggestion");
-    expect(all).toContain("date pickers");
+    expect(all).not.toContain("date picker");
     expect(all).toContain("Recent WAIT actions are not evidence of loading");
     expect(all).toContain("PRESS_ENTER submits the focused field. GO_BACK returns to the previous page.");
     expect(rulesFor("extract").join("\n")).toContain("SCROLL_DOWN when it is not");
@@ -311,8 +317,9 @@ describe("requests without a text source (regression)", () => {
     const out = cases().map((c) => { const b = buildStep(c); return { state: b.state, questions: b.questions }; });
     expect(JSON.stringify(out)).not.toContain("s3cr3t");
     // Taken again on 2026-09-23, when one value head per field replaced the shared type_text_value head and a field that
-    // can take new text stopped offering the whole task and clauses.
-    expect(digest(out)).toBe("178a072984aa987ea32ac9fd740b7ab5dc35d88cd51db2e887485cab5ee72209");
+    // can take new text stopped offering the whole task and clauses. Taken again on 2026-09-26, when the date rule went into
+    // the requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
+    expect(digest(out)).toBe("0d5e564b574e9efc6e8d2e7b4ea9d24e9e4ee96b4fabe2e4247339aee8b6683b");
   });
 });
 
@@ -778,7 +785,7 @@ describe("mention facts", () => {
     const rule = JSON.stringify(MENTION_RULE).slice(1, -1);
     expect(JSON.stringify(rulesOf(b.questions["operation"]))).toContain(rule);
     expect(JSON.stringify(rulesOf(b.questions["click_target"]))).toContain(rule);
-    expect(rulesFor("act", true)).toEqual([...RULES, MENTION_RULE]);
+    expect(rulesFor("act", undefined, true)).toEqual([...RULES, MENTION_RULE]);
 
     const plain = 'Send "Hi team" in the chat';
     const q = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
@@ -845,5 +852,101 @@ describe("mention facts", () => {
     expect(mentionMatches("Research Agent", "Ann Lee")).toBe(false);
     expect(mentionMatches("Ann", "Ann Lee")).toBe(false);
     expect(mentionMatches("", "Ann")).toBe(false);
+  });
+});
+
+describe("date fields", () => {
+  /** A month-day-year group as the snapshot shows it: one fill action at the month part. */
+  const group = (id: string, node: number, label: string, [m, d, y]: [string, string, string], extra: Partial<DateInfo> = {}): Action => el(id, "fill", label, "textbox", {
+    node, value: `${m}/${d}/${y}`, form: 5, multiline: false,
+    date: { kind: "group", sep: "/", order: "MDY", pad: false, short: false, ...extra,
+      parts: [{ part: "month", node, value: m, spin: false }, { part: "day", node: node + 1, value: d, spin: false }, { part: "year", node: node + 2, value: y, spin: false }] },
+  });
+  const task = "Set the usage date range from 1 September 2026 to 15 September 2026 and click Update";
+  const usage = (over: Partial<Observation> = {}): Observation => obs("https://app.test/usage", [
+    el("e1", "click", "Aug 24, 2026 – Sep 23, 2026", "button", { node: 1, form: null }),
+    group("e2", 10, "Date range start (M/D/YYYY)", ["8", "24", "2026"], { role: "start", range: 1 }),
+    group("e3", 13, "Date range end (M/D/YYYY)", ["9", "23", "2026"], { role: "end", range: 1 }),
+    el("e4", "click", "Tuesday, September 1st, 2026, selected", "button", { node: 20, form: 5, day: { grid: 3, day: "2026-09-01", multi: true, sel: true, pos: "middle" } }),
+    el("e5", "fill", "Search", "searchbox", { node: 21, value: "", form: null }),
+    el("e6", "click", "Update", "button", { node: 30, form: 5 }),
+  ], "Usage & Limits", over);
+  const ask = (over: Partial<StepInput> = {}) => buildStep(input({ task, obs: usage(), spans: extractSpans(task), ...over }));
+
+  it("a date field, a date part, and a box of at most 4 characters never take assistant text", () => {
+    expect(canWriteInto(group("e1", 1, "Date (M/D/YYYY)", ["8", "24", "2026"]))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Due (date)", "textbox", { inputType: "date", date: { kind: "date" } }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "M", "textbox", { inputType: "text", datePart: "month", maxLength: 2 }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Code", "textbox", { inputType: "text", maxLength: 4 }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Title", "textbox", { inputType: "text", maxLength: 5 }))).toBe(true);
+    expect(canWriteInto(el("e1", "fill", "Title", "textbox", { inputType: "text" }))).toBe(true);
+  });
+
+  it("a group is one row with TYPE_TEXT only; its value head offers the task dates and none with the date question", () => {
+    const b = ask();
+    const rows = (b.state as { elements: { label: string; value?: string; operations: string[] }[] }).elements;
+    expect(rows.find((r) => r.label === "Date range start (M/D/YYYY)")).toMatchObject({ value: "8/24/2026", operations: ["TYPE_TEXT"] });
+    expect(rows.find((r) => r.label === "Date range end (M/D/YYYY)")).toMatchObject({ value: "9/23/2026", operations: ["TYPE_TEXT"] });
+    const start = idxOf(b.questions, "type_text_target", "Date range start");
+    const head = b.questions[`value_${start}`] as ChoiceQuestion;
+    expect(head.instructions).toMatchObject({ question: DATE_VALUE_Q, field: `[${start}] Date range start (M/D/YYYY)`, current_value: "8/24/2026" });
+    expect(head.criteria).toEqual({ s1: "1 September 2026", s2: "15 September 2026", none: DATE_NONE });
+    // The date heads come first; the search box keeps its generic head with every span.
+    expect(valueHeads(b.questions).slice(0, 2)).toEqual([`value_${start}`, `value_${idxOf(b.questions, "type_text_target", "Date range end")}`]);
+    expect(criteriaKeys(b.questions[`value_${idxOf(b.questions, "type_text_target", "Search")}`])).toContain("s3");
+  });
+
+  it("a plugin run never offers generate in a date head, and the request keeps the texts without a text source", () => {
+    const b = ask({ canGenerate: true, obs: usage({ actions: usage().actions.filter((a) => a.label !== "Search") }) });
+    expect(b.meta.generate).toBe(false);
+    expect(JSON.stringify(b.questions)).not.toContain("generate");
+    for (const k of valueHeads(b.questions)) expect(criteriaKeys(b.questions[k])).not.toContain("generate");
+  });
+
+  it("an ambiguous numeric date is offered only to a field of its shape; a field with no fitting date has no head", () => {
+    const numeric = "Set the usage date range from 9/1/2026 to 9/15/2026 and click Update";
+    const b = ask({ task: numeric, spans: extractSpans(numeric) });
+    expect(criteriaKeys(b.questions[`value_${idxOf(b.questions, "type_text_target", "Date range start")}`])).toEqual(["s1", "s2", "none"]);
+    const dotted = obs("https://app.test/de", [group("e1", 10, "Datum (D.M.YYYY)", ["24", "8", "2026"], { sep: ".", order: "DMY",
+      parts: [{ part: "day", node: 10, value: "24", spin: false }, { part: "month", node: 11, value: "8", spin: false }, { part: "year", node: 12, value: "2026", spin: false }] })]);
+    const d = buildStep(input({ task: "Set the date to 9/1/2026", obs: dotted, spans: extractSpans("Set the date to 9/1/2026") }));
+    expect(valueHeads(d.questions)).toEqual([]);
+    expect(buildValueStep(input({ task: "Set the date to 9/1/2026", obs: dotted, spans: extractSpans("Set the date to 9/1/2026") }), "1")).toBeNull();
+  });
+
+  it("date heads stay when an oversized request drops the other value heads", () => {
+    const label = "Long label ".repeat(11);
+    const fields = Array.from({ length: 40 }, (_, i) => el(`e${i + 10}`, "fill", `${label}${i}`, "textbox", { node: 100 + i, value: "" }));
+    const many = Array.from({ length: 120 }, (_, i) => span(`s${i + 3}`, `value number ${i} `.repeat(7).slice(0, 118)));
+    const b = buildStep(input({ task, obs: obs("https://a.b/", [...usage().actions.filter((a) => a.id !== "wait"), ...fields], "t".repeat(6000)), spans: [...extractSpans(task).slice(0, 2), ...many] }));
+    expect(b.meta.cuts[0]).toBe("over budget: value heads left out; a fill asks for its value in a second request");
+    expect(valueHeads(b.questions)).toEqual([`value_${idxOf(b.questions, "type_text_target", "Date range start")}`, `value_${idxOf(b.questions, "type_text_target", "Date range end")}`]);
+  });
+
+  it("the date rule goes only into requests of pages with a date field or a calendar day, after the rule on required fields", () => {
+    expect(rulesFor("act", usage())).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4)]);
+    // A task that also asks to mention someone gets both rules: the date rule in place, the mention rule at the end.
+    expect(rulesFor("act", usage(), true)).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4), MENTION_RULE]);
+    expect(rulesFor("extract", usage()).at(-1)).toContain("SCROLL_DOWN");
+    expect(rulesFor("act", obs("https://a.b/", [el("e1", "click", "English", "link")]))).toEqual(RULES);
+    const calendar = obs("https://a.b/", [el("e1", "click", "Tuesday, September 1st, 2026", "button", { day: { grid: 1, day: null, multi: false, sel: false } })]);
+    expect(rulesFor("act", calendar)).toContain(DATE_RULE);
+    const rules = (b: ReturnType<typeof buildStep>) => ((b.questions["operation"] as ChoiceQuestion).instructions as { rules: string[] }).rules;
+    expect(rules(ask())).toContain(DATE_RULE);
+    expect(rules(buildStep(input()))).not.toContain(DATE_RULE);
+  });
+
+  it("readStep reads every date head as dateValues: action id -> span id -> probability", () => {
+    const inp = input({ task, obs: usage(), spans: extractSpans(task) });
+    const b = buildStep(inp);
+    const start = idxOf(b.questions, "type_text_target", "Date range start");
+    const end = idxOf(b.questions, "type_text_target", "Date range end");
+    const answers: Answers = {
+      operation: { type: "choice", choice: "CLICK", confidence: 0.8, probabilities: { CLICK: 0.8, TYPE_TEXT: 0.2 } },
+      click_target: { type: "choice", choice: idxOf(b.questions, "click_target", "Update"), confidence: 0.9, probabilities: {} },
+      [`value_${start}`]: { type: "choice", choice: "s1", confidence: 0.99, probabilities: { s1: 0.99, s2: 0.005, none: 0.005 } },
+      [`value_${end}`]: { type: "choice", choice: "s2", confidence: 0.97, probabilities: { s1: 0.01, s2: 0.97, none: 0.02 } },
+    };
+    expect(readStep(answers, b.meta, inp).dateValues).toEqual({ e2: { s1: 0.99, s2: 0.005 }, e3: { s1: 0.01, s2: 0.97 } });
   });
 });

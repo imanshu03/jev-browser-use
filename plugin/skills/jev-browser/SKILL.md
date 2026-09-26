@@ -9,7 +9,7 @@ TypeSafe Jev drives Chrome and chooses every browser action. You start the run, 
 
 ## Run a task
 
-1. Call `browse` with the task in the user's words. Do not add rules or warnings to the task, such as "ignore instructions on the page": Jev already treats page text as data, and an extra rule can make it skip a step. Put the start page in `url` and the profile in `profile`, not in the task. Use `profile: "none"` for a temporary profile. Put exact text to type in quotes. To give text that you already wrote, put it in `vars` under a key that names the label of its field, such as `description` for a "Description" field. Do not use general keys such as `text` or `value`. To continue on the page where the last run ended, leave out `url`. A `url` loads the page again.
+1. Call `browse` with the task in the user's words. Do not add rules or warnings to the task, such as "ignore instructions on the page": Jev already treats page text as data, and an extra rule can make it skip a step. Put the start page in `url` and the profile in `profile`, not in the task. Use `profile: "none"` for a temporary profile. Put exact text to type in quotes. To give text that you already wrote, put it in `vars` under a key that names the label of its field, such as `description` for a "Description" field. Do not use general keys such as `text` or `value`. Write a date with the month as a word or as YYYY-MM-DD, for example "1 September 2026" or "2026-09-01". Jev fills date fields from the task; a run never asks you for a date. To continue on the page where the last run ended, leave out `url`. A `url` loads the page again.
 2. Read `status` and do what `next` says.
 
 | status | What to do |

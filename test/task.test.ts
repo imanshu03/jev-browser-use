@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractKeys, extractProfileMentions, extractSpans, extractUrls, mentionsProfileWord, redact, varSpans } from "../src/task.js";
+import { extractKeys, extractProfileMentions, extractSpans, extractUrls, mentionsProfileWord, parseDate, redact, varSpans } from "../src/task.js";
 
 describe("extractUrls", () => {
   it("finds http URLs and strips trailing punctuation", () => {
@@ -253,5 +253,72 @@ describe("redact", () => {
   it("replaces secrets", () => {
     const spans = [{ id: "v_password", text: "hunter2", source: "var" as const, secret: true }, { id: "s1", text: "keep", source: "quoted" as const, secret: false }];
     expect(redact("pw hunter2 keep hunter2", spans)).toBe("pw *** keep ***");
+  });
+});
+
+describe("parseDate", () => {
+  it("reads ISO, numeric, and month-name dates in either order, with ordinals, of, a weekday, and commas", () => {
+    for (const t of ["1 September 2026", "September 1, 2026", "Sep 1st 2026", "Sept 1 2026", "Tuesday, September 1st, 2026", "1st of September 2026", "2026-09-01", "2026/9/1", "1 Sep. 2026"]) {
+      expect(parseDate(t), t).toEqual({ y: 2026, m: 9, d: 1 });
+    }
+    expect(parseDate("13/9/2026")).toEqual({ y: 2026, m: 9, d: 13 });
+    expect(parseDate("9/13/2026")).toEqual({ y: 2026, m: 9, d: 13 });
+    expect(parseDate("5.5.2026")).toEqual({ y: 2026, m: 5, d: 5 });
+  });
+
+  it("marks a numeric date whose day and month can change places as ambiguous", () => {
+    expect(parseDate("9/1/2026")).toEqual({ y: 2026, m: 9, d: 1, ambiguous: "/" });
+    expect(parseDate("3.4.2026")).toEqual({ y: 2026, m: 3, d: 4, ambiguous: "." });
+  });
+
+  it("gives null for a date that does not exist, a wrong weekday, a two-digit year, no year, and other text", () => {
+    for (const t of ["31 September 2026", "29 February 2026", "Wednesday, September 1st, 2026", "9/1/26", "1 September", "Sep 1", "13/13/2026", "next Friday", "2026", "September 2026", "1 Septembre 2026"]) {
+      expect(parseDate(t), t).toBeNull();
+    }
+    expect(parseDate("29 February 2028")).toEqual({ y: 2028, m: 2, d: 29 });
+  });
+});
+
+describe("date facts on spans", () => {
+  const dated = (task: string) => extractSpans(task).filter((s) => s.date).map((s) => ({ text: s.text, date: s.date, ...(s.dateRole ? { role: s.dateRole } : {}) }));
+
+  it("adds a date and a range role to the spans that are dates; it adds no span", () => {
+    const task = "Set the usage date range from 1 September 2026 to 15 September 2026 and click Update";
+    expect(dated(task)).toEqual([
+      { text: "1 September 2026", date: { y: 2026, m: 9, d: 1 }, role: "start" },
+      { text: "15 September 2026", date: { y: 2026, m: 9, d: 15 }, role: "end" },
+    ]);
+    // Span ids and texts do not change: a new span would change typed_values and the operation head.
+    expect(extractSpans(task).map((s) => s.text)).toEqual(["1 September 2026", "15 September 2026", "1", "2026", "15", "September", "Update", task]);
+  });
+
+  it("reads ranges with between, a dash, quotes, and start and end words; a start without a year takes the end's year", () => {
+    expect(dated("Filter between Sep 1 and Sep 15, 2026")).toEqual([
+      { text: "Sep 1", date: { y: 2026, m: 9, d: 1 }, role: "start" },
+      { text: "Sep 15, 2026", date: { y: 2026, m: 9, d: 15 }, role: "end" },
+    ]);
+    expect(dated("Book 2026-09-01 – 2026-09-15").map((d) => d.role)).toEqual(["start", "end"]);
+    expect(dated('Set the range from "1 September 2026" to "15 September 2026"').map((d) => d.role)).toEqual(["start", "end"]);
+    expect(dated("Set the start date to 1 September 2026 and the end date to 15 September 2026").map((d) => d.role)).toEqual(["start", "end"]);
+    expect(dated("Set the usage date range from 9/1/2026 to 9/15/2026").map((d) => [d.role, d.date?.ambiguous])).toEqual([["start", "/"], ["end", undefined]]);
+  });
+
+  it("gives no range role to one date, to an end before its start, or to two unrelated dates", () => {
+    expect(dated("Set the due date to 15 September 2026 and save")).toEqual([{ text: "15 September 2026", date: { y: 2026, m: 9, d: 15 } }]);
+    expect(dated("from 15 September 2026 to 1 September 2026").map((d) => d.role)).toEqual([undefined, undefined]);
+    expect(dated("Set the invoice date to 1 September 2026 and the due date to 15 September 2026").map((d) => d.role)).toEqual([undefined, undefined]);
+  });
+
+  it("gives no date to a secret span, a relative date, or an invalid date", () => {
+    expect(dated('log in with password "2026-09-01"')).toEqual([]);
+    expect(dated("Set the date to next Friday")).toEqual([]);
+    expect(dated("Set the date to 31 September 2026")).toEqual([]);
+  });
+
+  it("--var values get dates, and a start or end key gives the role; secret vars get none", () => {
+    const s = varSpans({ start_date: "2026-09-01", end: "15 September 2026", note: "hi", pin: "2026-09-01" });
+    expect(s.map((x) => [x.id, x.date ? `${x.date.y}-${x.date.m}-${x.date.d}` : null, x.dateRole ?? null])).toEqual([
+      ["v_start_date", "2026-9-1", "start"], ["v_end", "2026-9-15", "end"], ["v_note", null, null], ["v_pin", null, null],
+    ]);
   });
 });

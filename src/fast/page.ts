@@ -4,11 +4,11 @@
 // Copyright (c) 2026 Browser Use.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import type { Action, Chrome, EditMode, EditPlan, EditResult, Observation, Page, PageOptions, Popup } from "./model.js";
+import type { Action, Chrome, DatePlan, EditMode, EditPlan, EditResult, Observation, Page, PageOptions, Popup } from "./model.js";
 import { LIMITS } from "../types.js";
 import { EditRefused, StalePage } from "./model.js";
 import type { EditStep } from "./snapshot.js";
-import { CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, pageKeyGuardScript, popupScript, settleScript } from "./snapshot.js";
+import { BLUR_SCRIPT, CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, nativeDateScript, pageKeyGuardScript, popupScript, selectPartScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -428,6 +428,51 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
           return await editField(action.node, text as string, edit ?? { mode: "replace" });
         }
       }
+      pendingSettle = action;
+    },
+
+    async setDate(action, obs, plan) {
+      // One freshness check for the whole field. Each part changes the form values, so a check per part would go stale.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Page changed since this decision. Observe again.");
+      // The causal settle follows a date as it follows a fill: the page can load or filter on each change.
+      if ("native" in plan) {
+        await arm(null);
+        const r = await evaluate(nativeDateScript(action.node as number, plan.native));
+        if (r.exception || r.value === null) {
+          await settleNow();
+          throw new StalePage("Date field changed or is gone. Observe again.");
+        }
+        pendingSettle = action;
+        return;
+      }
+      let typed = false;
+      for (const part of plan.parts) {
+        const r = await evaluate(actScript({ ...action, kind: "click", node: part.node }));
+        const at = r.value as { x: number; y: number } | null;
+        if (r.exception || !at) {
+          if (!typed) throw new StalePage("Date part changed or is covered. Observe again.");
+          break;
+        }
+        if (!typed) await arm(null);
+        await mouse("mouseMoved", at.x, at.y);
+        await mouse("mousePressed", at.x, at.y, { button: "left", clickCount: 1 });
+        await mouse("mouseReleased", at.x, at.y, { button: "left", clickCount: 1 });
+        typed = true;
+        if (part.spin) {
+          // A spinbutton segment (react-aria, MUI) reads digit keys, not inserted text.
+          for (const ch of part.text) {
+            const key = { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: 48 + Number(ch), nativeVirtualKeyCode: 48 + Number(ch) };
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyDown", text: ch, unmodifiedText: ch });
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+          }
+          continue;
+        }
+        // A part that has no selection API (a number input) takes the key-less select-all command of a fill.
+        const selected = await evaluate(selectPartScript(part.node));
+        if (selected.value !== true) await command("selectAll");
+        await call("Input.insertText", { text: part.text });
+      }
+      if (typed) await evaluate(BLUR_SCRIPT);
       pendingSettle = action;
     },
 

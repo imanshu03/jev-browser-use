@@ -13,6 +13,12 @@
 // single-line text input also carries its chip facts, `token` (see TokenFacts in model.ts); they never reach Jev either.
 // An editor carries its mention chips, `mentions`, and the facts `bareText` and `otherAtoms`. Each action and the focus
 // carry `popup`, the popups around them.
+// Dates: native date, month, datetime-local, time, and week inputs are fill actions with `date`. One month, one
+// day, and one year part in a container with no other text box are one date group: the snapshot shows the group
+// as one fill action with `date` (its label "<group label or Date>[ range start|end] (M/D/YYYY)", its value the
+// joined parts) and leaves out the part actions and their "Open" clicks. A part outside a whole group carries
+// `datePart`. A day of a calendar grid carries `day`: its ISO date from a machine attribute, its selection, and its
+// place in a range. Groups and grids get ids from their own counter.
 import { COMPOSER_SEND_WORDS, LIMITS } from "../types.js";
 import type { Action } from "./model.js";
 
@@ -91,7 +97,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       if (['button','submit','reset','image'].includes(e.type)) return 'button';
       if (e.type==='search') return 'searchbox';
       if (e.type==='number') return 'spinbutton';
-      if (['text','email','url','tel'].includes(e.type)) return 'textbox';
+      if (['text','email','url','tel','date','datetime-local','month','time','week'].includes(e.type)) return 'textbox';
     }
     return null;
   };
@@ -297,6 +303,141 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     }
     return null;
   };
+  const inView=e=>{
+    if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) return false;
+    const r=e.getBoundingClientRect(), clip=clippedRect(e), x=clip.x+clip.w/2, y=clip.y+clip.h/2;
+    return clip.w>0 && clip.h>0 && r.width>0 && r.height>0 && x>=0 && y>=0 && x<innerWidth && y<innerHeight;
+  };
+  const writable=e=>!e.readOnly && e.getAttribute('aria-readonly')!=='true';
+  const owner=e=>e.form||e.closest('form,[role="form"],dialog,[role="dialog"]');
+  // Date groups and calendar grids get ids from their own counter. Code only compares them.
+  const dates = cache.dates ||= {ids:new WeakMap(), next:1};
+  const dateId = e => {
+    if (!dates.ids.has(e)) dates.ids.set(e,dates.next++);
+    return dates.ids.get(e);
+  };
+  const NATIVE_DATE={date:'date','datetime-local':'date and time',month:'month',time:'time',week:'week'};
+  // A part names a month, a day, or a year: data-type (react-aria), a spinbutton range of 1-12 or 1-31, a placeholder,
+  // aria-label, or label token, or a name that ends in day, month, or year. Card expiry parts (autocomplete cc-*) are not parts.
+  const PART={month:/^(?:m|mm|month|mois|monat|mes|maand)$/i,day:/^(?:d|dd|day|jour|tag|d[ií]a|dag)$/i,
+    year:/^(?:yy|yyyy|year|ann[eé]e|jahr|a[nñ]o|jaar|aaaa|jjjj)$/i};
+  const partValue=e=>e.tagName==='INPUT' ? String(e.value) : e.getAttribute('aria-valuenow') ?? '';
+  const partOf=e=>{
+    const r=role(e);
+    if (!['textbox','spinbutton'].includes(r) || e.tagName==='TEXTAREA' || e.type in NATIVE_DATE || /^cc-/i.test(e.getAttribute('autocomplete')||'')) return null;
+    const t=(e.getAttribute('data-type')||'').toLowerCase();
+    if (t==='month' || t==='day' || t==='year') return t;
+    const lo=e.getAttribute('aria-valuemin'), hi=e.getAttribute('aria-valuemax');
+    if (r==='spinbutton' && lo==='1' && hi==='12') return 'month';
+    if (r==='spinbutton' && lo==='1' && ['28','29','30','31'].includes(hi)) return 'day';
+    for (const s of [e.getAttribute('placeholder'),e.getAttribute('aria-placeholder'),e.getAttribute('aria-label'),name(e)]) {
+      const v=(s||'').trim().replace(/[.:]$/,'');
+      for (const k of ['month','day','year']) if (PART[k].test(v)) return k;
+    }
+    const n=(e.getAttribute('name')||e.id||'').match(/(?:^|[-_[.])(day|month|year)\]?$/i);
+    return n ? n[1].toLowerCase() : null;
+  };
+  const parts=new Map(), groupOf=new Map(), groups=[];
+  for (const e of document.querySelectorAll('input,[role="spinbutton"],[role="textbox"]')) {
+    if (!safe(e) || !visible(e) || e.matches(':disabled')) continue;
+    const k=partOf(e);
+    if (k) parts.set(e,k);
+  }
+  if (parts.size>=3) {
+    const boxes=[...document.querySelectorAll(selector)].filter(e=>safe(e) && visible(e) && !e.matches(':disabled') &&
+      ['textbox','searchbox','spinbutton','combobox'].includes(role(e)) && e.tagName!=='SELECT');
+    // The group of a part: its nearest ancestor that holds one part of each kind and no other text box.
+    const containerOf=e=>{
+      for (let a=e.parentElement, depth=0; a && a!==document.body && depth<8; a=a.parentElement, depth++) {
+        const inside=boxes.filter(b=>a.contains(b));
+        if (inside.some(b=>!parts.has(b))) return null;
+        const kinds=inside.map(b=>parts.get(b));
+        if (new Set(kinds).size<kinds.length) return null;
+        if (kinds.length===3) return {el:a,parts:inside,kinds};
+      }
+      return null;
+    };
+    const textBetween=(a,b)=>{
+      const r=document.createRange(); r.setStartAfter(a); r.setEndBefore(b);
+      return r.toString().replace(/\s+/g,' ').trim();
+    };
+    const refs=ids=>ids.split(/\s+/).map(id=>document.getElementById(id)).filter(Boolean).map(x=>(x.innerText||x.textContent||'').trim()).join(' ').trim();
+    // The group label: aria-labelledby or aria-label of the container or of a role=group around it, or a fieldset legend.
+    const labelOf=g=>{
+      for (let a=g.el, depth=0; a && a!==document.body && depth<6; a=a.parentElement, depth++) {
+        if (depth>0 && boxes.some(b=>a.contains(b) && !g.parts.includes(b))) break;
+        if (a.tagName==='FIELDSET') { const t=(a.querySelector(':scope > legend')?.innerText||'').trim(); if (t) return t; }
+        const by=a.getAttribute('aria-labelledby'), t=by ? refs(by) : (a.getAttribute('aria-label')||'').trim();
+        if (t && (a===g.el || a.getAttribute('role')==='group')) return t;
+      }
+      return '';
+    };
+    for (const [e] of parts) {
+      if (groupOf.has(e)) continue;
+      const g=containerOf(e);
+      if (!g || g.parts.some(p=>groupOf.has(p))) continue;
+      for (const p of g.parts) groupOf.set(p,g);
+      const tok=p=>(p.getAttribute('placeholder')||p.getAttribute('aria-placeholder')||'').trim();
+      const between=textBetween(g.parts[0],g.parts[1]);
+      g.id=dateId(g.el);
+      g.sep=/^[/.-]$/.test(between) ? between : ' ';
+      g.order=g.kinds.map(k=>k[0].toUpperCase()).join('');
+      g.pad=g.parts.some(p=>parts.get(p)!=='year' && (/^(?:mm|dd)$/i.test(tok(p)) || /^0\d$/.test(partValue(p))));
+      g.short=g.parts.some(p=>parts.get(p)==='year' && (/^yy$/i.test(tok(p)) || p.maxLength===2));
+      g.label=labelOf(g).replace(/\s+/g,' ').slice(0,60);
+      g.ok=g.parts.every(p=>inView(p) && writable(p));
+      groups.push(g);
+    }
+    // Range roles only from a separator between two groups ("-", "–", "to") or from start and end labels.
+    const SEP=/^(?:-|–|—|to|until|till|through|bis|au|à|al|tot)$/i;
+    const START=/\b(?:start|from|begin|check-?in|depart(?:ure)?)\b/i, END=/\b(?:end|to|until|check-?out|return)\b/i;
+    for (let i=0; i+1<groups.length; i++) {
+      const a=groups[i], b=groups[i+1];
+      if (a.role || owner(a.parts[0])!==owner(b.parts[0])) continue;
+      const apart=!a.el.contains(b.el) && !b.el.contains(a.el) && (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING);
+      if (apart && SEP.test(textBetween(a.el,b.el))) { a.bySep=b.bySep=true; a.role='start'; b.role='end'; }
+      else if (START.test(a.label) && !END.test(a.label) && END.test(b.label) && !START.test(b.label)) { a.role='start'; b.role='end'; }
+      if (a.role) a.range=b.range=a.id;
+    }
+    for (const g of groups) {
+      const values=g.parts.map(partValue);
+      const token={month:g.pad?'MM':'M',day:g.pad?'DD':'D',year:g.short?'YY':'YYYY'};
+      g.name=(g.label||'Date')+(g.bySep ? ' range '+g.role : '')+' ('+g.kinds.map(k=>token[k]).join(g.sep)+')';
+      g.value=values.every(v=>v==='') ? '' : values.join(g.sep);
+    }
+  }
+  // The page locale's numeric date order and separator: a numeric task date goes into a native date input only in that shape.
+  let localeShape=null;
+  const shapeOf=()=>{
+    if (localeShape) return localeShape;
+    try {
+      const ps=new Intl.DateTimeFormat(undefined,{year:'numeric',month:'numeric',day:'numeric'}).formatToParts(new Date(2026,10,23));
+      localeShape={order:ps.filter(p=>['year','month','day'].includes(p.type)).map(p=>p.type[0].toUpperCase()).join(''),
+        sep:(ps.find(p=>p.type==='literal')?.value||'').trim()};
+    } catch { localeShape={}; }
+    return localeShape;
+  };
+  const isoOf=v=>{
+    if (!v) return null;
+    if (/^\d{4}-\d{2}-\d{2}(?:$|T)/.test(v)) return v.slice(0,10);
+    if (!/^\d{10}(?:\d{3})?$/.test(v)) return null;
+    const d=new Date(Number(v.length===10 ? v+'000' : v));
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  };
+  // A day of a calendar grid. The ISO day comes from a machine attribute; the shadcn day button's data-day follows the
+  // locale and is never read. Without one, code reads the label (a label without a year is not a day).
+  const dayOf=(e,grid)=>{
+    const cell=e.closest('[role="gridcell"],td')||e, own=[cell,e];
+    let day=null;
+    for (const x of own) day=day||isoOf(x.getAttribute('data-date'))||isoOf(x.getAttribute('data-value'))||isoOf(x.getAttribute('data-timestamp'))||isoOf(x.getAttribute('title'));
+    day=day||isoOf(cell.getAttribute('data-day'))||isoOf(e.querySelector('time[datetime]')?.getAttribute('datetime')||'');
+    if (!day && !/\b\d{4}\b/.test(e.getAttribute('aria-label')||name(e))) return null;
+    const flag=k=>own.some(x=>{const v=x.getAttribute('data-'+k);return v==='true' || v==='';});
+    const start=flag('range-start')||flag('selection-start'), end=flag('range-end')||flag('selection-end');
+    const pos=start && end ? 'single' : start ? 'start' : end ? 'end' : flag('range-middle') ? 'middle' : null;
+    return {grid:dateId(grid),day,multi:grid.getAttribute('aria-multiselectable')==='true',
+      sel:own.some(x=>x.getAttribute('aria-selected')==='true' || x.getAttribute('data-selected')==='true'),...(pos?{pos}:{})};
+  };
   const actions=[], popups=[...document.querySelectorAll(NEAR)].filter(visible);
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
@@ -305,15 +446,31 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const r=e.getBoundingClientRect(), clip=clippedRect(e), x=clip.x+clip.w/2, y=clip.y+clip.h/2, rname=role(e);
     if (!rname || clip.w<=0 || clip.h<=0 || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
+    const form=(f=>f?formId(f):null)(owner(e));
     const popup=popupChain(e);
-    const base={node:identity(e),role:rname,label:name(e)||rname,
+    // A whole date group is one fill action at its first part. Its parts and their "Open" clicks are not actions.
+    const group=groupOf.get(e);
+    if (group && group.ok) {
+      if (e===group.parts[0]) actions.push({node:identity(e),role:'textbox',label:group.name,rect:{x:r.x,y:r.y,w:r.width,h:r.height},
+        form,multiline:false,kind:'fill',value:group.value,...(popup.length?{popup}:{}),date:{kind:'group',
+          parts:group.parts.map(p=>({part:parts.get(p),node:identity(p),value:partValue(p),spin:p.tagName!=='INPUT'})),
+          sep:group.sep,order:group.order,pad:group.pad,short:group.short,...(group.role?{role:group.role,range:group.range}:{})}});
+      continue;
+    }
+    const native=e.tagName==='INPUT' && e.type in NATIVE_DATE;
+    const base={node:identity(e),role:rname,label:native ? (name(e)||'Date')+' ('+NATIVE_DATE[e.type]+')' : name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height},
-      form:(f=>f?formId(f):null)(e.form||e.closest('form,[role="form"],dialog,[role="dialog"]')),
+      form,
       multiline:e.tagName==='TEXTAREA'||e.isContentEditable||e.getAttribute('aria-multiline')==='true',
       ...(e.tagName==='INPUT'?{inputType:String(e.type).toLowerCase()}:{}),
       ...(e.getAttribute('autocomplete')?{autocomplete:e.getAttribute('autocomplete').toLowerCase()}:{}),
       ...(e.maxLength>0?{maxLength:e.maxLength}:{}),
       ...(popup.length?{popup}:{})};
+    if (native) base.date={kind:e.type,...(e.min?{min:e.min}:{}),...(e.max?{max:e.max}:{}),...(e.type==='date'?shapeOf():{})};
+    if (parts.has(e)) base.datePart=parts.get(e);
+    const grid=e.closest('[role="grid"]');
+    const day=grid ? dayOf(e,grid) : null;
+    if (day) base.day=day;
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -331,16 +488,17 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
         actions.push({...base,kind:'select',value:o.value,
           current_value:[...e.selectedOptions].map(o=>o.label).join(', '),label:base.label+' → '+o.label});
     } else {
-      const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
+      const editable=writable(e) &&
         (['textbox','searchbox','spinbutton'].includes(rname) ||
           (rname==='combobox' && ['INPUT','TEXTAREA'].includes(e.tagName)));
       const value='value' in e ? String(e.value) :
         e.isContentEditable || rname==='combobox' ? e.innerText.trim() : '';
-      const token=editable ? tokenFacts(e,popups) : null, atoms=editable ? atomsOf(e) : null;
+      const token=editable && !native ? tokenFacts(e,popups) : null, atoms=editable ? atomsOf(e) : null;
       actions.push({...base,kind:editable?'fill':'click',value,...(token?{token}:{}),
         ...(atoms?.mentions.length ? {mentions:atoms.mentions,bareText:atoms.bareText} : {}),
         ...(atoms?.otherAtoms ? {otherAtoms:atoms.otherAtoms} : {})});
-      if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
+      // A native date input takes a whole date: TYPE_TEXT only. A click opens the browser's own picker, which is not in the page.
+      if (editable && !native) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
@@ -735,3 +893,38 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   return out(ok,'the selection is not where the '+a.mode+' needs it',{caretBlank,spaceBefore:/\s$/.test(before.replace(/[\u200B\uFEFF]/g,''))});
 })(${arg})`;
 }
+
+/**
+ * Set a native date, month, datetime-local, time, or week input: the native value setter, then input and change events,
+ * as Playwright's fill does. Inserted text and typed digits do not work: a date input takes digits in the order of the
+ * browser locale. Returns the value that the input holds after it, or null when the node is gone, disabled, read-only,
+ * or not such an input.
+ */
+export function nativeDateScript(node: number, value: string): string {
+  return `(([node,value]) => {
+  const e=window.__jevFast?.nodes.get(node);
+  if (!e?.isConnected || e.tagName!=='INPUT' || !['date','datetime-local','month','time','week'].includes(e.type) || e.disabled || e.readOnly) return null;
+  e.focus();
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,value);
+  e.dispatchEvent(new Event('input',{bubbles:true}));
+  e.dispatchEvent(new Event('change',{bubbles:true}));
+  return e.value;
+})(${JSON.stringify([Math.trunc(node), value])})`;
+}
+
+/**
+ * Select all text of a date part input before the part text goes in. No key goes to the page: a part's key filter can
+ * refuse a select-all chord. False when the input cannot select its text (a number input): the caller then uses the
+ * select-all command.
+ */
+export function selectPartScript(node: number): string {
+  return `(node => {
+  const e=window.__jevFast?.nodes.get(node);
+  if (!e?.isConnected || e.tagName!=='INPUT') return false;
+  try { e.select(); } catch { return false; }
+  return e.selectionStart===0 && e.selectionEnd===e.value.length;
+})(${Math.trunc(node)})`;
+}
+
+/** Blur the focused element. A page that checks a date part when it loses focus (the Usage DateInput) then checks the last part too. */
+export const BLUR_SCRIPT = "(() => { const e=document.activeElement; if (e && e!==document.body && typeof e.blur==='function') e.blur(); return true; })()";
