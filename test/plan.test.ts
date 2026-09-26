@@ -66,6 +66,14 @@ describe("profile resolution", () => {
     expect(amb.plan.profile.blocked).toBe("ambiguous_profile");
     expect(amb.plan.top.length).toBe(3);
   });
+  it("the profile question passes a profile detail with the name and the directory; a no uses the workspace default", async () => {
+    const mid: OracleScript = [{ name: "plan", answers: () => ({ profile_mentioned: 0.9, profile: { choice: "Profile 2", confidence: 0.6 }, goal: "act" }) }];
+    const human = fakeHuman({ interactive: true, confirm: [false] });
+    const no = await run("open gmail with my account", mid, {}, human);
+    expect(human.prompts).toEqual(["confirm:Use Chrome profile BP (Profile 2)? [y/N] "]);
+    expect(human.details).toEqual([{ kind: "profile", name: "BP", directory: "Profile 2" }]);
+    expect(no.plan.profile).toMatchObject({ how: "workspace_default", profile: profiles[0] });
+  });
 });
 
 describe("start resolution", () => {

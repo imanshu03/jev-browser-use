@@ -24,7 +24,8 @@ export type Outcome = "done" | "blocked" | "failed";
 export type BlockedKind =
   | "needs_sign_in" | "captcha" | "overlay" | "needs_confirmation" | "needs_credential"
   | "ambiguous" | "loop_detected" | "max_steps" | "impossible" | "no_start_url"
-  | "ambiguous_profile" | "page_too_large" | "run_timeout" | "human_aborted";
+  | "ambiguous_profile" | "page_too_large" | "run_timeout" | "human_aborted"
+  | "needs_text";                 // new text: no writer, declined, timed out, rejected, or cap reached
 
 export type FailedKind = "browser" | "jev" | "internal";
 
@@ -55,13 +56,30 @@ export interface ParsedPage {
   truncated: boolean;
 }
 
+/** Binds assistant-written text to the one field it was written for. */
+export interface SpanField {
+  key: string;                    // `${obs.doc}|${action.node}` at request time
+  label: string;                  // redacted, sanitized, cut to LIMITS.nameChars
+  request: string;                // "t1".."t3"
+}
+
 export interface Span {
-  id: string;
+  id: string;                     // "s<n>" task, "v_<key>" var, "g<n>" generated
   text: string;
   source: "quoted" | "email" | "url" | "number" | "date" | "after_verb" | "proper_noun"
-        | "clause" | "whole_task" | "var" | "page_line";
+        | "clause" | "whole_task" | "var" | "page_line" | "generated";
   verb?: string;
-  secret: boolean;
+  /** The id of the after_verb span this span was cut from: its first words, before a preposition or as a proper noun. */
+  parent?: string;
+  /**
+   * The id of the other value of a maybe cut: the cut names its longer value, and the longer value names the cut. A head
+   * shows both when one of them passes its hide rules, and hides both only when both fail.
+   */
+  pair?: string;
+  /** A cut of an after_verb value of more than 10 words, which is not a span. A field that can take new text leaves it out. */
+  longCut?: true;
+  secret: boolean;                // always false for "generated"
+  field?: SpanField;              // only for "generated"
 }
 
 /** One executed action. The first six fields go to Jev as `recent_actions`. */
@@ -211,6 +229,16 @@ export const LIMITS = {
   // Fast engine.
   fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,
   fastElementsTrimmed: 150, answerLines: 254, answerLineChars: 160,
+  valueHeads: 8,                  // fields with a value head in the step request; a fill of another field asks in a second request
+  // Assistant-written text (MCP runs only).
+  textRequests: 3,                // text requests per run
+  textFields: 4,                  // target + up to 3 same-form fields
+  generatedChars: 4000,           // all fields of one request together; also the per-field cap
+  textWaitMs: 300_000,            // per text request; not counted in runTimeoutMs
+  textHistory: 5,                 // recent actions in a text request
+  confirmTextChars: 6000,         // all unsent text in one dialog; more blocks needs_confirmation
+  secretMinChars: 4,              // checkTexts ignores shorter secret values
+  genSpanWords: 4,                // with generate offered, after_verb spans above this word count are left out
 } as const;
 
 export const ROLE_PRIORITY: Record<string, number> = {
@@ -250,6 +278,12 @@ export const DISMISS_WORDS = ["close", "dismiss", "reject", "decline", "no thank
 
 export const CREDENTIAL_NAME = /password|passcode|passphrase|\bpin\b|\botp\b|one-time|verification code|security code|2fa|mfa|totp/i;
 export const SECRET_KEY = /pass|pin|otp|secret|token|code/i;
+/** Labels of fields that take an exact value. Assistant-written text never goes into them. */
+export const EXACT_VALUE_NAME = /^(to|cc|bcc|from)\b|recipient|e-?mail address|^e-?mail$|phone|mobile number|amount|price|quantity|card number|\biban\b|account number|routing number|street|postal code|zip code|api key|\btoken\b|\bsecret\b|user ?name|\burl\b|website|\bsearch\b/i;
+/** Autocomplete tokens of fields that take an exact value. */
+export const EXACT_AUTOCOMPLETE = /email|tel|url|username|password|one-time-code|cc-|address|postal|country|bday|transaction/;
+/** Text that looks like a key or token. Assistant-written text with a match is rejected. */
+export const KEY_PATTERN = /-----BEGIN [A-Z ]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}|\bAKIA[0-9A-Z]{16}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./;
 export const SIGN_IN_HEADING = /sign in|log in|login|choose an account|enter your password|verify it's you/i;
 export const AUTH_HOST = /accounts\.google\.com|login\.|signin\.|auth\.|sso\.|okta\.com|auth0\.com/i;
 

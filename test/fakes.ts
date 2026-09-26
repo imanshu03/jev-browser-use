@@ -1,8 +1,8 @@
-// Scripted fakes: Browser, Oracle, Human, Logger. Jev and agent-browser are never called in unit tests.
+// Scripted fakes: Browser, Oracle, Human, TextSource, Logger. Jev and agent-browser are never called in unit tests.
 import type { Fetch, Questions } from "@typesafe-ai/sdk";
 import type { Browser, ProfileEntry, SnapshotData } from "../src/browser.js";
 import { BrowserError } from "../src/browser.js";
-import type { Human, Logger, PauseResult } from "../src/io.js";
+import type { ConfirmDetail, Human, Logger, PauseKind, PauseResult, TextReply, TextRequest, TextSource, TextWriteOptions } from "../src/io.js";
 import type { Answer, Answers, Oracle } from "../src/jev.js";
 import type { Transport } from "../src/transport.js";
 import type { StepRecord } from "../src/types.js";
@@ -109,7 +109,9 @@ export function fakeOracle(script: OracleScript): Oracle & { requests: { name: s
       }
       const answers: Answers = {};
       for (const [qn, q] of Object.entries(questions)) {
-        const g = partial[qn];
+        // A script answers `type_text_value` for the field that its TYPE_TEXT target chooses. The step request asks one
+        // value head per field (`value_<key>`), so that answer serves every value head that the script does not answer.
+        const g = partial[qn] ?? (/^value_/.test(qn) ? partial["type_text_value"] : undefined);
         // Defaults: noul 0.05, except the scope and target_ok guards, which default to 0.9 so scripted actions pass the gate.
         const defaultNoul = /^(in_task_scope|target_ok)$/.test(qn) ? 0.9 : 0.05;
         if (q.type === "noul") answers[qn] = { type: "noul", noul: typeof g === "number" ? g : typeof g === "object" && g.noul !== undefined ? g.noul : defaultNoul };
@@ -127,21 +129,47 @@ export function fakeOracle(script: OracleScript): Oracle & { requests: { name: s
   };
 }
 
-export function fakeHuman(script: { interactive: boolean; pause?: PauseResult[]; confirm?: boolean[] }): Human & { prompts: string[] } {
+/** `details` and `kinds` record the structured confirm detail and the pause kind of each call, in order. */
+export function fakeHuman(script: { interactive: boolean; pause?: PauseResult[]; confirm?: boolean[] }): Human & { prompts: string[]; details: (ConfirmDetail | undefined)[]; kinds: (PauseKind | undefined)[] } {
   const prompts: string[] = [];
+  const details: (ConfirmDetail | undefined)[] = [];
+  const kinds: (PauseKind | undefined)[] = [];
   const pauses = [...(script.pause ?? [])];
   const confirms = [...(script.confirm ?? [])];
   return {
     interactive: script.interactive,
-    prompts,
-    async pause(message, _timeout, poll) {
+    prompts, details, kinds,
+    async pause(message, _timeout, poll, kind) {
       prompts.push(`pause:${message}`);
+      kinds.push(kind);
       const scripted = pauses.shift();
       if (scripted) return scripted;
       if (poll && (await poll())) return "resumed";
       return "timeout";
     },
-    async confirm(message) { prompts.push(`confirm:${message}`); return confirms.shift() ?? false; },
+    async confirm(message, _timeout, detail) { prompts.push(`confirm:${message}`); details.push(detail); return confirms.shift() ?? false; },
+  };
+}
+
+export type TextStep = TextReply | ((req: TextRequest, opts: TextWriteOptions) => TextReply | Promise<TextReply>);
+
+/**
+ * A scripted assistant that writes field text. Each step answers one request, in order; a function step
+ * can call `opts.check`. With no step left it declines. `requests` and `options` record every call.
+ */
+export function fakeText(steps: TextStep[] = []): TextSource & { requests: TextRequest[]; options: TextWriteOptions[] } {
+  const requests: TextRequest[] = [];
+  const options: TextWriteOptions[] = [];
+  const queue = [...steps];
+  return {
+    requests, options,
+    async write(req, opts) {
+      requests.push(req);
+      options.push(opts);
+      const next = queue.shift();
+      if (next === undefined) return { kind: "declined", reason: "fake: no scripted text" };
+      return typeof next === "function" ? next(req, opts) : next;
+    },
   };
 }
 

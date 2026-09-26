@@ -1,0 +1,1 @@
+{ "mcpServers": { "jev": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/dist/jev-mcp.mjs"] } } }

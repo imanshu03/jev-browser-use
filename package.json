@@ -11,22 +11,28 @@
   "scripts": {
     "start": "tsx --env-file=.env src/cli.ts",
     "chat": "node bin/jev-chat.js",
+    "mcp": "node bin/jev-mcp.js",
+    "build:mcp": "node scripts/build-mcp.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts",
+    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts test/mcp/mcp.live.test.ts",
     "smoke": "tsx --env-file=.env scripts/smoke.ts"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "@typesafe-ai/sdk": "^0.6.0",
     "agent-browser": "^0.38.1",
-    "undici": "^7.29.1"
+    "undici": "^7.29.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^26.6.2",
+    "esbuild": "0.28.2",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"

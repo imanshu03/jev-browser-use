@@ -125,7 +125,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       default: throw new UsageError(`unknown flag ${a}`);
     }
   }
-  if (cfg.maxSteps > 100 || cfg.maxSteps < 1) throw new UsageError("--max-steps must be between 1 and 100");
+  // An env value such as "abc" gives NaN, which the old range check let through.
+  if (!Number.isFinite(cfg.maxSteps) || cfg.maxSteps > 100 || cfg.maxSteps < 1) throw new UsageError("--max-steps must be between 1 and 100");
   cfg.task = positional.join(" ").trim();
   return cfg;
 }
@@ -221,7 +222,9 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
   }
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// In a bundle every module shares the bundle URL. Only a direct run of this file starts the CLI.
+const entry = fileURLToPath(import.meta.url);
+const isMain = process.argv[1] !== undefined && /^cli\.[cm]?[jt]s$/.test(path.basename(entry)) && path.resolve(process.argv[1]) === entry;
 if (isMain) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((e: unknown) => {
     if (e instanceof UsageError) { process.stderr.write(`error: ${e.message}\n`); process.exitCode = 4; return; }

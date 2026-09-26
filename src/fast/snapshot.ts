@@ -2,8 +2,12 @@
 //
 // Ported from browser-use/jev-ultrafast (jev_ultrafast/snapshot.js and jev_ultrafast/browser.py).
 // MIT License. Copyright (c) 2026 Browser Use.
-// Changes: the snapshot object also returns `readyState`, and the scroll and wait pseudo-actions
-// carry `node:null` so every action has the same shape.
+// Changes: the snapshot object also returns `readyState`, the document id `doc`, `filled`, and `texts`, the scroll
+// and wait pseudo-actions carry `node:null` so every action has the same shape, and each action carries
+// the field facts `form`, `multiline`, `inputType`, `autocomplete`, and `maxLength`. Code uses these
+// facts to decide where assistant-written text may go; they never reach Jev. Forms get ids from their own
+// counter, so element node ids stay the same as in the reference. The focus also carries its `form` and the
+// name of the form's default button, `submitDefault`, and `multiline`, for the Enter-to-click rule.
 import type { Action } from "./model.js";
 
 /**
@@ -17,6 +21,12 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   const identity = e => {
     if (!cache.ids.has(e)) cache.ids.set(e,cache.next++);
     const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
+  };
+  // Form ids have their own counter. Code only compares them, and element node ids do not change.
+  const forms = cache.forms ||= {ids:new WeakMap(), next:1};
+  const formId = f => {
+    if (!forms.ids.has(f)) forms.ids.set(f,forms.next++);
+    return forms.ids.get(f);
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
   const safe = e => !['password','file','hidden'].includes(e.type);
@@ -58,10 +68,15 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const e=document.activeElement;
     if (!e || e===document.body || e===document.documentElement) return null;
     const form=e.form || e.closest('form');
-    const submits=form ? [...form.elements].filter(b=>['submit','image'].includes(b.type) && !b.disabled) : [];
+    // form.elements leaves out image buttons, so take the submit controls of the form in tree order.
+    const controls=form ? [...document.querySelectorAll('button,input')].filter(b=>b.form===form && ['submit','image'].includes(b.type)) : [];
+    const submits=controls.filter(b=>!b.matches(':disabled'));
     const editable=safe(e) && (e.isContentEditable || ['TEXTAREA','INPUT'].includes(e.tagName) && ['textbox','searchbox','spinbutton','combobox'].includes(role(e)));
+    const owner=e.form || e.closest('form,[role="form"],dialog,[role="dialog"]');
     return {node:identity(e),label:name(e),role:role(e),submitLabel:submits.map(b=>name(b)).join(' | '),
-      editable,value:editable ? ('value' in e ? String(e.value) : e.innerText) : ''};
+      editable,value:editable ? ('value' in e ? String(e.value) : e.innerText) : '',
+      form:owner ? formId(owner) : null,submitDefault:controls[0] && !controls[0].matches(':disabled') ? name(controls[0]) : '',
+      multiline:e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true'};
   };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select,[contenteditable]')].filter(safe)
@@ -109,7 +124,12 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     if (!rname || clip.w<=0 || clip.h<=0 || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,
-      rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
+      rect:{x:r.x,y:r.y,w:r.width,h:r.height},
+      form:(f=>f?formId(f):null)(e.form||e.closest('form,[role="form"],dialog,[role="dialog"]')),
+      multiline:e.tagName==='TEXTAREA'||e.isContentEditable||e.getAttribute('aria-multiline')==='true',
+      ...(e.tagName==='INPUT'?{inputType:String(e.type).toLowerCase()}:{}),
+      ...(e.getAttribute('autocomplete')?{autocomplete:e.getAttribute('autocomplete').toLowerCase()}:{}),
+      ...(e.maxLength>0?{maxLength:e.maxLength}:{})};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -155,9 +175,11 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   if (up) actions.push(up);
   else if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',node:null,label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',node:null,label:'Wait for the page to update'});
+  const filled=page_key[6].filter(c=>typeof c[1]==='string' && c[1].trim()!=='');
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
     scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,focus:cache.focus(),key_guard:cache.keyGuard(),
-    readyState:document.readyState};
+    readyState:document.readyState,doc:performance.timeOrigin,filled:filled.map(c=>c[0]),
+    texts:filled.filter(c=>{const e=cache.nodes.get(c[0]);return e && visible(e);}).map(c=>[c[0],c[1]])};
 })()`;
 
 /** The semantic marker of the whole page, or null when the document has no body. */

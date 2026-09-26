@@ -1,4 +1,4 @@
-// Logger, Human hand-off, exit code, and the empty RunResult.
+// Logger, Human hand-off, assistant text hand-off, exit code, and the empty RunResult.
 import type { Engine, Goal, RunResult, StepRecord } from "./types.js";
 import { redactData } from "./task.js";
 import { LIMITS } from "./types.js";
@@ -53,11 +53,62 @@ export function createLogger(stderr: NodeJS.WritableStream, level: "info" | "deb
 
 export type PauseResult = "resumed" | "aborted" | "timeout";
 
+/** One field of a text request. The ids are "f1", "f2", and so on. */
+export interface TextField {
+  id: string; label: string; role: string;
+  required: boolean;              // true only for f1, the field Jev chose
+  multiline: boolean;
+  max_chars: number;              // min(maxLength, LIMITS.generatedChars)
+  current_value: string;          // redacted, sanitized, cut to LIMITS.valueChars
+}
+
+export interface TextRequest {    // key order is fixed; untrusted_page_text is last
+  id: string;                     // "t1".."t3"
+  goal: string;                   // redacted task
+  page: { url: string; title: string };
+  fields: TextField[];
+  recent_actions: { action: string; kind: string; text: string | null }[];
+  untrusted_page_text: string;    // redacted + sanitizeText(obs.text), <= LIMITS.textChars
+}
+
+export type TextReply =
+  | { kind: "text"; values: Record<string, string> }   // missing optional id = leave empty
+  | { kind: "declined"; reason: string }
+  | { kind: "timeout" }
+  | { kind: "aborted" };
+
+export interface TextWriteOptions {
+  timeoutMs: number;
+  /** Field id -> error; {} when valid. Pure. Never echoes a value. */
+  check: (values: Record<string, string>) => Record<string, string>;
+}
+
+/** The harness model writes field text. It is never the human. */
+export interface TextSource { write(req: TextRequest, opts: TextWriteOptions): Promise<TextReply> }
+
+/** What a confirmation is about. A front end that shows a dialog uses it; the CLI and chat ignore it. */
+export type ConfirmDetail =
+  | { kind: "action"; action: string; host: string; typed: { label: string; text: string }[] }
+  | { kind: "profile"; name: string; directory: string };
+
+export type PauseKind = "sign_in" | "captcha";
+
 export interface Human {
   readonly interactive: boolean;
-  /** Wait for the user. `poll` returns true when the page is usable again (used without a TTY, and also with one). */
-  pause(message: string, timeoutMs: number, poll?: () => Promise<boolean>): Promise<PauseResult>;
-  confirm(message: string, timeoutMs: number): Promise<boolean>;
+  /** Wait for the user. `poll` returns true when the page is usable again (used without a TTY, and also with one). `kind` tells a front end what the user must do. */
+  pause(message: string, timeoutMs: number, poll?: () => Promise<boolean>, kind?: PauseKind): Promise<PauseResult>;
+  /** Ask the user. `detail` gives the structured content of the question. */
+  confirm(message: string, timeoutMs: number, detail?: ConfirmDetail): Promise<boolean>;
+}
+
+/** Front-end hint text. An absent field keeps the CLI text. */
+export interface RunnerHints {
+  headed?: string;      // replaces "Run with --headed (or /headed on in chat) and sign in when the run pauses"
+  noConfirm?: string;   // replaces "run on a TTY with confirmation enabled"
+  noConfirmHeadless?: string; // used instead of `noConfirm` when the run is headless
+  confirmNever?: string; // used when the run's confirm setting is "never"; absent uses `noConfirm`, then the CLI text
+  value?: string;       // replaces "pass --var key=value (or /var key=value in chat)" for other fields
+  credential?: string;  // used for credential fields; absent uses `value`, then the CLI text
 }
 
 export function createHuman(opts: { stdin: NodeJS.ReadStream; stderr: NodeJS.WritableStream; forceNonInteractive: boolean; pollMs?: number }): Human {
