@@ -1,5 +1,6 @@
 // Find, copy, launch, and close Chrome for the fast engine. Pure I/O. No decisions.
-import { spawn, type ChildProcess } from "node:child_process";
+// Parts ported from browser-use/jev-ultrafast (jev_ultrafast/browser.py). MIT License, Copyright (c) 2026 Browser Use.
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -309,6 +310,76 @@ export interface AttachTargetOptions {
   headed: boolean;
   /** The Chrome belongs to the user (`--cdp`). The tab opens in the background and keeps the window's own viewport. */
   attached: boolean;
+  /** The user agent of the tab, when Chrome's own one must not go out (see `plainUserAgent`). */
+  userAgent?: string;
+  /** The client hints that go with `userAgent` (see `userAgentMetadata`). */
+  userAgentMetadata?: UserAgentMetadata;
+}
+
+/** The `userAgentMetadata` of Emulation.setUserAgentOverride. */
+export interface UserAgentMetadata {
+  brands: { brand: string; version: string }[];
+  fullVersionList: { brand: string; version: string }[];
+  platform: string; platformVersion: string; architecture: string; model: string; mobile: boolean; bitness: string; wow64: boolean;
+  formFactors: string[];
+}
+
+let osVersion: string | null = null;
+/**
+ * The OS version that Chrome sends as its platformVersion hint, read once per process: `sw_vers -productVersion` on macOS
+ * ("26.6.2", as Chrome 154 reports it), the kernel version on Linux. Empty on Windows, where Chrome reads a Windows API
+ * contract version that Node cannot read.
+ */
+export function platformVersionOf(platform: NodeJS.Platform = process.platform): string {
+  if (osVersion !== null) return osVersion;
+  let v = "";
+  try {
+    if (platform === "darwin") v = execFileSync("sw_vers", ["-productVersion"], { encoding: "utf8", timeout: 2000 }).trim();
+    else if (platform === "linux") v = /^\d+\.\d+(?:\.\d+)?/.exec(os.release())?.[0] ?? "";
+  } catch { v = ""; }
+  // Chrome sends three numbers: "15.6" is "15.6.0".
+  if (/^\d+\.\d+$/.test(v)) v = `${v}.0`;
+  osVersion = /^\d+\.\d+\.\d+$/.test(v) ? v : "";
+  return osVersion;
+}
+
+/**
+ * The user agent without "HeadlessChrome": sites that block bots check for that word. Null when the agent does not
+ * have it (a headed Chrome), so no override is set.
+ */
+export function plainUserAgent(ua: unknown): string | null {
+  return typeof ua === "string" && ua.includes("HeadlessChrome") ? ua.replace(/HeadlessChrome/g, "Chrome") : null;
+}
+
+/**
+ * The client hints of Chrome's own user agent, for Emulation.setUserAgentOverride. An override without them stops the
+ * Sec-CH-UA headers and empties navigator.userAgentData, a mismatch that bot checks look for. `product` is the
+ * product of Browser.getVersion ("HeadlessChrome/154.0.7727.56"). The brand list follows Chrome's own algorithm
+ * (components/embedder_support/user_agent_utils.cc): the major version seeds the GREASE brand, its version, and the
+ * order. For Chrome 154 on macOS that gives "Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99", as
+ * Chrome sends with no override. Null when the product has no version.
+ */
+export function userAgentMetadata(product: unknown, chromium: boolean, platform: NodeJS.Platform = process.platform, arch: string = process.arch, platformVersion = ""): UserAgentMetadata | null {
+  const full = typeof product === "string" ? /\/(\d+)((?:\.\d+){0,3})/.exec(product) : null;
+  if (!full) return null;
+  const seed = Number(full[1]);
+  const version = `${full[1]}${full[2] ?? ""}`;
+  const chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
+  const greased = ["8", "99", "24"][seed % 3] as string;
+  const grease = { brand: `Not${chars[seed % chars.length]}A${chars[(seed + 1) % chars.length]}Brand`, major: greased, full: `${greased}.0.0.0` };
+  const own = [{ brand: "Chromium", major: full[1] as string, full: version }, ...(chromium ? [] : [{ brand: "Google Chrome", major: full[1] as string, full: version }])];
+  // orders[seed % n]: the index of the GREASE brand, then of each own brand.
+  const orders = own.length === 2 ? [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] : [[0, 1], [1, 0]];
+  const order = orders[seed % orders.length] as number[];
+  const list = new Array<{ brand: string; major: string; full: string }>(own.length + 1);
+  [grease, ...own].forEach((b, i) => { list[order[i] as number] = b; });
+  const plat = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : platform === "linux" ? "Linux" : "";
+  return {
+    brands: list.map((b) => ({ brand: b.brand, version: b.major })),
+    fullVersionList: list.map((b) => ({ brand: b.brand, version: b.full })),
+    platform: plat, platformVersion, architecture: arch.startsWith("arm") ? "arm" : "x86", model: "", mobile: false,
+    bitness: arch === "arm64" || arch === "x64" ? "64" : "32", wow64: false, formFactors: ["Desktop"],
+  };
 }
 
 /**
@@ -321,9 +392,10 @@ export async function attachTarget(client: CdpClient, url: string, opts: AttachT
   const targetId = String(created["targetId"]);
   const attached = await client.send("Target.attachToTarget", { targetId, flatten: true });
   const sessionId = String(attached["sessionId"]);
+  // No Runtime.enable: evaluations need no domain, and it streams every console message of the page to this process.
   await client.send("Page.enable", {}, sessionId);
-  await client.send("Runtime.enable", {}, sessionId);
   await client.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId);
+  if (opts.userAgent) await client.send("Emulation.setUserAgentOverride", { userAgent: opts.userAgent, ...(opts.userAgentMetadata ? { userAgentMetadata: opts.userAgentMetadata } : {}) }, sessionId);
   if (!opts.headed && !opts.attached) {
     await client.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false }, sessionId);
   }
@@ -334,20 +406,22 @@ async function attachChrome(opts: ChromeLaunchOptions, port: number): Promise<Ch
   const start = Date.now();
   const res = await fetch(`http://127.0.0.1:${port}/json/version`);
   if (!res.ok) throw new Error(`cdp attach failed: HTTP ${res.status} from port ${port}`);
-  const info = (await res.json()) as { webSocketDebuggerUrl?: string; Browser?: string };
+  const info = (await res.json()) as { webSocketDebuggerUrl?: string; Browser?: string; "User-Agent"?: string };
   if (!info.webSocketDebuggerUrl) throw new Error("cdp attach failed: no webSocketDebuggerUrl");
   const client = await connectWebSocket(info.webSocketDebuggerUrl, cdpOptions(opts));
   const launchMs = Date.now() - start;
   opts.log.info(`chrome ${info.Browser ?? "?"} attached port=${port} launchMs=${launchMs}`);
   const owned = new Set<string>();
   let closing: Promise<void> | null = null;
+  const userAgent = plainUserAgent(info["User-Agent"]);
+  const hints = userAgent ? userAgentMetadata(info.Browser, opts.browser === "chromium", process.platform, process.arch, platformVersionOf()) : null;
   return {
     client,
     userDataDir: null,
     profile: { directory: null, copyDir: null, copied: false, copyMs: 0 },
     launchMs,
     async newTarget(url) {
-      const t = await attachTarget(client, url, { headed: opts.headed, attached: true });
+      const t = await attachTarget(client, url, { headed: opts.headed, attached: true, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}) });
       owned.add(t.targetId);
       return t;
     },
@@ -468,6 +542,8 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
 
   const owned = new Set<string>();
   let closing: Promise<void> | null = null;
+  const userAgent = plainUserAgent(version["userAgent"]);
+  const hints = userAgent ? userAgentMetadata(version["product"], opts.browser === "chromium" || /chromium/i.test(bin), process.platform, process.arch, platformVersionOf()) : null;
   const chrome: Chrome = {
     client,
     userDataDir: udd,
@@ -475,7 +551,7 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
     launchMs,
     ...(child.pid !== undefined ? { pid: child.pid } : {}),
     async newTarget(url) {
-      const t = await attachTarget(client, url, { headed: opts.headed, attached: false });
+      const t = await attachTarget(client, url, { headed: opts.headed, attached: false, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}) });
       owned.add(t.targetId);
       return t;
     },

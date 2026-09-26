@@ -130,6 +130,25 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("MCP server (live Chrome)", () 
     expect(await pageText()).not.toContain("Sent:");
   }, 60_000);
 
+  it("an autonomous run: no dialog opens, the reply goes out, and result.unattended lists the Send with both texts", async () => {
+    answer = { action: "decline" };
+    const before = c.dialogs.length;
+    const said = "Reply to Ann for me, don't ask me";
+    const v1 = await call("browse", { task: TASK, url, profile: "none", headed: false, goal: "act", confirm: "autonomous", user_said: said });
+    expect(v1.status, JSON.stringify(v1)).toBe("needs_text");
+    expect(v1.autonomous).toEqual({ user_said: said, unattended_actions: 0, profile: null });
+    const v = await settle(await call("continue", { run: v1.run, request: "t1", values: { f1: REPLY, f2: SUBJECT } }), ["done", "blocked", "failed"]);
+    expect(v.status, JSON.stringify(v)).toBe("done");
+    expect(c.dialogs.length).toBe(before);
+    expect(await pageText()).toContain(`Sent: ${SUBJECT} | ${REPLY}`);
+    // reply.html empties both fields after the send, so both texts left the page.
+    expect(v.result?.unattended).toEqual([expect.objectContaining({
+      action: expect.stringMatching(/^click button "Send"/), host: expect.stringMatching(/^127\.0\.0\.1:\d+$/), why: ["destructive", "unsent_text"],
+      texts: [{ label: "Reply", chars: REPLY.length, text: REPLY, left: true }, { label: "Subject", chars: SUBJECT.length, text: SUBJECT, left: true }],
+    })]);
+    expect(v.autonomous?.unattended_actions).toBe(1);
+  }, 60_000);
+
   it("after a cancel during needs_text, a new browse reuses the same Chrome", async () => {
     const pid = session.chrome?.pid;
     expect(alive(pid)).toBe(true);

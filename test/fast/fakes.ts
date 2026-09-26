@@ -1,6 +1,6 @@
 // Scripted fakes for the fast engine: Page, Chrome, and Observation builders. No Chrome and no network.
-import type { Action, ActionKind, Chrome, Observation, Page } from "../../src/fast/model.js";
-import { StalePage } from "../../src/fast/model.js";
+import type { Action, ActionKind, Chrome, DatePlan, EditPlan, EditResult, Observation, Page, Popup } from "../../src/fast/model.js";
+import { EditRefused, StalePage } from "../../src/fast/model.js";
 
 /** One executable action. `id` defaults to `e<n>` by position when `obs()` assigns it. */
 export function el(id: string, kind: ActionKind, label: string, role: string, extra: Partial<Action> = {}): Action {
@@ -22,7 +22,7 @@ export function obs(url: string, actions: Action[], text = "page", over: Partial
   };
 }
 
-export interface ActCall { op: "act" | "press" | "back" | "navigate"; id?: string; kind?: string; text?: string; key?: string; url?: string }
+export interface ActCall { op: "act" | "press" | "back" | "navigate" | "commit" | "setDate"; id?: string; kind?: string; text?: string; key?: string; url?: string; edit?: EditPlan; plan?: DatePlan }
 
 export interface PageScript {
   pages: Record<string, Observation>;
@@ -31,10 +31,28 @@ export interface PageScript {
   transitions?: (call: ActCall, current: string) => string | undefined;
   /** Throw StalePage on the first `act` calls this many times. */
   staleTimes?: number;
+  /** The result of a fill, or an EditRefused to throw. Undefined: the fill returns nothing (an adapter without results). */
+  edits?: (call: ActCall, action: Action) => EditResult | EditRefused | undefined;
+  /** The popup next to a chip field on the current page; `focus` as `Page.popup` got it. Default: closed. */
+  popup?: (action: Action, current: string, focus: boolean) => Popup | null;
+  /** The result of a script Enter (`commit`, recorded as op "commit"). Default: not handled. */
+  commit?: (action: Action, current: string) => { prevented: boolean } | { skipped: "gone" | "focus" };
+  /** `Page.canGoBack` on the current page. Absent: the fake has no `canGoBack`, as an older adapter. */
+  canGoBack?: (current: string) => boolean;
+  /**
+   * Early observes (`Page.pending`). After a call, `late` names the page that the rest of the settle shows. An early
+   * observe returns the page at once and leaves the settle pending; the next observe moves to the late page first.
+   * Absent: the fake has no `pending`, as an older adapter, and every observe is settled.
+   */
+  late?: (call: ActCall, current: string) => string | undefined;
 }
 
 export interface FakePage extends Page {
   calls: ActCall[];
+  /** The `early` flag of each observe. */
+  earlies: boolean[];
+  /** The focus argument of each popup read. */
+  popups: boolean[];
   observes: number;
   current: string;
   closed: boolean;
@@ -42,26 +60,57 @@ export interface FakePage extends Page {
 
 export function fakePage(script: PageScript): FakePage {
   let stale = script.staleTimes ?? 0;
+  let lateNext: string | undefined;
+  let pend = false;
   const p = {
-    targetId: "t1", sessionId: "s1", calls: [] as ActCall[], observes: 0, current: script.start, closed: false,
+    targetId: "t1", sessionId: "s1", calls: [] as ActCall[], earlies: [] as boolean[], popups: [] as boolean[], observes: 0, current: script.start, closed: false,
     stats: { browserMs: 0, calls: 0 },
     page(): Observation { const o = script.pages[p.current]; if (!o) throw new Error(`fake page ${p.current} missing`); return o; },
     move(call: ActCall): void {
+      // A new input ends the settle of the one before.
+      if (lateNext !== undefined) { p.current = lateNext; lateNext = undefined; }
+      pend = false;
       p.calls.push(call);
       p.stats.calls += 1;
       p.stats.browserMs += 5;
       const next = script.transitions?.(call, p.current);
       if (next !== undefined) p.current = next;
+      lateNext = script.late?.(call, p.current);
     },
-    async observe() { p.observes += 1; p.stats.calls += 1; p.stats.browserMs += 2; return p.page(); },
+    async observe(o?: { early?: boolean }) {
+      p.observes += 1; p.stats.calls += 1; p.stats.browserMs += 2;
+      p.earlies.push(o?.early === true);
+      if (script.late && o?.early === true && !pend && lateNext !== undefined) pend = true;
+      else { pend = false; if (lateNext !== undefined) { p.current = lateNext; lateNext = undefined; } }
+      return p.page();
+    },
     async fresh() { return true; },
-    async act(action: Action, _obs: Observation, text?: string) {
+    async act(action: Action, _obs: Observation, text?: string, edit?: EditPlan) {
       if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
-      p.move({ op: "act", id: action.id, kind: action.kind, ...(text !== undefined ? { text } : {}) });
+      const call: ActCall = { op: "act", id: action.id, kind: action.kind, ...(text !== undefined ? { text } : {}), ...(edit ? { edit } : {}) };
+      const result = action.kind === "fill" ? script.edits?.(call, action) : undefined;
+      if (result instanceof EditRefused) { if (!result.changed) throw result; p.move(call); throw result; }
+      p.move(call);
+      return result;
+    },
+    async setDate(action: Action, _obs: Observation, plan: DatePlan) {
+      if (stale > 0) { stale -= 1; throw new StalePage("fake: page changed before input"); }
+      p.move({ op: "setDate", id: action.id, plan });
     },
     async press(key: string) { p.move({ op: "press", key }); },
+    async popup(action: Action, focus?: boolean): Promise<Popup | null> {
+      p.popups.push(focus === true);
+      return script.popup ? script.popup(action, p.current, focus === true) : { open: false, text: "", picks: [], busy: false };
+    },
+    async commit(action: Action) {
+      const r = script.commit ? script.commit(action, p.current) : { prevented: false };
+      p.move({ op: "commit", id: action.id });
+      return r;
+    },
     async navigate(url: string) { p.move({ op: "navigate", url }); },
     async back() { p.move({ op: "back" }); },
+    ...(script.canGoBack ? { async canGoBack() { return (script.canGoBack as (c: string) => boolean)(p.current); } } : {}),
+    ...(script.late ? { pending() { return pend; } } : {}),
     async url() { return p.page().url; },
     async screenshot() { p.stats.calls += 1; },
     async close() { p.closed = true; },

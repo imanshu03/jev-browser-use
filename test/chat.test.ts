@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Browser } from "../src/browser.js";
 import type { Human } from "../src/io.js";
-import { IDLE_PING_MS, chatLogger, metricsLine, parseChatArgs, runChat, type ChatDeps } from "../src/chat.js";
+import { CHAT_USAGE, IDLE_PING_MS, chatLogger, metricsLine, parseChatArgs, readlineHuman, runChat, type ChatDeps } from "../src/chat.js";
 import type { KeyCheck } from "../src/config.js";
 import { loadKey, saveKey } from "../src/config.js";
 import { emptyResult } from "../src/io.js";
@@ -125,6 +125,8 @@ describe("runChat keep-alive transport", () => {
       expect(transport.warms).toHaveLength(2);
       await vi.advanceTimersByTimeAsync(IDLE_PING_MS);
       expect(transport.warms).toHaveLength(3);
+      // The idle ping keeps open sockets from their idle timeout; the startup warm opens them.
+      expect(transport.keeps).toEqual([false, true, true]);
       stdin.write("do the task\n");
       await until(() => started);
       await vi.advanceTimersByTimeAsync(IDLE_PING_MS);
@@ -231,6 +233,11 @@ describe("parseChatArgs", () => {
     expect(parseChatArgs(["--engine", "chromium"], {}).cfg.engine).toBe("chromium");
     expect(parseChatArgs([], { JEV_BROWSER_ENGINE: "chromium" }).cfg.engine).toBe("chromium");
     for (const engine of ["fast", "legacy"]) expect(() => parseChatArgs(["--engine", engine], {})).toThrow(UsageError);
+  });
+  it("--confirm autonomous passes to the tasks; the vercel engine rejects it; the usage names it", () => {
+    expect(parseChatArgs(["--confirm", "autonomous"], {}).cfg.confirm).toBe("autonomous");
+    expect(() => parseChatArgs(["--confirm", "autonomous", "--engine", "vercel"], {})).toThrow(UsageError);
+    expect(CHAT_USAGE).toContain("--confirm <auto|always|never|autonomous>");
   });
   it("rejects a task argument and unknown flags", () => {
     expect(() => parseChatArgs(["open gmail"], {})).toThrow(/jev-browser "open gmail"/);
@@ -868,5 +875,23 @@ describe("runChat fast engine", () => {
     expect(exits).toEqual([130]);
     expect(await code).toBe(0);
     expect(chrome.closes).toBe(1);
+  });
+});
+
+describe("readlineHuman: the prompt of a chat task", () => {
+  it("writes the texts that the action sends before it asks", async () => {
+    const out = new PassThrough();
+    let text = "";
+    out.on("data", (c) => { text += String(c); });
+    const seen: string[] = [];
+    const h = readlineHuman({ ask: async () => { seen.push(text); return "y"; } }, out, true, 100);
+    expect(await h.confirm("About to click. Type y to allow: ", 1000, { kind: "action", action: 'click button "Send"', host: "a.b", typed: [{ label: "Reply", text: "hi" }] })).toBe(true);
+    expect(seen[0]).toBe("Text that this action sends:\n  Reply: hi\n");
+  });
+  it("a page label in the question cannot rewrite the terminal", async () => {
+    const asked: string[] = [];
+    const h = readlineHuman({ ask: async (m: string) => { asked.push(m); return "n"; } }, new PassThrough(), true, 100);
+    await h.confirm('About to click button "Send\u001b[2K" on https://a.b/. Type y to allow: ', 1000);
+    expect(asked).toEqual(['About to click button "Send[2K" on https://a.b/. Type y to allow: ']);
   });
 });

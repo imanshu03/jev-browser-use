@@ -1,7 +1,7 @@
 {
   "name": "jev-browser",
   "version": "0.1.0",
-  "description": "Run browser tasks in Chrome with TypeSafe Jev. Jev chooses every action. Your assistant writes new text, such as replies, and you allow each send in a dialog.",
+  "description": "Run browser tasks in Chrome with TypeSafe Jev. Jev chooses every action. Your assistant writes new text, such as replies, and you allow each send in a dialog. Say \"autonomous\" or \"don't ask me\" in your message to let Jev act without dialogs.",
   "author": { "name": "Imanshu Rathore" },
   "repository": "https://github.com/imanshu03/jev-browser-use",
   "keywords": ["browser", "chrome", "jev", "typesafe", "mcp"],
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Jev Browser",
     "shortDescription": "Browser tasks in Chrome",
-    "longDescription": "Run browser tasks in Chrome with TypeSafe Jev. Jev chooses every action. Your assistant writes new text, such as replies, and you allow each send in a dialog.",
+    "longDescription": "Run browser tasks in Chrome with TypeSafe Jev. Jev chooses every action. Your assistant writes new text, such as replies, and you allow each send in a dialog. Say \"autonomous\" or \"don't ask me\" in your message to let Jev act without dialogs.",
     "developerName": "Imanshu Rathore",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"]

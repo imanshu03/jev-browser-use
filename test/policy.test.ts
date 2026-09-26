@@ -117,6 +117,8 @@ describe("decide", () => {
     expect(decide({ page_kind: pk("task_page"), operation: ch("SELECT"), select_target: ch("e4:1", 0.7, { "e4:1": 0.7 }) }, c)).toMatchObject({ kind: "candidate", action: "select", optionLabel: "b", optionRef: "e6" });
     expect(decide({ page_kind: pk("task_page"), operation: ch("PRESS_KEY"), key: ch("escape") }, ctx())).toMatchObject({ kind: "code_action", action: "press_key", key: "Escape" });
     expect(decide({ page_kind: pk("task_page"), operation: ch("PRESS_KEY"), key: ch("none") }, ctx())).toMatchObject({ kind: "code_action", key: "Enter" });
+    // No key answer: the oracle dropped a bad one. A missing head runs no action (it pressed Enter before).
+    expect(decide({ page_kind: pk("task_page"), operation: ch("PRESS_KEY") }, ctx())).toMatchObject({ kind: "no_target", reason: "no key answer" });
     expect(decide({ page_kind: pk("task_page"), operation: ch("PRESS_KEY"), key: ch("k1") }, ctx({ keys: [{ label: "k1", key: "Meta+k" }] }))).toMatchObject({ key: "Meta+k" });
     expect(decide({ page_kind: pk("task_page"), operation: ch("SCROLL_DOWN") }, ctx())).toMatchObject({ kind: "scroll", dir: "down" });
     expect(decide({ page_kind: pk("task_page"), operation: ch("GO_BACK") }, ctx())).toMatchObject({ kind: "code_action", action: "go_back" });

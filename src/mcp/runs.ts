@@ -2,8 +2,10 @@
 // cancel, and the last finished runs. No SDK imports: the runner reaches this file only through the
 // TextSource, Human, and Logger it gets, and the tool handlers reach it through RunManager.
 //
-// The model can never approve an action here. A confirmation settles only through settleConfirm, which the
-// server calls with the answer of a dialog that the client showed to the user.
+// The model never approves one action here. A confirmation settles only through settleConfirm, which the server
+// calls with the answer of a dialog that the client showed to the user. A run is autonomous only when its browse call
+// says so with the user's own words (user_said). The loop then asks no one, and the step record of each action that
+// ran with no dialog holds its audit.
 import { randomBytes } from "node:crypto";
 import { flatText, sanitizeText } from "../fast/generate.js";
 import { cutText } from "../fast/policy.js";
@@ -18,12 +20,21 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export interface BrowseInput {
   task: string; url?: string; profile?: string; headed: boolean; engine?: "cdp" | "chromium";
-  goal?: Goal; vars?: Record<string, string>; max_steps?: number; confirm: "auto" | "always" | "never"; dry_run: boolean;
+  goal?: Goal; vars?: Record<string, string>; max_steps?: number; confirm: "auto" | "always" | "never" | "autonomous"; dry_run: boolean;
+  /** With confirm "autonomous" only: the words of the user's own message that turn the mode on. */
+  user_said?: string;
 }
 export interface RunHooks {
   text: TextSource; human: Human; signal: AbortSignal; log: Logger; hints: RunnerHints;
+  /**
+   * A person can answer in this session. An autonomous run's Human is never interactive, so the runner reads this for a
+   * sign-in wall. Absent: `human.interactive`.
+   */
+  attended?: boolean;
   /** The starter reports the fields whose assistant text no fill typed. */
   untyped?: (labels: string[]) => void;
+  /** The starter reports the texts that a send of the run took out of the page. */
+  sent?: (texts: { field: string; text: string }[]) => void;
 }
 export type RunStarter = (input: BrowseInput, hooks: RunHooks) => Promise<RunResult>;
 export interface PendingText { kind: "text"; id: string; req: TextRequest; expiresAt: number; errors: Record<string, string> | null; attempts: number }
@@ -37,6 +48,12 @@ export type Pending = PendingText | PendingConfirm | PendingPause;
  */
 export type ConfirmEnd = "allowed" | "denied" | "no_pickup" | "no_answer" | "cancelled";
 
+/**
+ * An autonomous run: the user's words, the number of step records with an audit so far, and the first step after which
+ * an audited text left the page.
+ */
+export interface RunAutonomy { readonly userSaid: string; unattended: number; sentAt: number | null }
+
 export interface Run {
   readonly id: string;            // `r${n}-${4 hex}`
   readonly task: string; readonly startedAt: number;
@@ -45,6 +62,8 @@ export interface Run {
   result: RunResult | null; endedAt: number | null;
   confirmEnd: ConfirmEnd | null;  // the last confirmation; null before the first one
   untyped: string[];              // labels of fields whose assistant text no fill typed
+  autonomous?: RunAutonomy | null; // set for confirm "autonomous"
+  sent: { field: string; text: string }[]; // texts that a send of the run took out of the page
   redact(s: string): string;      // the runner's redactor, via the per-run logger, plus the API key removal
 }
 
@@ -99,6 +118,9 @@ class RunState implements Run {
   endedAt: number | null = null;
   confirmEnd: ConfirmEnd | null = null;
   untyped: string[] = [];
+  autonomous: RunAutonomy | null = null;
+  confirm: BrowseInput["confirm"] = "auto";
+  sent: { field: string; text: string }[] = [];
   /** The runner's redactor followed by the key removal. The per-run logger replaces it. */
   redactor: (s: string) => string;
   readonly controller = new AbortController();
@@ -179,22 +201,31 @@ export class RunManager {
     return this.deps.secret?.() ?? null;
   }
 
-  /** Start a run. The same task while a run is active gives that run. Another task gives BusyError. */
+  /**
+   * Start a run. The same task while a run is active gives that run. Another task, or the same task with another confirm
+   * value, gives BusyError: no call turns autonomous mode on or off in the middle of a run.
+   */
   start(input: BrowseInput, opts: { interactive: boolean }): Run {
     if (this.closed) throw new BusyError("the server is shutting down");
     this.deps.precheck?.();
     const active = this.current;
     if (active) {
-      if (active.status !== "stopping" && active.task === input.task) return active;
+      if (active.status !== "stopping" && active.task === input.task) {
+        if (active.confirm === input.confirm) return active;
+        throw new BusyError(`run ${active.id} is active with confirm "${active.confirm}". Call wait with run "${active.id}", or call cancel.`);
+      }
       throw new BusyError(`run ${active.id} is active. Call wait with run "${active.id}", or call cancel.`);
     }
     const run = new RunState(`r${++this.count}-${randomBytes(2).toString("hex")}`, input.task, this.now(), (s) => stripKey(s, this.secret()));
+    run.confirm = input.confirm;
+    if (input.confirm === "autonomous") run.autonomous = { userSaid: input.user_said ?? "", unattended: 0, sentAt: null };
     this.runs.set(run.id, run);
     this.current = run;
     let p: Promise<RunResult>;
     try { p = this.deps.start(input, this.hooks(run, opts.interactive)); } catch (e) { p = Promise.reject(e); }
     run.promise = p.then((r) => this.finish(run, r), (e: unknown) => this.finish(run, this.failed(run, input, e)));
-    this.log.info(`run ${run.id} started${opts.interactive ? "" : " (no dialogs)"}`);
+    const mode = run.autonomous ? ` (autonomous: no dialogs; the user said "${cutText(flatText(run.redact(run.autonomous.userSaid)), 300)}")` : opts.interactive ? "" : " (no dialogs)";
+    this.log.info(`run ${run.id} started${mode}`);
     return run;
   }
 
@@ -323,14 +354,19 @@ export class RunManager {
     for (const l of [...run.listeners]) l();
   }
 
+  /**
+   * An autonomous run gets a Human that is never interactive and never opens a dialog: the plan then takes the workspace
+   * default profile, as a run without dialogs does. `attended` still tells the runner if a person can sign in.
+   */
   private hooks(run: RunState, interactive: boolean): RunHooks {
     const text: TextSource = { write: (req, opts) => this.write(run, req, opts) };
+    const autonomous = run.autonomous !== null;
     const human: Human = {
-      interactive,
+      interactive: interactive && !autonomous,
       pause: (_message, timeoutMs, poll, kind) => this.pause(run, timeoutMs, poll, kind),
-      confirm: (message, timeoutMs, detail) => this.confirm(run, message, timeoutMs, detail),
+      confirm: autonomous ? async () => false : (message, timeoutMs, detail) => this.confirm(run, message, timeoutMs, detail),
     };
-    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, untyped: (labels) => { run.untyped = [...labels]; } };
+    return { text, human, signal: run.controller.signal, log: this.runLogger(run), hints: MCP_HINTS, attended: interactive, untyped: (labels) => { run.untyped = [...labels]; }, sent: (texts) => { run.sent = texts.map((x) => ({ ...x })); } };
   }
 
   /**
@@ -351,6 +387,11 @@ export class RunManager {
       debug: (msg, data) => base.debug(msg, data),
       step: (rec) => {
         run.steps += 1;
+        const a = run.autonomous;
+        if (rec.unattended && a) {
+          a.unattended += 1;
+          if (a.sentAt === null && rec.unattended.texts.some((t) => t.left === true)) a.sentAt = rec.step;
+        }
         const line = flatText(run.redact(stepLine(rec, (s) => run.redact(s))));
         run.lastStep = line;
         run.tail.push(line);

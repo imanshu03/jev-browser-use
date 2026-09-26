@@ -1,0 +1,88 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Chips fixture</title>
+<style>
+body{font:12px sans-serif;margin:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+section{border-top:1px dashed #ccc;padding:2px 0}
+.box{display:flex;flex-wrap:wrap;gap:4px;border:1px solid #999;padding:3px;align-items:center}
+.chip{display:inline-flex;gap:2px;background:#eee;padding:1px 3px}
+input{min-width:120px}
+#pop{position:absolute;display:none;background:#fff;border:1px solid #666;padding:4px;min-width:200px}
+#pop button{display:block}
+@keyframes out{from{transform:none}to{transform:translateY(-2px)}}
+</style></head>
+<body>
+<!-- Shapes S1-S6 from the chips review (x-v-chips-shapes.html), and P, a copy of the app's ParticipantsInput. -->
+
+<!-- S1: a builder field: a label row with a "Remove <label>" icon button, then a text input. No chips. -->
+<section><form id="f1" onsubmit="event.preventDefault();window.__ev.push('S1 submit')">
+  <div class="col"><div class="row" style="display:flex;justify-content:space-between"><label for="s1">Default branch</label><button type="button" aria-label="Remove Default branch"><svg width="10" height="10"><path d="M0 0L10 10"/></svg></button></div>
+  <input id="s1" type="text" placeholder="main"></div>
+  <div class="col"><label for="s1b">Notes</label><input id="s1b" type="text"></div>
+  <button type="submit">Save</button></form></section>
+
+<!-- S2: a search box with a filter chip. Enter submits the native form; the page has no key handler. -->
+<section><form id="f2" onsubmit="event.preventDefault();window.__ev.push('S2 search '+document.getElementById('s2').value)">
+  <div class="box"><span class="chip">is:open<button type="button" aria-label="Remove filter is:open">x</button></span><input id="s2" type="text" aria-label="Filter issues"></div>
+</form></section>
+
+<!-- S3: a contenteditable composer (no aria-multiline) with an attachment chip and a Send button. Enter sends. -->
+<section><div class="box" id="c3"><span class="chip">report.pdf<button type="button" aria-label="Remove attachment">x</button></span>
+  <div id="s3" contenteditable="true" role="textbox" aria-label="Message" style="min-width:160px;border:1px solid #ccc"></div><button type="button" onclick="window.__ev.push('S3 send click')">Send</button></div></section>
+
+<!-- S4: a table row with a Delete control in an earlier cell and one inline-edit input. Enter saves the row. -->
+<section><table><tr><td>Ann Lee <button type="button" aria-label="Delete">x</button></td><td><input id="s4" type="text" aria-label="Role"></td></tr></table></section>
+
+<!-- S5: recipients: Enter adds a chip that shows a display name; the email address is only in its title. -->
+<section><div class="box" id="b5"><span class="chip" title="ann@example.com">Ann Stone<button type="button" aria-label="Remove">x</button></span><input id="s5" type="text" aria-label="Recipients"></div></section>
+
+<!-- S6: react-select on macOS: typing opens a multiselect list with the first option active and no aria-activedescendant; Enter picks it. -->
+<section><div class="box" id="b6"><span class="chip">frontend<span role="button" aria-label="Remove frontend">x</span></span><input id="s6" type="text" role="combobox" aria-label="Labels" aria-expanded="false" aria-autocomplete="list"></div><div id="menu6"></div></section>
+
+<!-- P: ParticipantsInput: an unlinked label, chips before the input, the placeholder only while no chip exists, suggestions in a
+     positioned dialog after a 300 ms search. Only Enter with text or a suggestion click adds a chip. -->
+<section><form id="fp" onsubmit="event.preventDefault();window.__ev.push('P submit')">
+  <div class="field"><label>Meeting Participants (Optional)</label>
+    <div><div class="box" id="anchor"><input id="p" placeholder="Search org members or type a name..."></div></div>
+    <p>Search for org members or type a name and press Enter to add external participants</p></div>
+  <div><label for="pt">Title (Optional)</label><input id="pt"></div>
+  <button type="submit">Submit</button></form></section>
+<div id="pop" role="dialog"></div>
+
+<script>
+window.__ev=[];
+// S4: Enter saves the row; the input goes away.
+document.getElementById('s4').addEventListener('keydown',e=>{ if(e.key==='Enter'){ window.__ev.push('S4 saved '+e.target.value); e.target.replaceWith(document.createTextNode(e.target.value)); } });
+// S3: Enter sends the message.
+document.getElementById('s3').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); window.__ev.push('S3 SENT '+e.target.innerText); e.target.innerText=''; } });
+// S5: Enter adds a chip with a display name from a directory.
+const DIR={'bob@example.com':'Bob Stone'};
+document.getElementById('s5').addEventListener('keydown',e=>{ const v=e.target.value.trim(); if(e.key==='Enter'&&v){ e.preventDefault(); const c=document.createElement('span'); c.className='chip'; c.title=v; c.innerHTML=(DIR[v]||v)+'<button type="button" aria-label="Remove">x</button>'; e.target.before(c); e.target.value=''; window.__ev.push('S5 added '+v); } });
+// S6: typing opens a listbox; the first matching option is active; the Create option is last.
+const OPTS=['debug','bugfix-later','frontend','backend'];
+const s6=document.getElementById('s6'), menu6=document.getElementById('menu6');
+let focused6=null;
+s6.addEventListener('input',()=>{ const q=s6.value.trim().toLowerCase(); menu6.innerHTML=''; if(!q){s6.setAttribute('aria-expanded','false');s6.removeAttribute('aria-controls');focused6=null;return;}
+  const lb=document.createElement('div'); lb.id='lb6'; lb.setAttribute('role','listbox'); lb.setAttribute('aria-multiselectable','true');
+  const all=[...OPTS.filter(o=>o.includes(q)), 'Create "'+s6.value.trim()+'"'];
+  all.forEach((o,i)=>{ const d=document.createElement('div'); d.setAttribute('role','option'); d.id='o6'+i; d.textContent=o; lb.appendChild(d); });
+  menu6.appendChild(lb); s6.setAttribute('aria-expanded','true'); s6.setAttribute('aria-controls','lb6'); focused6=all[0]; });
+s6.addEventListener('keydown',e=>{ if(e.key==='Enter'&&focused6){ e.preventDefault(); const v=focused6.startsWith('Create "')?s6.value.trim():focused6; const c=document.createElement('span'); c.className='chip'; c.innerHTML=v+'<span role="button" aria-label="Remove '+v+'">x</span>'; s6.before(c); s6.value=''; menu6.innerHTML=''; focused6=null; s6.setAttribute('aria-expanded','false'); s6.removeAttribute('aria-controls'); window.__ev.push('S6 added '+v); } });
+// P: the participants input.
+const ORG=[{name:'Ann Lee',email:'ann.lee@parallelloop.ai'},{name:'Bob Stone',email:'bob.stone@parallelloop.ai'}];
+const p=document.getElementById('p'), anchor=document.getElementById('anchor'), pop=document.getElementById('pop');
+let timer=null;
+const place=()=>{ const r=anchor.getBoundingClientRect(); pop.style.left=(r.left+scrollX)+'px'; pop.style.top=(r.bottom+scrollY+4)+'px'; pop.style.display='block'; pop.style.animation=''; pop.dataset.state='open'; };
+// On blur the popup closes with a 300 ms CSS exit animation, as a Radix popover does: it stays visible with
+// data-state="closed" until animationend. The causal settle does not wait for a CSS animation.
+p.addEventListener('blur',()=>{ if (pop.style.display!=='block') return; pop.dataset.state='closed'; pop.style.animation='out 300ms'; });
+pop.addEventListener('animationend',()=>{ if (pop.dataset.state==='closed') { pop.style.display='none'; pop.style.animation=''; } });
+const add=who=>{ const c=document.createElement('span'); c.className='chip'; c.innerHTML='<span></span><button type="button" aria-label="Remove participant"><svg width="8" height="8"><path d="M0 0L8 8"/></svg></button>';
+  c.firstChild.textContent=who.name||who.email; p.before(c); p.value=''; p.placeholder=''; pop.style.display='none'; window.__ev.push('P added '+(who.email||who.name)); };
+p.addEventListener('input',()=>{ clearTimeout(timer); const q=p.value.trim(); if(!q){pop.style.display='none';return;}
+  pop.innerHTML='<span class="animate-spin">*</span> Searching members...'; place();
+  timer=setTimeout(()=>{ const hits=ORG.filter(m=>(m.name+' '+m.email).toLowerCase().includes(q.toLowerCase())); pop.innerHTML='';
+    if(!hits.length) pop.textContent='No members found';
+    for (const m of hits){ const b=document.createElement('button'); b.type='button'; b.textContent=m.name+' '+m.email; b.onclick=()=>add(m); pop.appendChild(b); } place(); },300); });
+p.addEventListener('keydown',e=>{ const t=p.value.trim(); if(e.key==='Enter'&&t){ e.preventDefault(); add(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)?{email:t}:{name:t}); } });
+</script>
+</body></html>

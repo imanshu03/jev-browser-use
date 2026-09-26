@@ -218,6 +218,8 @@ export function decide(a: Answers, ctx: DecideContext): Decision {
     }
     case "PRESS_KEY": {
       const k = choiceOf(a, "key");
+      // The key question is always asked: no answer means the oracle dropped a bad one. A missing head runs no action.
+      if (!k) return { kind: "no_target", reason: "no key answer", top: [] };
       const key = k && k.choice !== "none" ? resolveKey(k.choice, ctx.keys) ?? "Enter" : "Enter";
       return { kind: "code_action", action: "press_key", key, conf: picked.conf };
     }

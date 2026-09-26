@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Popover combobox</title>
+<!-- A field that opens a popover with its own text input, as Google Flights does: the click on "Where from?" moves focus
+     to "Where else?". A person types there. "Grab" is a plain field whose click moves focus to another plain field.
+     "Plain" is a plain field whose click opens a dialog and moves focus to its combobox: it opens no popover itself. -->
+<style>
+  body { font: 14px sans-serif; }
+  #pop { position: absolute; top: 60px; left: 10px; background: #fff; border: 1px solid #888; padding: 8px; }
+  [hidden] { display: none; }
+</style>
+<p><input id="from" role="combobox" aria-label="Where from?" aria-haspopup="dialog" aria-expanded="false" value="Bengaluru"></p>
+<p><input id="note" aria-label="Note"> <input id="grab" aria-label="Grab"> <input id="plain" aria-label="Plain"></p>
+<div id="pop2" role="dialog" hidden><input id="else2" role="combobox" aria-label="Pick a city" aria-autocomplete="list"></div>
+<div id="pop" role="dialog" hidden>
+  <input id="else" role="combobox" aria-label="Where else?" aria-autocomplete="list" aria-controls="opts">
+  <ul id="opts" role="listbox"></ul>
+</div>
+<script>
+  const from = document.getElementById("from"), pop = document.getElementById("pop"), other = document.getElementById("else"), opts = document.getElementById("opts");
+  from.addEventListener("mousedown", (e) => { e.preventDefault(); pop.hidden = false; from.setAttribute("aria-expanded", "true"); other.value = ""; other.focus(); });
+  other.addEventListener("input", () => {
+    opts.innerHTML = "";
+    for (const city of ["Zurich", "Zagreb"]) {
+      if (!city.toLowerCase().startsWith(other.value.toLowerCase())) continue;
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.textContent = city;
+      li.onclick = () => { from.value = city; pop.hidden = true; from.setAttribute("aria-expanded", "false"); };
+      opts.appendChild(li);
+    }
+  });
+  const grab = document.getElementById("grab"), note = document.getElementById("note");
+  grab.addEventListener("mousedown", (e) => { e.preventDefault(); note.focus(); });
+  const plain = document.getElementById("plain"), pop2 = document.getElementById("pop2"), else2 = document.getElementById("else2");
+  plain.addEventListener("mousedown", (e) => { e.preventDefault(); pop2.hidden = false; else2.focus(); });
+</script>

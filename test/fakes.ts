@@ -111,7 +111,8 @@ export function fakeOracle(script: OracleScript): Oracle & { requests: { name: s
       for (const [qn, q] of Object.entries(questions)) {
         // A script answers `type_text_value` for the field that its TYPE_TEXT target chooses. The step request asks one
         // value head per field (`value_<key>`), so that answer serves every value head that the script does not answer.
-        const g = partial[qn] ?? (/^value_/.test(qn) ? partial["type_text_value"] : undefined);
+        // `type_text_mode` serves the mode heads (`mode_<key>`) in the same way.
+        const g = partial[qn] ?? (/^value_/.test(qn) ? partial["type_text_value"] : /^mode_/.test(qn) ? partial["type_text_mode"] : undefined);
         // Defaults: noul 0.05, except the scope and target_ok guards, which default to 0.9 so scripted actions pass the gate.
         const defaultNoul = /^(in_task_scope|target_ok)$/.test(qn) ? 0.9 : 0.05;
         if (q.type === "noul") answers[qn] = { type: "noul", noul: typeof g === "number" ? g : typeof g === "object" && g.noul !== undefined ? g.noul : defaultNoul };
@@ -174,11 +175,11 @@ export function fakeText(steps: TextStep[] = []): TextSource & { requests: TextR
 }
 
 /** A Transport that never opens a socket. `fetch` throws unless the test passes one. */
-export function fakeTransport(fetch?: Fetch): Transport & { warms: string[]; closes: number } {
+export function fakeTransport(fetch?: Fetch): Transport & { warms: string[]; keeps: boolean[]; closes: number } {
   const t = {
-    warms: [] as string[], closes: 0, stats: { connections: 0 },
+    warms: [] as string[], keeps: [] as boolean[], closes: 0, stats: { connections: 0 },
     fetch: fetch ?? (async (input: string): Promise<Response> => { throw new Error(`fake transport: no network for ${input}`); }),
-    async warm(baseURL: string) { t.warms.push(baseURL); },
+    async warm(baseURL: string, opts?: { keep?: boolean }) { t.warms.push(baseURL); t.keeps.push(opts?.keep === true); },
     async close() { t.closes += 1; },
   };
   return t;

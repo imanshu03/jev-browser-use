@@ -63,11 +63,25 @@ export interface SpanField {
   request: string;                // "t1".."t3"
 }
 
+/** A calendar date. */
+export interface DateValue { y: number; m: number; d: number }
+
+/**
+ * The date that the whole text of a span names. Code only; never sent to Jev. `ambiguous` is set for a numeric date whose
+ * first two numbers can both be a month ("9/1/2026"): `m` and `d` are then the first and the second number, and the fact
+ * holds only for a date field whose parts show in the same shape (`dateFor` in src/fast/dates.ts).
+ */
+export interface DateFact extends DateValue {
+  /** The separator of an ambiguous numeric date: "/", ".", or "-". */
+  ambiguous?: string;
+}
+
 export interface Span {
   id: string;                     // "s<n>" task, "v_<key>" var, "g<n>" generated
   text: string;
   source: "quoted" | "email" | "url" | "number" | "date" | "after_verb" | "proper_noun"
-        | "clause" | "whole_task" | "var" | "page_line" | "generated";
+        | "clause" | "whole_task" | "var" | "page_line" | "generated"
+        | "mention";                // a name to mention: after mention, tag, ping, @-mention, or at-mention, or an @handle
   verb?: string;
   /** The id of the after_verb span this span was cut from: its first words, before a preposition or as a proper noun. */
   parent?: string;
@@ -78,8 +92,17 @@ export interface Span {
   pair?: string;
   /** A cut of an after_verb value of more than 10 words, which is not a span. A field that can take new text leaves it out. */
   longCut?: true;
+  /**
+   * A name that is the whole topic after "about" ("an issue about Login Timeout"). It stays a proper noun, so a title or
+   * a subject field offers it, but a multiline field (a message, a note, a body) does not: the topic is not the text.
+   */
+  topic?: true;
   secret: boolean;                // always false for "generated"
   field?: SpanField;              // only for "generated"
+  /** The date that the whole text names. Only a date field takes a span with a date. */
+  date?: DateFact;
+  /** The span is the start or the end of a date range of the task ("from A to B", "between A and B", "A – B"). */
+  dateRole?: "start" | "end";
 }
 
 /** One executed action. The first six fields go to Jev as `recent_actions`. */
@@ -92,6 +115,26 @@ export interface HistoryEntry {
   page_changed: boolean | null;
   url_after?: string;
   element_key?: string;
+}
+
+/**
+ * An action that an autonomous run (`confirm: "autonomous"`) did with no dialog: a destructive or submit action, a
+ * click or Enter while assistant text was in a field, or a fill that replaced text that the run did not type. Only the
+ * record of an action that ran carries it.
+ */
+export interface UnattendedAction {
+  action: string;                 // as a dialog names it: `click button "Send"`
+  host: string;
+  why: ("destructive" | "submit" | "unsent_text" | "replaced")[];
+  /**
+   * The assistant texts in fields at the action (for a fill: the text it typed). `left`: after the action no control
+   * holds the text, or a new document loaded (true); a control holds it (false); not known (null).
+   */
+  texts: { label: string; text: string; chars: number; left: boolean | null; earlier_run?: true }[];
+  /** The other non-empty fields of the target's form, or of the page when the form is not known. No credential, secret, or payment field. */
+  fields: { label: string; value: string }[];
+  /** A fill only: the number of characters of the old value that it replaced. */
+  replaced_chars?: number;
 }
 
 export interface StepRecord {
@@ -116,6 +159,8 @@ export interface StepRecord {
   error: string | null;
   jev_requests: number;
   duration_ms: number;
+  /** Autonomous runs only: the audit of an action that ran with no dialog. */
+  unattended?: UnattendedAction;
 }
 
 export interface RunConfig {
@@ -130,7 +175,8 @@ export interface RunConfig {
   stepTimeoutMs: number;
   runTimeoutMs: number;
   pauseTimeoutMs: number;
-  confirm: "auto" | "always" | "never";
+  /** "autonomous": no action asks, and no action blocks for want of a person. The direct engines only. */
+  confirm: "auto" | "always" | "never" | "autonomous";
   dryRun: boolean;
   session: string;
   model: string;
@@ -205,10 +251,15 @@ export const GATES = {
   valueFromPage: 0.60, fillsCredential: 0.50,
   dismissTarget: 0.60, isDismissible: 0.50,
   key: 0.60, openUrl: 0.70, wall: 0.50,
+  goBack: 0.50,                       // fast engine: GO_BACK leaves the page, and its text; every GO_BACK seen below it was wrong (0.16-0.44)
   profileJev: 0.80, profileHuman: 0.50, profileMentioned: 0.50,
   site: 0.70, wantsSearch: 0.60, searchQuery: 0.50, goal: 0.50,
   extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,
   done: 0.50, answerLine: 0.20,       // fast engine: P(DONE) for act goals; answer_line confidence for extract goals
+  editMode: 0.60, editReplace: 0.80,  // fast engine: the mode head of a field that holds text the run did not type; a replace of that text
+  varOnly: 0.75,                      // fast engine, plugin runs: a var chosen by the var fallback's vars-only value request
+  textAfterSend: 0.50,                // fast engine, plugin runs: TYPE_TEXT confidence of a generate after a send of this run
+  dateField: 0.80, dateMargin: 0.20,  // fast engine date gate: a task date belongs to the field whose value head gives it this much, by this margin
 } as const;
 
 export const LIMITS = {
@@ -224,7 +275,14 @@ export const LIMITS = {
   openTimeoutMs: 60_000, settleDomMs: 10_000, settleIdleMs: 5_000, settlePauseMs: 400, expandWaitMs: 300,
   coveredRetryMs: 300, coveredSecondRetryMs: 1000, pausePollMs: 5_000, confirmPromptMs: 120_000,
   scrollPx: 600, waitIdleMs: 5_000, waitPauseMs: 1_000,
-  fastWaitMs: 1_500, waitPollMs: 100,   // fast engine WAIT: poll until the page changes, at most fastWaitMs
+  fastWaitMs: 1_500, waitPollMs: 100,   // fast engine WAIT: poll until the page changes and holds still, at most fastWaitMs
+  // Fast engine causal settle after input: wait for the timers and requests that the input started.
+  causalCapMs: 3_000,             // the whole settle, from the input to the last check
+  causalTimerMaxMs: 1_000,        // a timer of this delay or longer is not work that the input started (a toast, an idle poll)
+  causalBusyMs: 500,              // a busy marker alone holds the settle this long: a long job keeps its marker
+  causalFollowMs: 60,             // after a tracked callback or a counted request, new timers still count this long
+  causalGenerations: 4,           // timers that a tracked callback starts count up to this depth; a poll chain stops
+  causalPollMs: 10,               // the page layer checks the tracker and the requests this often
   titleChars: 200, urlChars: 2000,       // fast engine state caps for page.title and page.url
   // Fast engine.
   fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,
@@ -239,6 +297,8 @@ export const LIMITS = {
   confirmTextChars: 6000,         // all unsent text in one dialog; more blocks needs_confirmation
   secretMinChars: 4,              // checkTexts ignores shorter secret values
   genSpanWords: 4,                // with generate offered, after_verb spans above this word count are left out
+  heldValueChars: 2000,           // current_value of a text request field that holds text the run did not type
+  openStepHolds: 2,               // DONE refusals while a step that a submit click opened is still open; then the run blocks
 } as const;
 
 export const ROLE_PRIORITY: Record<string, number> = {
@@ -269,6 +329,15 @@ export const KEY_CATALOG: Record<string, string> = {
 export const DESTRUCTIVE_WORDS = ["delete", "remove", "pay", "buy", "purchase", "checkout", "place order",
   "send", "post", "publish", "transfer", "unsubscribe", "cancel subscription", "confirm order",
   "submit order", "archive", "reply", "tweet", "share", "deactivate", "close account"];
+
+/**
+ * Labels of controls that send a message from a composer. A new line in an editor near one can send (the composer shape
+ * of a fill), and in a multiline field Enter stands for one. "Share" and "Publish" buttons are also on document editors.
+ */
+export const COMPOSER_SEND_WORDS = ["send", "post", "reply", "comment"];
+
+/** Labels of controls that send a text. A click on one, or an Enter, with unsent assistant text in a field can be a send. */
+export const SEND_WORDS = [...COMPOSER_SEND_WORDS, "publish", "share", "tweet", "queue"];
 
 export const SUBMIT_WORDS = ["submit", "save", "apply", "sign in", "log in", "login", "register", "sign up",
   "continue", "next", "create", "update", "add to cart", "confirm"];

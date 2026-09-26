@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Combobox fixture</title></head>
+<body>
+  <h1>Settings</h1>
+  <!-- An ARIA combobox: the first matching option becomes the active descendant. -->
+  <input id="city" role="combobox" aria-label="City" aria-autocomplete="list" aria-expanded="false" aria-controls="cities">
+  <ul id="cities" role="listbox" aria-label="Cities" hidden></ul>
+  <!-- A filter box above a listbox that it does not control. The listbox keeps its chosen row (aria-selected) while the
+       filter changes its rows. Enter in the filter picks no option. -->
+  <div style="margin-top:24px">
+    <input id="filter" aria-label="Filter folders">
+    <ul id="folders" role="listbox" aria-label="Folders"></ul>
+  </div>
+  <script>
+    const CITIES = ['Berlin', 'Bern', 'Boston', 'Paris'];
+    const city = document.getElementById('city'), cities = document.getElementById('cities');
+    // ?slow=<ms>: the options render that many ms after the input.
+    const slow = Number(new URLSearchParams(location.search).get('slow') ?? 0);
+    city.addEventListener('input', () => (slow > 0 ? setTimeout(render, slow) : render()));
+    function render() {
+      const hits = CITIES.filter((c) => c.toLowerCase().startsWith(city.value.toLowerCase()));
+      cities.innerHTML = hits.map((c, i) => `<li role="option" id="opt-${i}" aria-selected="${i === 0}">${c}</li>`).join('');
+      cities.hidden = hits.length === 0;
+      city.setAttribute('aria-expanded', String(hits.length > 0));
+      if (hits.length > 0) city.setAttribute('aria-activedescendant', 'opt-0'); else city.removeAttribute('aria-activedescendant');
+    }
+    const FOLDERS = ['Inbox', 'Drafts', 'Sent', 'Archive'];
+    const filter = document.getElementById('filter'), folders = document.getElementById('folders');
+    const show = () => {
+      const q = filter.value.toLowerCase();
+      folders.innerHTML = FOLDERS.filter((f) => f.toLowerCase().includes(q) || f === 'Inbox')
+        .map((f) => `<li role="option" aria-selected="${f === 'Inbox'}">${f}</li>`).join('');
+    };
+    show();
+    filter.addEventListener('input', show);
+  </script>
+</body>
+</html>

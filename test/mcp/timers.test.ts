@@ -6,9 +6,9 @@ import type { JevLink } from "../../src/mcp/setup.js";
 import { startIdleTimers } from "../../src/mcp/timers.js";
 
 function setup(over: { key?: string | null; chrome?: boolean } = {}) {
-  const state = { ended: null as number | null, active: null as Run | null, chrome: over.chrome ?? true, warms: 0, closes: 0 };
+  const state = { ended: null as number | null, active: null as Run | null, chrome: over.chrome ?? true, warms: 0, closes: 0, keeps: [] as boolean[] };
   const runs = { lastRunEndedAt: () => state.ended, active: () => state.active } as unknown as RunManager;
-  const jev = { key: () => (over.key === undefined ? "tsk-test-key-0123456789" : over.key), warm: async () => { state.warms += 1; } } as unknown as JevLink;
+  const jev = { key: () => (over.key === undefined ? "tsk-test-key-0123456789" : over.key), warm: async (o?: { keep?: boolean }) => { state.warms += 1; state.keeps.push(o?.keep === true); } } as unknown as JevLink;
   const session = { get chrome() { return state.chrome ? {} : null; }, close: async () => { state.closes += 1; state.chrome = false; } } as unknown as BrowserSession;
   const stop = startIdleTimers({ runs, jev, session, now: () => Date.now(), setInterval });
   return { state, stop };
@@ -31,6 +31,8 @@ describe("startIdleTimers", () => {
     t.state.ended = Date.now();
     await vi.advanceTimersByTimeAsync(MCP.idlePingMs);
     expect(t.state.warms).toBe(1);
+    // An idle ping: it also sends when the sockets are open, so they do not reach their idle timeout.
+    expect(t.state.keeps).toEqual([true]);
     await vi.advanceTimersByTimeAsync(MCP.idlePingMs * 3);
     expect(t.state.warms).toBe(4);
     await vi.advanceTimersByTimeAsync(MCP.pingWindowMs);

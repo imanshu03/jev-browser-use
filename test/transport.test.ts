@@ -1,5 +1,5 @@
 // The keep-alive transport against a local http server. No network beyond 127.0.0.1.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -8,7 +8,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { WARM_TIMEOUT_MS, createTransport, type Transport } from "../src/transport.js";
+import { SOCKETS, WARM_TIMEOUT_MS, createTransport, type Transport } from "../src/transport.js";
 import { fakeLogger } from "./fakes.js";
 
 interface Seen { method: string; url: string; auth: string | undefined; body: string }
@@ -38,6 +38,7 @@ async function serve() {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const hasOpenssl = (): boolean => { try { execFileSync("openssl", ["version"], { stdio: "ignore" }); return true; } catch { return false; } };
 const drain = async (r: Response) => { await r.text(); };
 
 let transports: Transport[] = [];
@@ -49,21 +50,26 @@ afterEach(async () => {
 });
 
 describe("createTransport", () => {
-  it("(a) sequential and concurrent requests share one socket; method, headers, and body pass through", async () => {
+  it("(a) requests use at most two sockets; two at once use both; method, headers, and body pass through", async () => {
     const s = await serve(); servers.push(s);
     const log = fakeLogger();
     const t = createTransport({ log }); transports.push(t);
     const r1 = await t.fetch(`${s.base}/v1/systemone`, { method: "POST", headers: { authorization: "Bearer k", "content-type": "application/json" }, body: JSON.stringify({ a: 1 }) });
     expect(await r1.json()).toEqual({ ok: true, n: 1 });
-    // Issued right after the first response. The default pool would open a second socket here.
+    // Issued right after the first response: the pool can use the second socket for it.
     await drain(await t.fetch(`${s.base}/v1/systemone`, { method: "POST", body: "{}" }));
-    const [r3, r4] = await Promise.all([t.fetch(`${s.base}/x`), t.fetch(`${s.base}/y`)]);
+    expect(s.sockets()).toBeLessThanOrEqual(SOCKETS);
+    // Two at once: the API answers one connection's requests one at a time, so the second one gets its own socket.
+    const [r3, r4] = await Promise.all([t.fetch(`${s.base}/x`, { method: "POST", body: "{}" }), t.fetch(`${s.base}/y`, { method: "POST", body: "{}" })]);
     await Promise.all([drain(r3), drain(r4)]);
-    expect(s.sockets()).toBe(1);
-    expect(t.stats.connections).toBe(1);
+    expect(s.sockets()).toBe(SOCKETS);
+    const more = await Promise.all([1, 2, 3, 4].map((i) => t.fetch(`${s.base}/z${i}`, { method: "POST", body: "{}" })));
+    await Promise.all(more.map(drain));
+    expect(s.sockets()).toBe(SOCKETS);
+    expect(t.stats.connections).toBe(SOCKETS);
     expect(s.seen[0]).toEqual({ method: "POST", url: "/v1/systemone", auth: "Bearer k", body: '{"a":1}' });
-    expect(s.seen.map((x) => x.url)).toEqual(["/v1/systemone", "/v1/systemone", "/x", "/y"]);
-    expect(log.lines).toEqual(["DEBUG jev transport: connection 1 opened"]);
+    expect(s.seen.map((x) => x.url).slice(0, 4)).toEqual(["/v1/systemone", "/v1/systemone", "/x", "/y"]);
+    expect(log.lines).toEqual(["DEBUG jev transport: connection 1 opened", "DEBUG jev transport: connection 2 opened"]);
   });
 
   it("(b) an idle shorter than keepAliveMs reuses the socket; an idle longer than keepAliveMs opens a new one", async () => {
@@ -82,14 +88,14 @@ describe("createTransport", () => {
     expect(s.sockets()).toBe(3);
   });
 
-  it("(c) warm sends GET / without a key and the next request reuses its socket; a refused connection resolves", async () => {
+  it("(c) warm sends GET / without a key on each socket, and the next requests reuse them; a refused connection resolves", async () => {
     const s = await serve(); servers.push(s);
     const t = createTransport(); transports.push(t);
     await t.warm(`${s.base}/`);
-    expect(s.seen).toEqual([{ method: "GET", url: "/", auth: undefined, body: "" }]);
-    await drain(await t.fetch(`${s.base}/v1/systemone`, { method: "POST", body: "{}" }));
-    expect(s.sockets()).toBe(1);
-    expect(t.stats.connections).toBe(1);
+    expect(s.seen).toEqual(Array.from({ length: SOCKETS }, () => ({ method: "GET", url: "/", auth: undefined, body: "" })));
+    await Promise.all([1, 2].map(async () => drain(await t.fetch(`${s.base}/v1/systemone`, { method: "POST", body: "{}" }))));
+    expect(s.sockets()).toBe(SOCKETS);
+    expect(t.stats.connections).toBe(SOCKETS);
 
     const dead = await serve();
     await dead.close();
@@ -157,6 +163,72 @@ describe("createTransport", () => {
     expect(t.stats.connections).toBe(0);
     expect(log.lines.some((l) => /^DEBUG jev transport: warm http:\/\/10\.255\.255\.1:9\/ failed: /.test(l))).toBe(true);
   });
+
+  it("(k) a warm when every socket is open sends nothing: it would only hold a socket that a Jev request needs", async () => {
+    const s = await serve(); servers.push(s);
+    const t = createTransport(); transports.push(t);
+    await t.warm(`${s.base}/`);
+    expect(s.seen).toHaveLength(SOCKETS);
+    await t.warm(`${s.base}/`);
+    expect(s.seen).toHaveLength(SOCKETS);
+    expect(t.stats.connections).toBe(SOCKETS);
+    // An idle ping sends anyway: it keeps the open sockets from their idle timeout.
+    await t.warm(`${s.base}/`, { keep: true });
+    expect(s.seen).toHaveLength(2 * SOCKETS);
+    expect(t.stats.connections).toBe(SOCKETS);
+  });
+
+  it("(m) sockets that closed at their idle timeout count as closed: the next warm opens them again", async () => {
+    const s = await serve(); servers.push(s);
+    const t = createTransport({ keepAliveMs: 100 }); transports.push(t);
+    await t.warm(`${s.base}/`);
+    expect(t.stats.connections).toBe(SOCKETS);
+    await sleep(400);
+    await t.warm(`${s.base}/`);
+    expect(s.seen).toHaveLength(2 * SOCKETS);
+    expect(t.stats.connections).toBe(2 * SOCKETS);
+  });
+
+  // The test makes its own certificate with openssl, and it skips (visibly) where openssl is missing.
+  it.skipIf(!hasOpenssl())("(l) close() does not wait for a warm-only connect after a fetch ran on the other socket", async () => {
+    // A TLS server behind a front that passes the first connection through and stalls every later one in the TLS
+    // handshake: the second socket of the warm never connects. NODE_TLS_REJECT_UNAUTHORIZED accepts the self-signed
+    // certificate; it is set only in this worker, and only for this test.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jev-tls-"));
+    await promisify(execFile)("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-days", "1", "-keyout", path.join(dir, "key.pem"), "-out", path.join(dir, "cert.pem")]);
+    const https = await import("node:https");
+    const net = await import("node:net");
+    const tls = https.createServer({ key: fs.readFileSync(path.join(dir, "key.pem")), cert: fs.readFileSync(path.join(dir, "cert.pem")) }, (req, res) => {
+      req.resume(); req.on("end", () => { res.setHeader("content-type", "application/json"); res.end("{}"); });
+    });
+    await new Promise<void>((r) => tls.listen(0, "127.0.0.1", () => r()));
+    let n = 0;
+    const held: import("node:net").Socket[] = [];
+    const front = net.createServer((c) => {
+      n += 1;
+      c.on("error", () => undefined);
+      if (n === 1) { const up = net.connect((tls.address() as AddressInfo).port, "127.0.0.1"); up.on("error", () => undefined); c.pipe(up); up.pipe(c); } else held.push(c);
+    });
+    await new Promise<void>((r) => front.listen(0, "127.0.0.1", () => r()));
+    const base = `https://127.0.0.1:${(front.address() as AddressInfo).port}`;
+    const was = process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
+    process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
+    const t = createTransport({ warmTimeoutMs: 200 });
+    try {
+      await (await t.fetch(`${base}/v1/systemone`, { method: "POST", body: "{}" })).text(); // the plan request: socket 1
+      void t.warm(`${base}/`); // a GET on socket 1, and a connect for socket 2 that stalls
+      await sleep(50);
+      await (await t.fetch(`${base}/v1/systemone`, { method: "POST", body: "{}" })).text(); // the step request on socket 1
+      const t0 = Date.now();
+      await t.close();
+      expect(Date.now() - t0).toBeLessThan(1500);
+    } finally {
+      if (was === undefined) delete process.env["NODE_TLS_REJECT_UNAUTHORIZED"]; else process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = was;
+      for (const c of held) c.destroy();
+      front.close(); tls.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("(d) close() is idempotent and ends the socket; a fetch after close rejects", async () => {
     const s = await serve(); servers.push(s);

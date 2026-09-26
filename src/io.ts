@@ -2,6 +2,7 @@
 import type { Engine, Goal, RunResult, StepRecord } from "./types.js";
 import { redactData } from "./task.js";
 import { LIMITS } from "./types.js";
+import { flatText, sanitizeText } from "./fast/generate.js";
 
 export interface Logger {
   info(msg: string): void;
@@ -59,7 +60,9 @@ export interface TextField {
   required: boolean;              // true only for f1, the field Jev chose
   multiline: boolean;
   max_chars: number;              // min(maxLength, LIMITS.generatedChars)
-  current_value: string;          // redacted, sanitized, cut to LIMITS.valueChars
+  current_value: string;          // redacted, sanitized, cut to LIMITS.valueChars (LIMITS.heldValueChars, lines kept, for f1 when it holds text the run did not type)
+  /** "append": the field keeps its text, and the new text goes at its end. Write only the new text. Absent: the text replaces the field value. */
+  mode?: "append";
 }
 
 export interface TextRequest {    // key order is fixed; untrusted_page_text is last
@@ -68,6 +71,7 @@ export interface TextRequest {    // key order is fixed; untrusted_page_text is 
   page: { url: string; title: string };
   fields: TextField[];
   recent_actions: { action: string; kind: string; text: string | null }[];
+  sent_texts?: { field: string; text: string }[];   // texts that a send of this run took out of the page; absent when none
   untrusted_page_text: string;    // redacted + sanitizeText(obs.text), <= LIMITS.textChars
 }
 
@@ -86,9 +90,15 @@ export interface TextWriteOptions {
 /** The harness model writes field text. It is never the human. */
 export interface TextSource { write(req: TextRequest, opts: TextWriteOptions): Promise<TextReply> }
 
-/** What a confirmation is about. A front end that shows a dialog uses it; the CLI and chat ignore it. */
+/** A message field that a send, a submit, or Enter sends: its label, its text now, and the names of its mention chips. */
+export interface SentField { label: string; text: string; mentions: string[] }
+
+/**
+ * What a confirmation is about. The MCP dialog and the terminal prompt (`confirmTexts`) show it. `sends`: for a send,
+ * a submit, or Enter, the message fields of the form with the text that goes out, also when no assistant wrote it.
+ */
 export type ConfirmDetail =
-  | { kind: "action"; action: string; host: string; typed: { label: string; text: string }[] }
+  | { kind: "action"; action: string; host: string; typed: { label: string; text: string }[]; sends?: SentField[] }
   | { kind: "profile"; name: string; directory: string };
 
 export type PauseKind = "sign_in" | "captcha";
@@ -109,6 +119,7 @@ export interface RunnerHints {
   confirmNever?: string; // used when the run's confirm setting is "never"; absent uses `noConfirm`, then the CLI text
   value?: string;       // replaces "pass --var key=value (or /var key=value in chat)" for other fields
   credential?: string;  // used for credential fields; absent uses `value`, then the CLI text
+  unattendedWall?: string; // a sign-in wall or captcha in an autonomous run that no person attends; absent uses the CLI text
 }
 
 export function createHuman(opts: { stdin: NodeJS.ReadStream; stderr: NodeJS.WritableStream; forceNonInteractive: boolean; pollMs?: number }): Human {
@@ -162,13 +173,35 @@ export function createHuman(opts: { stdin: NodeJS.ReadStream; stderr: NodeJS.Wri
       }
       return keyResult ?? "timeout";
     },
-    async confirm(message, timeoutMs) {
+    async confirm(message, timeoutMs, detail) {
       if (!interactive) return false;
-      opts.stderr.write(message);
+      // The message names a page label: no control character of the page reaches the terminal.
+      opts.stderr.write(confirmTexts(detail) + sanitizeText(message));
       const line = await readLine(timeoutMs);
       return line !== null && /^y(es)?$/i.test(line);
     },
   };
+}
+
+/**
+ * The lines that a terminal prompt shows before "Type y to allow": each text that the action can send, with its field.
+ * Without them a person allowed a send and did not see that the field held only the second line of the message. Empty
+ * when the action sends no text. Each text shows in full up to LIMITS.confirmTextChars: the loop blocks a send whose
+ * unsent text is longer, and it cuts a longer sent field text with an ellipsis. Control characters are removed, as in the MCP dialog: a page text must not hide or rewrite
+ * part of the prompt with terminal escape sequences.
+ */
+export function confirmTexts(detail?: ConfirmDetail): string {
+  if (detail?.kind !== "action") return "";
+  const shown = (raw: string): string => {
+    const t = sanitizeText(raw);
+    const cut = t.length > LIMITS.confirmTextChars ? `${t.slice(0, LIMITS.confirmTextChars)}\u2026` : t;
+    return cut.split("\n").map((l, i) => (i === 0 ? l : `      ${l}`)).join("\n");
+  };
+  const lines = [
+    ...detail.typed.map((t) => `  ${flatText(t.label)}: ${shown(t.text)}`),
+    ...(detail.sends ?? []).map((f) => `  ${flatText(f.label)}: ${shown(f.text)}${f.mentions.length > 0 ? ` (mentions: ${f.mentions.map((m) => `@${flatText(m)}`).join(", ")})` : ""}`),
+  ];
+  return lines.length > 0 ? `Text that this action sends:\n${lines.join("\n")}\n` : "";
 }
 
 function sleep(ms: number): Promise<void> {

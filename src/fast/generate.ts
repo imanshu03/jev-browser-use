@@ -8,8 +8,8 @@
 import type { TextField, TextRequest } from "../io.js";
 import type { Span } from "../types.js";
 import { KEY_PATTERN, LIMITS } from "../types.js";
-import type { Action, FastHistoryEntry, Observation } from "./model.js";
-import { actionKey, canWriteInto, cutText } from "./policy.js";
+import type { Action, EditPlan, FastHistoryEntry, Observation } from "./model.js";
+import { actionKey, canWriteInto, cutLines, cutText } from "./policy.js";
 
 /** One field of a text request and the observed action it came from. */
 export interface PickedField { field: TextField; action: Action }
@@ -60,8 +60,11 @@ export function hostOf(url: string): string {
  * `canWriteInto`. Up to `LIMITS.textFields - 1` more fields follow in document order: empty, writable,
  * in the same form as the target, not banned, and not bound to a generated value already.
  * Every string is redacted first, then sanitized, then cut, so a cut never keeps part of a secret.
+ * `held`: the target holds text that the run did not type, and Jev chose this mode for it. Its `current_value` is then
+ * longer, so the assistant can read the text that it adds to or replaces, and an append sets `mode`: the assistant
+ * writes only the new text.
  */
-export function pickFields(obs: Observation, target: Action, skip: { banned: Set<string>; bound: Set<number> }, redactor: (s: string) => string): PickedField[] {
+export function pickFields(obs: Observation, target: Action, skip: { banned: Set<string>; bound: Set<number> }, redactor: (s: string) => string, held?: EditPlan): PickedField[] {
   const picked: Action[] = [target];
   const nodes = new Set<number | null>([target.node]);
   if (target.form !== undefined && target.form !== null) {
@@ -82,20 +85,26 @@ export function pickFields(obs: Observation, target: Action, skip: { banned: Set
       required: i === 0,
       multiline: a.multiline === true,
       max_chars: Math.min(a.maxLength ?? LIMITS.generatedChars, LIMITS.generatedChars),
-      current_value: cutText(sanitizeText(redactor(a.value ?? "")), LIMITS.valueChars),
+      current_value: i === 0 && held ? cutLines(sanitizeText(redactor(a.value ?? "")), LIMITS.heldValueChars) : cutText(sanitizeText(redactor(a.value ?? "")), LIMITS.valueChars),
+      ...(i === 0 && held?.mode === "append" ? { mode: "append" as const } : {}),
     },
   }));
 }
 
-/** The request the assistant answers. The key order is fixed, and the page text is the last key. */
-export function buildTextRequest(a: { id: string; task: string; obs: Observation; history: FastHistoryEntry[]; fields: TextField[]; redactor: (s: string) => string }): TextRequest {
+/**
+ * The request the assistant answers. The key order is fixed, and the page text is the last key. `sent`: the texts that
+ * a send of this run took out of the page, so the assistant does not write one of them again.
+ */
+export function buildTextRequest(a: { id: string; task: string; obs: Observation; history: FastHistoryEntry[]; fields: TextField[]; redactor: (s: string) => string; sent?: { field: string; text: string }[] }): TextRequest {
   const r = a.redactor;
+  const sent = (a.sent ?? []).map((x) => ({ field: cutText(flatText(r(x.field)), LIMITS.nameChars), text: cutText(flatText(r(x.text)), LIMITS.spanChars) }));
   return {
     id: a.id,
     goal: sanitizeText(r(a.task)),
     page: { url: cutText(r(a.obs.url), LIMITS.urlChars), title: cutText(flatText(r(a.obs.title)), LIMITS.titleChars) },
     fields: a.fields,
     recent_actions: a.history.slice(-LIMITS.textHistory).map((h) => ({ action: flatText(r(h.action)), kind: flatText(r(h.kind)), text: h.text === null ? null : flatText(r(h.text)) })),
+    ...(sent.length > 0 ? { sent_texts: sent } : {}),
     untrusted_page_text: sanitizeText(r(a.obs.text)).slice(0, LIMITS.textChars),
   };
 }
