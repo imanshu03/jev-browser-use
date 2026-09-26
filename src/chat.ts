@@ -7,7 +7,8 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { fileURLToPath } from "node:url";
 import type { Browser } from "./browser.js";
 import { createBrowser } from "./browser.js";
-import { parseArgs, VERSION } from "./cli.js";
+import { VERSION, parseArgs, textModelDeps } from "./cli.js";
+import { sanitizeText } from "./fast/generate.js";
 import type { KeyCheck, KeySource } from "./config.js";
 import { configPath, forgetKey, loadKey, looksLikeKey, saveKey, validateKey } from "./config.js";
 import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
@@ -15,7 +16,7 @@ import { FastRunner } from "./fast/loop.js";
 import type { Chrome, ChromeLaunchOptions, Page } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
 import type { Human, Logger, PauseResult } from "./io.js";
-import { createLogger, emptyResult } from "./io.js";
+import { confirmTexts, createLogger, emptyResult } from "./io.js";
 import type { Oracle } from "./jev.js";
 import { createOracle } from "./jev.js";
 import { Runner } from "./loop.js";
@@ -39,7 +40,9 @@ Options:
   --session <name>           Session name. Default: jev-chat-<8 hex>. The vercel engine uses it as the agent-browser session.
   --model <name>             Default: jev-latest.
   --max-steps <n>            Default 25, max 100.
-  --confirm <auto|always|never>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+  --confirm <auto|always|never|autonomous>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+                             autonomous: no action asks or blocks for a person; each step record of such an action
+                             holds an "unattended" audit. cdp and chromium only.
   --log-level <info|debug>   debug prints the full step trace. Default: info.
   --var <key=value>          A value Jev may type. Repeatable. Keys with pass/pin/otp/secret/token/code are secret.
   --headless                 Hide the Chrome window. Chat mode shows it by default.
@@ -313,12 +316,16 @@ class LineInput {
 }
 
 /** A Human on the chat's readline. Off a TTY, confirm says no and pause polls only. Type-ahead lines are not answers. */
-function readlineHuman(input: LineInput, out: NodeJS.WritableStream, interactive: boolean, pollMs: number): Human {
+/** The Human of a chat task. Exported for tests. */
+export function readlineHuman(input: Pick<LineInput, "ask">, out: NodeJS.WritableStream, interactive: boolean, pollMs: number): Human {
   return {
     interactive,
-    async confirm(message, timeoutMs) {
+    async confirm(message, timeoutMs, detail) {
       if (!interactive) return false;
-      const line = await input.ask(message, { signal: AbortSignal.timeout(timeoutMs), fresh: true });
+      const texts = confirmTexts(detail);
+      if (texts) out.write(texts);
+      // The message names a page label: no control character of the page reaches the terminal.
+      const line = await input.ask(sanitizeText(message), { signal: AbortSignal.timeout(timeoutMs), fresh: true });
       return line !== null && /^y(es)?$/i.test(line.trim());
     },
     async pause(message, timeoutMs, poll) {
@@ -537,8 +544,8 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
    * The transport promises that warm never rejects. The catch protects the chat from one that breaks the promise:
    * the callers drop the result, and an unhandled rejection ends the process.
    */
-  const warmJev = (): Promise<void> => {
-    try { return transport.warm(clientFor().baseURL).catch(() => undefined); } catch { return Promise.resolve(); }
+  const warmJev = (opts?: { keep?: boolean }): Promise<void> => {
+    try { return transport.warm(clientFor().baseURL, opts).catch(() => undefined); } catch { return Promise.resolve(); }
   };
 
   /** The URL of the open page, or undefined when no page is open or it shows about:blank. */
@@ -573,6 +580,7 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
       } else {
         const runner = new FastRunner({
           cfg, profiles, chrome: (dir) => chromeFor(cfg, dir), ...(page ? { page } : {}), openPage: (c) => open(c, log), oracle: oracleFor(cfg.model, log), human, log, warm: warmJev,
+          ...textModelDeps(io.env, log),
         });
         result = await runner.run();
         if (runner.page) page = runner.page;
@@ -682,7 +690,7 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
     if (keyExit !== null) return keyExit;
     // Open the connection now, while the user reads the prompt. Then keep it warm between tasks.
     void warmJev();
-    idlePing = setInterval(() => { if (!running && !quitting) void warmJev(); }, IDLE_PING_MS);
+    idlePing = setInterval(() => { if (!running && !quitting) void warmJev({ keep: true }); }, IDLE_PING_MS);
     idlePing.unref();
     out(`jev-browser chat ${VERSION} · engine ${base.engine ?? "cdp"} · profile ${profile ?? "Parallelloop"} · ${headed ? "headed" : "headless"} · session ${base.session}`);
     out("Type a task. /help lists commands. /quit exits.");

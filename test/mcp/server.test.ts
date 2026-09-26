@@ -253,6 +253,88 @@ describe("dialog rules", () => {
   });
 });
 
+describe("autonomous runs", () => {
+  const AUTO = { confirm: "autonomous", user_said: "Reply to Ann and send it, don't ask me" } as const;
+  const run = async (c: Awaited<ReturnType<typeof connect>>) => {
+    const views: RunViewData[] = [];
+    const v1 = view(await c.client.callTool({ name: "browse", arguments: { task: "reply to Ann that the time she proposes works", url: MAIL, profile: "none", ...AUTO } }));
+    views.push(v1);
+    expect(v1.status).toBe("needs_text");
+    expect(v1.next).toContain("Autonomous run: this text goes out with no dialog.");
+    let v = view(await c.client.callTool({ name: "continue", arguments: { run: v1.run, request: "t1", values: { f1: REPLY, f2: "Re: Meeting" } } }));
+    views.push(v);
+    for (let i = 0; i < 5 && !["done", "blocked", "failed"].includes(v.status); i++) { v = view(await c.client.callTool({ name: "wait", arguments: { run: v1.run, wait_s: 5 } })); views.push(v); }
+    return { v, views };
+  };
+
+  it("a client with dialogs gets none: every view has the banner, and the result lists the Send with the texts that left the page", async () => {
+    const t = realStack();
+    const c = await connect(deps(t.runs), accept(false));
+    const { v, views } = await run(c);
+    expect(c.dialogs).toHaveLength(0);
+    expect(v.status).toBe("done");
+    expect(t.mail.state.sent).toBe(`Re: Meeting | ${REPLY}`);
+    for (const x of views) expect(x.autonomous?.user_said).toBe(AUTO.user_said);
+    expect(v.autonomous).toEqual({ user_said: AUTO.user_said, unattended_actions: 1, profile: null });
+    expect(v.result?.unattended).toEqual([{
+      step: 3, action: 'click button "Send"', host: "mail.example", risk: "destructive", result: "ok", why: ["destructive", "unsent_text"],
+      texts: [{ label: "Reply", chars: REPLY.length, text: REPLY, left: true }, { label: "Subject", chars: 11, text: "Re: Meeting", left: true }], fields: [],
+    }]);
+    expect(v.next).toContain("This run was autonomous: tell the user each action in result.unattended");
+    expect(t.log.lines.some((l) => l.includes("started (autonomous: no dialogs; the user said"))).toBe(true);
+    expect(t.log.lines.some((l) => l.startsWith("WARN") && l.includes('unattended: click button "Send"'))).toBe(true);
+    await c.close();
+  });
+
+  it("a client without dialogs ends done, not needs_confirmation", async () => {
+    const t = realStack();
+    const c = await connect(deps(t.runs));
+    const { v } = await run(c);
+    expect(v.status).toBe("done");
+    expect(v.result?.blocked).toBeNull();
+    expect(t.mail.state.sent).toBe(`Re: Meeting | ${REPLY}`);
+    await c.close();
+  });
+
+  it("the words, the off switch, and one confirm value per run are checked before a run starts", async () => {
+    const h = held();
+    const runs = new RunManager({ start: h.start, log: fakeLogger() });
+    const c = await connect(deps(runs, { env: { JEV_MCP_AUTONOMOUS: "0" } }));
+    const off = await c.client.callTool({ name: "browse", arguments: { task: "a", ...AUTO } });
+    expect(off.isError).toBe(true);
+    expect(text(off)).toContain("JEV_MCP_AUTONOMOUS=0");
+    await c.close();
+    const c2 = await connect(deps(runs));
+    for (const [args, want] of [
+      [{ confirm: "autonomous" }, /needs user_said/],
+      [{ confirm: "autonomous", user_said: "yes, go ahead" }, /must hold the user's own words/],
+      [{ user_said: "don't ask me" }, /goes only with confirm "autonomous"/],
+    ] as const) {
+      const r = await c2.client.callTool({ name: "browse", arguments: { task: "a", ...args } });
+      expect(r.isError, JSON.stringify(args)).toBe(true);
+      expect(text(r)).toMatch(want);
+    }
+    const long = await c2.client.callTool({ name: "browse", arguments: { task: "a", confirm: "autonomous", user_said: `autonomously ${"x".repeat(300)}` } });
+    expect(long.isError).toBe(true);
+    expect(h.s.hooks).toBeNull();
+    const v = view(await c2.client.callTool({ name: "browse", arguments: { task: "a", wait_s: 0 } }));
+    const again = await c2.client.callTool({ name: "browse", arguments: { task: "a", wait_s: 0, ...AUTO } });
+    expect(again.isError).toBe(true);
+    expect(text(again)).toBe(`run ${v.run} is active with confirm "auto". Call wait with run "${v.run}", or call cancel.`);
+    h.s.finish(done());
+    await c2.close();
+  });
+
+  it("the browse schema has the four confirm values and user_said of at most 300 characters", async () => {
+    const c = await connect(deps(new RunManager({ start: held().start, log: fakeLogger() })));
+    const { tools } = await c.client.listTools();
+    const browse = tools.find((x) => x.name === "browse");
+    expect(browse?.inputSchema).toMatchObject({ properties: { confirm: { enum: ["auto", "always", "never", "autonomous"], default: "auto" }, user_said: { type: "string", minLength: 1, maxLength: 300 } } });
+    expect(browse?.description).toContain('Set confirm to "autonomous" only when the user\'s own message asks for it');
+    await c.close();
+  });
+});
+
 describe("isError means a wrong call", () => {
   it("busy and stopping name the active run; unknown runs and stale requests say what to call", async () => {
     const h = held();

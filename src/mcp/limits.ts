@@ -17,14 +17,19 @@ export const MCP_ENV = {
   allowFile: "JEV_MCP_ALLOW_FILE",               // "1": browse.url may be file:
   trustElicitation: "JEV_MCP_TRUST_ELICITATION", // "1": trust elicitation in unattended sessions
   reviewText: "JEV_MCP_REVIEW_TEXT",             // "1": continue requires user interaction in Claude Code
+  autonomous: "JEV_MCP_AUTONOMOUS",              // "0": browse refuses confirm "autonomous"
 } as const;
+
+/** How the user turns on autonomous mode. The no-dialog hints give these words, so the assistant does not ask a yes/no question. */
+const AUTONOMY_WORDS = "The user can write \"autonomous\" or \"don't ask me\" in their own message to let Jev act without dialogs. Do not ask the user a yes/no question for it";
 
 /** Hints that tell the assistant what to do next. They replace the CLI texts in the runner. */
 export const MCP_HINTS: RunnerHints = {
   headed: "call browse again with headed: true, then sign in in the Chrome window when the run pauses",
-  noConfirm: "this session cannot show the user a confirmation dialog, so Jev did not do it. Text that the assistant wrote stays in the field. Ask the user to check it in the Chrome window and do the action there, or set JEV_MCP_TRUST_ELICITATION=1 when a person answers dialogs in this client",
-  noConfirmHeadless: "this session cannot show the user a confirmation dialog, so Jev did not do it. The run was headless, so the user cannot see the page. You cannot do the action yourself. To let the user check the text and do the action, call browse again with headed: true, or set JEV_MCP_TRUST_ELICITATION=1 when a person answers dialogs in this client",
+  noConfirm: `this session cannot show the user a confirmation dialog, so Jev did not do it. Text that the assistant wrote stays in the field. Ask the user to check it in the Chrome window and do the action there, or set JEV_MCP_TRUST_ELICITATION=1 when a person answers dialogs in this client. ${AUTONOMY_WORDS}`,
+  noConfirmHeadless: `this session cannot show the user a confirmation dialog, so Jev did not do it. The run was headless, so the user cannot see the page. You cannot do the action yourself. To let the user check the text and do the action, call browse again with headed: true, or set JEV_MCP_TRUST_ELICITATION=1 when a person answers dialogs in this client. ${AUTONOMY_WORDS}`,
   confirmNever: "confirm is \"never\" for this run, so Jev did not do it. Text that the assistant wrote stays in the field. Call browse again with confirm \"auto\" so that the user can allow the action in a dialog, or ask the user to check the text in the Chrome window and do the action there",
-  value: "ask the user for the exact text, then call browse again with that text in quotes in the task",
+  value: "ask the user for the exact text, or use exact text that the user already gave, then call browse again with that text in quotes in the task",
   credential: "tell the user to type it in the Chrome window, then call browse again. Never send it through the assistant",
+  unattendedWall: "this run is autonomous and no person answers in this session, so Jev did not wait for a sign-in. Tell the user to sign in in the Chrome window (a headed run shows it), then call browse again",
 };

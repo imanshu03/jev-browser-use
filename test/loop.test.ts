@@ -377,3 +377,15 @@ describe("loop detection, gates, finishing", () => {
     expect(await act(b, "none", null, {})).toMatchObject({ ok: false, kind: "other" });
   });
 });
+
+describe("Runner spans", () => {
+  it("a topic after \"about\" is not a value option: the value question offers the spans it offered before", async () => {
+    const t = setup("open wikipedia.org and write a note about the launch", { pages: { home: HOME }, start: "home" },
+      byUrl({ [HOME.url]: { page_kind: "task_page", operation: "DONE" } }, { plan: { goal: "act" }, verify: { done_final: 0.9 } }));
+    await t.runner.run();
+    const observe = t.oracle.requests.find((x) => x.name === "observe");
+    const texts = Object.values(((observe?.questions as Questions | undefined)?.["value"] as ChoiceQuestion | undefined)?.criteria ?? {}).map((v) => (v as { text?: string }).text);
+    expect(texts.length).toBeGreaterThan(0);
+    expect(texts).not.toContain("the launch");
+  });
+});

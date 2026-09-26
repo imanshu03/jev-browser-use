@@ -179,7 +179,9 @@ export class Runner {
       let profiles = await this.deps.browserFor(undefined).profiles().catch((e: unknown) => { this.log.warn(`profiles: ${(e as Error).message}`); return []; });
       profiles = profiles.filter((p) => p.directory);
       const exclude = [...profiles.flatMap((p) => [p.name, p.directory]), ...catalogWords()];
-      this.spans = [...extractSpans(cfg.task, exclude), ...varSpans(cfg.vars)];
+      // A topic after "about" is a span of the direct engines only: their heads hide it from fields that take new text,
+      // and the value question here offers every span.
+      this.spans = [...extractSpans(cfg.task, exclude).filter((s) => !(s.source === "after_verb" && s.verb === "about")), ...varSpans(cfg.vars)];
       this.log.redactor = (s) => redact(s, this.spans);
       this.result.task = redact(cfg.task, this.spans);
       this.keys = extractKeys(cfg.task);

@@ -4,9 +4,11 @@
 // Copyright (c) 2026 Browser Use.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import type { Action, Chrome, Observation, Page, PageOptions } from "./model.js";
-import { StalePage } from "./model.js";
-import { DOC_ID_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, pageKeyGuardScript, settleScript } from "./snapshot.js";
+import type { Action, Chrome, DatePlan, EditMode, EditPlan, EditResult, Observation, Page, PageOptions, Popup } from "./model.js";
+import { LIMITS } from "../types.js";
+import { EditRefused, StalePage } from "./model.js";
+import type { EditStep } from "./snapshot.js";
+import { BLUR_SCRIPT, CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, nativeDateScript, pageKeyGuardScript, popupScript, selectPartScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -24,6 +26,15 @@ const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Delete: { code: "Delete", vk: 46 },
   Space: { code: "Space", vk: 32, text: " " },
 };
+
+/**
+ * Inputs whose settle follows the work that they start: the timers in the page (`causalArmScript`) and the requests
+ * over CDP. A key press is always one of them. A scroll and a select keep the frame settle.
+ */
+const CAUSAL_KINDS: ReadonlySet<string> = new Set(["fill", "click"]);
+
+/** Request types that the causal settle waits for. A document counts only in the main frame: a navigation. */
+const COUNTED_REQUESTS: ReadonlySet<string> = new Set(["Fetch", "XHR"]);
 
 /** JSON with keys sorted at every level. The fingerprint must not depend on key order. */
 export function stableStringify(value: unknown): string {
@@ -58,6 +69,14 @@ function docIdOf(raw: RawSnapshot): unknown {
   return Array.isArray(raw.page_key) && raw.page_key.length > 0 ? raw.page_key[0] : raw.url;
 }
 
+/** Whitespace runs become one space; zero-width characters go. For the compare of a field value after a fill. */
+const flat = (s: string): string => s.replace(/[\u200B\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+
+/** The lines of a text that a document fill types: each line with text, in order. */
+export function textLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((l) => l.trim() !== "");
+}
+
 /** Alerts and beforeunload prompts are accepted; confirm and prompt dialogs are dismissed, as the legacy engine does. */
 export function dialogAccepts(type: unknown): boolean {
   return type === "alert" || type === "beforeunload";
@@ -67,8 +86,14 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   const { targetId, sessionId } = await chrome.newTarget("about:blank");
   const client = chrome.client;
   const stats = { browserMs: 0, calls: 0 };
-  const modifiers = process.platform === "darwin" ? 4 : 2;
   let pendingSettle: Action | null | undefined; // undefined = nothing pending; null = generic settle
+  /** The pending settle is causal: the input armed the tracker in the page. */
+  let causalPending = false;
+  /**
+   * The requests of the causal settle. The Network domain is on only from the arm to the end of the settle, and only
+   * the requests that start in that time count. `ended`: a counted request ended since the last check.
+   */
+  const net = { on: false, armed: false, requests: new Set<string>(), ended: false, urls: new Map<string, string>(), done: [] as { url: string; at: number }[], armedAt: 0 };
   let closed = false;
   /** Identity of a document that stayed below readyState "complete" until the cap. The next observe on it does not wait again. */
   let acceptedDoc: { id: unknown } | null = null;
@@ -84,6 +109,24 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     opts.log.warn(`dialog ${String(type)} ${accept ? "accepted" : "dismissed"}: ${message}`);
     call("Page.handleJavaScriptDialog", { accept }).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
   });
+  const offRequest = client.on("Network.requestWillBeSent", (params, sid) => {
+    if (sid !== sessionId || !net.armed) return;
+    const type = String(params["type"] ?? "");
+    if (COUNTED_REQUESTS.has(type) || (type === "Document" && params["frameId"] === targetId)) {
+      const id = String(params["requestId"]);
+      net.requests.add(id);
+      const request = params["request"] as { url?: unknown } | undefined;
+      net.urls.set(id, String(request?.url ?? "").slice(0, 160));
+    }
+  });
+  const ended = (params: Record<string, unknown>, sid?: string): void => {
+    const id = String(params["requestId"]);
+    if (sid !== sessionId || !net.requests.delete(id)) return;
+    net.ended = true;
+    net.done.push({ url: net.urls.get(id) ?? "", at: Date.now() - net.armedAt });
+  };
+  const offFinished = client.on("Network.loadingFinished", ended);
+  const offFailed = client.on("Network.loadingFailed", ended);
 
   async function call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const start = Date.now();
@@ -142,6 +185,200 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await call("Input.dispatchMouseEvent", { type, x, y, ...extra });
   }
 
+  /**
+   * Arm the causal settle right before an input: the Network domain goes on, and the page tracks new timers. `node` is
+   * the field of a fill. When the page does not arm (a document that is going away), the frame settle runs instead.
+   */
+  async function arm(node: number | null): Promise<void> {
+    // The rest of an early settle ends before a new input: its work belongs to the input before.
+    if (early !== null) await causalSettle();
+    if (!net.on) {
+      try {
+        // The settle reads request events only. Chrome keeps no bodies for them.
+        await call("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 });
+        net.on = true;
+      } catch (e) {
+        if (client.closed) throw e;
+        opts.log.debug(`settle without request tracking: ${(e as Error).message}`);
+      }
+    }
+    net.requests.clear();
+    net.urls.clear();
+    net.done = [];
+    net.ended = false;
+    net.armed = true;
+    net.armedAt = Date.now();
+    const r = await evaluate(causalArmScript(node));
+    causalPending = !r.exception && r.value === true;
+    if (!causalPending) net.armed = false;
+  }
+
+  /**
+   * A causal settle that an early observe began and did not finish: its start, the busy clock, and the counts for the
+   * debug line. The next observe goes on with it (`causalSettle`).
+   */
+  type SettleRun = { start: number; busySince: number | null; first: boolean; seen: { polls: number; timers: number; timersUntil: number; busy: boolean; end: string } };
+  let early: SettleRun | null = null;
+
+  /**
+   * The causal settle: two frames, then a check every `causalPollMs` until the timers that the input started ran, the
+   * requests that started since the arm ended, their follow windows closed, and no new busy marker shows. A busy marker
+   * alone holds the settle for at most `causalBusyMs`: a long job (a draft, a streamed reply) keeps its marker. Then two
+   * frames for the last render. At most `causalCapMs`. A document without the armed tracker (a navigation) ends the
+   * wait: the readiness poll of `observe` takes over.
+   * `stop`: an early observe. The first frames wait for the options of an editable combobox too (`settleScript(action)`),
+   * and after the first check the settle stops with the work still open: it returns "pending", and the next call goes
+   * on from there. A settle that ends at the first check returns "done", as always.
+   */
+  async function causalSettle(action: Action | null = null, stop = false): Promise<"done" | "pending"> {
+    const run: SettleRun = early ?? { start: Date.now(), busySince: null, first: true, seen: { polls: 0, timers: 0, timersUntil: 0, busy: false, end: "quiet" } };
+    early = null;
+    const { start, seen } = run;
+    let paused = false;
+    try {
+      if (run.first) await evaluate(settleScript(stop ? action : null), true);
+      for (;;) {
+        const close = run.first;
+        run.first = false;
+        const extend = net.ended;
+        net.ended = false;
+        const r = await evaluate(causalStateScript(close, extend));
+        const s = r.value as { pending: number; follow: number; busy: boolean } | null;
+        seen.polls += 1;
+        if (r.exception || s === null || typeof s !== "object") { seen.end = "document gone"; break; }
+        if (s.pending > 0) { seen.timers = Math.max(seen.timers, s.pending); seen.timersUntil = Date.now() - start; }
+        seen.busy ||= s.busy;
+        const working = s.pending > 0 || s.follow > 0 || net.requests.size > 0 || net.ended;
+        if (!working && !s.busy) break;
+        run.busySince = working ? null : run.busySince ?? Date.now();
+        if (run.busySince !== null && Date.now() - run.busySince >= LIMITS.causalBusyMs) { seen.end = "busy marker cap"; break; }
+        if (Date.now() - start >= LIMITS.causalCapMs) {
+          seen.end = `the ${LIMITS.causalCapMs} ms cap with ${s.pending} timers and ${net.requests.size} requests open`;
+          break;
+        }
+        if (stop) {
+          paused = true;
+          early = run;
+          return "pending";
+        }
+        await settleSleep(LIMITS.causalPollMs);
+      }
+    } finally {
+      if (!paused) {
+        const last = net.done.at(-1);
+        const open = [...net.requests].map((id) => net.urls.get(id) ?? "").slice(0, 3);
+        opts.log.debug(`settle ${Date.now() - start} ms, ${seen.polls} checks, end: ${seen.end}; timers: up to ${seen.timers}, until ${seen.timersUntil} ms; requests: ${net.done.length} ended${last ? `, last at ${last.at} ms (${last.url})` : ""}${open.length > 0 ? `, open: ${open.join(" ")}` : ""}${seen.busy ? "; busy marker" : ""}`);
+        net.armed = false;
+        net.requests.clear();
+        net.ended = false;
+        if (net.on) {
+          net.on = false;
+          await call("Network.disable").catch((e: Error) => { if (client.closed) throw e; });
+        }
+        await evaluate(CAUSAL_END_SCRIPT);
+      }
+    }
+    await evaluate(settleScript(null), true);
+    return "done";
+  }
+
+  /** The settle of an input now, not at the next observe: the causal settle when the arm held, else the frame settle. */
+  async function settleNow(): Promise<void> {
+    if (causalPending) {
+      causalPending = false;
+      await causalSettle();
+    } else await evaluate(settleScript(null), true);
+  }
+
+  /**
+   * The history entry before the current one, when it is a web page (http, https, or file). The tab opened on
+   * about:blank, so a back from the start page would leave the site for a blank page.
+   */
+  async function previousEntry(): Promise<{ id: number } | null> {
+    const history = await call("Page.getNavigationHistory");
+    const index = typeof history["currentIndex"] === "number" ? history["currentIndex"] : 0;
+    const entries = Array.isArray(history["entries"]) ? (history["entries"] as { id: number; url?: string }[]) : [];
+    const previous = index > 0 ? entries[index - 1] : undefined;
+    return previous && /^(?:https?|file):/i.test(previous.url ?? "") ? previous : null;
+  }
+
+  /** Wait for the editor between two steps of a fill (EDIT_SETTLE_SCRIPT). */
+  async function settleEdit(): Promise<void> {
+    await evaluate(EDIT_SETTLE_SCRIPT, true);
+  }
+
+  /**
+   * One browser editing command on the focused field, carried by a key event that no page handler knows
+   * ("Unidentified"). The page never sees Mod+A, End, or Enter: an editor cannot turn them into a block selection
+   * that moves focus to a hidden input (Plate), a send (a chat composer), or a dropped insert (Lexical). The browser
+   * runs the command and fires beforeinput as it does for a person. Then the editor settles.
+   */
+  async function command(name: string): Promise<void> {
+    await call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Unidentified", code: "", windowsVirtualKeyCode: 0, commands: [name] });
+    await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Unidentified", code: "", windowsVirtualKeyCode: 0 });
+    await settleEdit();
+  }
+
+  /** One step of a fill (`editScript`). A document that went away: StalePage before the first insert, else EditRefused. */
+  async function editStep(node: number, step: "read" | "check" | "blank", mode: EditMode, keep: string[], typed: boolean): Promise<EditStep> {
+    const r = await evaluate(editScript(node, step, mode, keep));
+    if (r.exception || !r.value || typeof r.value !== "object") {
+      if (typed) throw new EditRefused("the page changed during the fill", true);
+      throw new StalePage("Document changed during the fill. Observe again.");
+    }
+    return r.value as EditStep;
+  }
+
+  /**
+   * Type `text` into the field that the click focused, as `plan` says. Each step settles. Before any text goes in, focus
+   * must be on the field and the selection where the mode needs it: the text never goes into another element, such as
+   * a hidden input that took focus. An empty field is replaced. An append joins by the field shape (`FieldShape`).
+   * Throws EditRefused with the reason; without `changed`, nothing was typed.
+   */
+  async function editField(node: number, text: string, plan: EditPlan): Promise<EditResult> {
+    await settleEdit();
+    const read = await editStep(node, "read", plan.mode, [], false);
+    if (!read.ok) throw new EditRefused(`the fill did not start: ${read.why}`);
+    if (read.moved) opts.log.info(`fill: the click moved focus to ${read.moved}, the text input of the popover that the field opened; the text goes there`);
+    const shape = read.shape ?? (read.kind === "editable" ? "composer" : read.kind);
+    // A field whose mention chips must stay is never replaced: a chip with no text reads as blank.
+    const mode: EditMode = read.blank && plan.keepChips !== true ? "replace" : plan.mode;
+    // A line break can send in a composer. Refuse before any change.
+    if (mode === "append" && shape === "composer" && /\n/.test(text)) throw new EditRefused("the text has line breaks, and a new line can send the message in this field");
+    await command(mode === "replace" ? "selectAll" : "moveToEndOfDocument");
+    const ready = await editStep(node, "check", mode, [], false);
+    if (!ready.ok) throw new EditRefused(`the fill did not start: ${ready.why}`);
+    if (shape === "document" && (mode === "append" || /\n/.test(text))) {
+      // A document takes one block per line. A line break inside insertText makes a soft break (Plate) or drops the
+      // text after it (Lexical), so each line after the first goes into a new block.
+      const lines = textLines(text);
+      const keep = mode === "append" ? textLines(read.text) : [];
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 || (mode === "append" && !ready.caretBlank)) {
+          await command("insertParagraph");
+          const blank = await editStep(node, "blank", mode, keep, true);
+          if (!blank.ok) throw new EditRefused(`the fill stopped after a new line: ${blank.why}`, true);
+        }
+        await call("Input.insertText", { text: lines[i] as string });
+        if (i < lines.length - 1) { keep.push(lines[i] as string); await settleEdit(); }
+      }
+    } else {
+      let typed = text;
+      if (mode === "append") {
+        if (shape === "textarea") typed = (/\n\s*$/.test(read.text) ? "" : "\n") + text;
+        else if (!ready.caretBlank && !ready.spaceBefore) typed = " " + text;
+      }
+      await call("Input.insertText", { text: typed });
+    }
+    await settleEdit();
+    const after = await editStep(node, "read", mode, [], true);
+    // An input without a selection API (email, number) had no selection check. Its value must be the text now.
+    if (ready.selectable === false && mode === "replace" && !read.blank && flat(after.text) !== flat(text)) {
+      throw new EditRefused(`the field shows "${flat(after.text).slice(0, 60)}" after the fill, not the typed text`, true);
+    }
+    return { mode, shape, before: read.text, after: after.text };
+  }
+
   const page: Page = {
     targetId,
     sessionId,
@@ -153,12 +390,16 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       await waitReady(timeoutMs);
     },
 
-    async observe() {
+    async observe(o) {
       const start = Date.now();
+      if (early !== null) await causalSettle();
       if (pendingSettle !== undefined) {
         const action = pendingSettle;
+        const causal = causalPending;
         pendingSettle = undefined;
-        await evaluate(settleScript(action), true);
+        causalPending = false;
+        if (causal) await causalSettle(action, o?.early === true);
+        else await evaluate(settleScript(action), true);
       }
       const deadline = start + opts.settleTimeoutMs;
       let polls = 0;
@@ -186,6 +427,10 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
     },
 
+    pending() {
+      return early !== null;
+    },
+
     async fresh(obs, action) {
       // A click, fill, or select compares the page key and the target's guard. The guard carries the
       // node's value, state, and the text of its form, dialog, or row. Live text elsewhere (a clock,
@@ -203,7 +448,9 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       return JSON.stringify(r.value) === JSON.stringify(obs.marker);
     },
 
-    async act(action, obs, text) {
+    async act(action, obs, text, edit) {
+      // The rest of an early settle ends before a new input: its work belongs to the input before.
+      if (early !== null) await causalSettle();
       // A wait has no target and changes nothing. A page that keeps updating must not turn it into stale retries.
       if (action.kind === "wait") {
         await settleSleep(100);
@@ -222,7 +469,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
       if (typeof action.node !== "number") throw new StalePage("Invalid observed node");
       if (action.kind === "fill" && typeof text !== "string") throw new Error("a fill needs text");
-      const r = await evaluate(actScript(action));
+      // A fill that keeps the field's mention chips never clicks a chip: the click can open its card and move focus.
+      const r = await evaluate(actScript(action, action.kind === "fill" && edit?.keepChips === true));
       if (r.exception) {
         if (action.kind === "select") throw new Error("Dropdown execution was interrupted; observe before retrying.");
         throw new StalePage("Document changed during evaluation");
@@ -231,15 +479,61 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       if (!target) throw new StalePage("Target changed or is covered. Observe again.");
       if (action.kind !== "select") {
         const { x, y } = target;
+        if (CAUSAL_KINDS.has(action.kind)) await arm(action.kind === "fill" ? action.node : null);
         await mouse("mouseMoved", x, y);
         await mouse("mousePressed", x, y, { button: "left", clickCount: 1 });
         await mouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
         if (action.kind === "fill") {
-          await call("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers, commands: ["selectAll"] });
-          await call("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers });
-          await call("Input.insertText", { text: text as string });
+          // The next observe settles after the fill, also when the fill stopped part way.
+          pendingSettle = action;
+          return await editField(action.node, text as string, edit ?? { mode: "replace" });
         }
       }
+      pendingSettle = action;
+    },
+
+    async setDate(action, obs, plan) {
+      // One freshness check for the whole field. Each part changes the form values, so a check per part would go stale.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Page changed since this decision. Observe again.");
+      // The causal settle follows a date as it follows a fill: the page can load or filter on each change.
+      if ("native" in plan) {
+        await arm(null);
+        const r = await evaluate(nativeDateScript(action.node as number, plan.native));
+        if (r.exception || r.value === null) {
+          await settleNow();
+          throw new StalePage("Date field changed or is gone. Observe again.");
+        }
+        pendingSettle = action;
+        return;
+      }
+      let typed = false;
+      for (const part of plan.parts) {
+        const r = await evaluate(actScript({ ...action, kind: "click", node: part.node }));
+        const at = r.value as { x: number; y: number } | null;
+        if (r.exception || !at) {
+          if (!typed) throw new StalePage("Date part changed or is covered. Observe again.");
+          break;
+        }
+        if (!typed) await arm(null);
+        await mouse("mouseMoved", at.x, at.y);
+        await mouse("mousePressed", at.x, at.y, { button: "left", clickCount: 1 });
+        await mouse("mouseReleased", at.x, at.y, { button: "left", clickCount: 1 });
+        typed = true;
+        if (part.spin) {
+          // A spinbutton segment (react-aria, MUI) reads digit keys, not inserted text.
+          for (const ch of part.text) {
+            const key = { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: 48 + Number(ch), nativeVirtualKeyCode: 48 + Number(ch) };
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyDown", text: ch, unmodifiedText: ch });
+            await call("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+          }
+          continue;
+        }
+        // A part that has no selection API (a number input) takes the key-less select-all command of a fill.
+        const selected = await evaluate(selectPartScript(part.node));
+        if (selected.value !== true) await command("selectAll");
+        await call("Input.insertText", { text: part.text });
+      }
+      if (typed) await evaluate(BLUR_SCRIPT);
       pendingSettle = action;
     },
 
@@ -254,20 +548,53 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         if (!fresh) throw new StalePage("Page or focus changed since this decision. Observe again.");
       }
       const base: Record<string, unknown> = { key, code: def.code, windowsVirtualKeyCode: def.vk, nativeVirtualKeyCode: def.vk };
+      await arm(null);
       await call("Input.dispatchKeyEvent", { ...base, type: "keyDown", ...(def.text !== undefined ? { text: def.text, unmodifiedText: def.text } : {}) });
       await call("Input.dispatchKeyEvent", { ...base, type: "keyUp" });
       pendingSettle = null;
     },
 
+    async popup(action, focus) {
+      if (typeof action.node !== "number") return null;
+      const read = async (move: boolean): Promise<Popup | null> => {
+        const r = await evaluate(popupScript(action, move));
+        return r.exception || r.value === null ? null : (r.value as Popup);
+      };
+      // The observation of the decision settled after the last input, so one read is enough. Focus is an input: a page
+      // can open the popup or start a search on it. The causal settle follows it, as it follows a click; then read again.
+      if (focus !== true) return read(false);
+      await arm(null);
+      const first = await read(true);
+      await settleNow();
+      return first === null ? null : read(false);
+    },
+
+    async commit(action, obs) {
+      // The key goes to the field the decision saw: same document, URL, values, and the same field guard.
+      if (!(await page.fresh(obs, action))) throw new StalePage("Field changed since this decision. Observe again.");
+      // The widget adds the chip in its key handler and can then search or render late: the causal settle follows.
+      await arm(null);
+      const r = await evaluate(commitScript(action));
+      const res = r.exception || r.value === null || typeof r.value !== "object" ? null : (r.value as { prevented: boolean } | { skipped: "gone" | "focus" });
+      if (res !== null && "prevented" in res) {
+        pendingSettle = null;
+        return res;
+      }
+      // No key went out: the arm ends here, not at the next observe.
+      await settleNow();
+      if (res === null) throw new StalePage("Document changed during evaluation");
+      return res;
+    },
+
     async back(timeoutMs) {
-      const history = await call("Page.getNavigationHistory");
-      const index = typeof history["currentIndex"] === "number" ? history["currentIndex"] : 0;
-      const entries = Array.isArray(history["entries"]) ? (history["entries"] as { id: number }[]) : [];
-      if (index <= 0) return;
-      const previous = entries[index - 1];
+      const previous = await previousEntry();
       if (!previous) return;
       await call("Page.navigateToHistoryEntry", { entryId: previous.id });
       await waitReady(timeoutMs);
+    },
+
+    async canGoBack() {
+      return (await previousEntry()) !== null;
     },
 
     async url() {
@@ -284,6 +611,9 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       if (closed) return;
       closed = true;
       offDialog();
+      offRequest();
+      offFinished();
+      offFailed();
       await chrome.closeTarget(targetId);
     },
   };

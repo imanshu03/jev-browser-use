@@ -1,10 +1,10 @@
 // Deterministic text work on the task string. No network.
 import type { ProfileEntry } from "./browser.js";
-import type { Span } from "./types.js";
+import type { DateFact, Span } from "./types.js";
 import { LIMITS, SECRET_KEY } from "./types.js";
 
 export const VALUE_VERBS = ["search for", "search", "look up", "type", "enter", "fill in", "fill", "write", "put",
-  "find", "named", "called", "titled", "with", "as", "to", "for", "into", "query"] as const;
+  "find", "named", "called", "titled", "with", "as", "to", "for", "into", "query", "about"] as const;
 
 /** A sentence dot ends a clause; a dot inside a word does not ("report.pdf", "v2.1"). A dot before a dot does ("hello...and"). */
 export const CLAUSE_BREAK = /,|;|\.(?=[\s.]|$)|\bthen\b|\band then\b|\bin the\b|\bon the\b|\binto\b|\busing\b/i;
@@ -233,6 +233,37 @@ const SECRET_LEAD = /password|passcode|pin|otp|secret/i;
 /** A URL or a domain that starts a value, and "and" after it: the value is the site ("Go to amazon.com and search for shoes"). */
 const SITE_AND = new RegExp(`^(?:https?:\\/\\/[^\\s"'<>)]+|${DOMAIN_RE.source})(?=\\s+(?:and|&)\\s)`, "i");
 
+/** One word of a person's name: a capital letter, then lower-case letters ("Ann", "O'Brien", "McKay", "Mary-Jane"). "Q3" and "AI" are not. */
+const NAME_WORD = String.raw`(?:[A-Z]['’])?[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:-[A-Z]?[a-z]+)*(?![\p{L}\p{N}])`;
+/**
+ * An @handle that is not part of an email address or a URL: "@ann.lee", or "@" before one to three name words ("@Research
+ * Agent").
+ */
+const HANDLE = String.raw`(?<![\p{L}\p{N}_.+/-])@(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:\s${NAME_WORD}){0,2}(?![\p{L}\p{N}_.@-])|[\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)`;
+/** One name after a mention verb: an @handle, a quoted name, or one to three name words. */
+const MENTION_ITEM = String.raw`(?:${HANDLE}|"[^"]{1,60}"|“[^”]{1,60}”|${NAME_WORD}(?:\s${NAME_WORD}){0,2})`;
+/** A mention verb and its list of names: "mention Ann Lee", "Tag @ann.lee and Bob Roy", "ping Ann, Bob and Cleo". */
+const MENTION_LIST = new RegExp(String.raw`(?<![\p{L}\p{N}@-])(?:[Mm]ention|[Tt]ag|[Pp]ing|@-?[Mm]ention|[Aa]t-[Mm]ention)\s+(${MENTION_ITEM}(?:(?:\s*,\s*(?:and\s+)?|\s+(?:and|&)\s+)${MENTION_ITEM})*)`, "gu");
+const MENTION_ONE = new RegExp(MENTION_ITEM, "gu");
+const HANDLE_RE = new RegExp(HANDLE, "gu");
+
+/**
+ * The names that the task asks to mention, in task order: the names after a mention verb (mention, tag, ping, @-mention,
+ * at-mention), and every @handle. A handle keeps its "@" ("@ann.lee", "@Research Agent"); a quoted name loses its quote
+ * marks. "mention the delay to Ann" and "tag it with urgent" have none: a lower-case word follows the verb.
+ */
+export function mentionNames(task: string): { text: string; at: number }[] {
+  const found: { text: string; at: number }[] = [];
+  for (const m of task.matchAll(MENTION_LIST)) {
+    const list = m[1] ?? "";
+    const start = (m.index ?? 0) + m[0].length - list.length;
+    for (const item of list.matchAll(MENTION_ONE)) found.push({ text: item[0].replace(/^["“]|["”]$/g, ""), at: start + (item.index ?? 0) });
+  }
+  for (const m of task.matchAll(HANDLE_RE)) if (!/^@-?mention$/i.test(m[0])) found.push({ text: m[0], at: m.index ?? 0 });
+  found.sort((a, b) => a.at - b.at);
+  return found.filter((f, i) => f.text.trim() !== "" && found.findIndex((g) => g.text.toLowerCase() === f.text.toLowerCase()) === i);
+}
+
 function stripTrailing(s: string): string {
   return s.replace(/[.,;:!?)'"]+$/, "");
 }
@@ -264,6 +295,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   const ex = new Set(exclude.map((s) => s.trim().toLowerCase()).filter(Boolean));
   const out: Span[] = [];
   const seen = new Map<string, string>();
+  /** The task position at which each span was first claimed. */
+  const startOf = new Map<string, number>();
   /** The id of the span with this text (new or already added), or null when the text is not a span. */
   const add = (text: string, source: Span["source"], at: number, verb?: string, parent?: string | null, longCut = false): string | null => {
     let t = text.trim().replace(/\s+/g, " ");
@@ -285,16 +318,34 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
     if (t.length < 1 || t.length > LIMITS.spanChars) return null;
     const k = t.toLowerCase();
     const known = seen.get(k);
-    if (known !== undefined) return known;
+    if (known !== undefined) {
+      // A topic after "about" that the task also gives as a value ("type Rust") or a name ("Alan Turing") takes that
+      // source: the topic rule hides a topic from fields that take new text, and the task states this text word for word.
+      // A name that is the topic itself (the same position) stays a topic for multiline fields (`Span.topic`).
+      const prev = out.find((x) => x.id === known);
+      if (prev && prev.source === "after_verb" && prev.verb === "about" && ((source === "after_verb" && verb !== "about") || source === "proper_noun")) {
+        const itself = source === "proper_noun" && startOf.get(known) === at;
+        prev.source = source;
+        if (source === "after_verb" && verb) prev.verb = verb; else delete prev.verb;
+        if (parent && parent !== known) prev.parent = parent; else delete prev.parent;
+        if (longCut && !itself) prev.longCut = true; else delete prev.longCut;
+        if (itself) prev.topic = true; else delete prev.topic;
+        if (isSecretAt(task, at)) prev.secret = true;
+      }
+      return known;
+    }
     if (ex.has(k) || out.length >= LIMITS.spans) return null;
     const span: Span = { id: `s${out.length + 1}`, text: t, source, secret: isSecretAt(task, at) };
     if (verb) span.verb = verb;
     if (parent) span.parent = parent;
     if (longCut) span.longCut = true;
     seen.set(k, span.id);
+    startOf.set(span.id, at);
     out.push(span);
     return span.id;
   };
+  // R0 mentions. They come first, so a name to mention keeps the source "mention" when it is also quoted or a proper noun.
+  for (const m of mentionNames(task)) add(m.text, "mention", m.at);
   // R1 quoted. A single quote mark next to a letter is an apostrophe (it's, O'Brien); inside the quote it can be one
   // when a letter follows it (‘Macy’s’).
   for (const m of task.matchAll(/"([^"]{1,120})"|(?<![\p{L}\p{N}])'((?:[^']|'(?=\p{L})){1,120})'(?![\p{L}\p{N}])|“([^”]{1,120})”|‘((?:[^’]|’(?=\p{L})){1,120})’(?!\p{L})/gu)) {
@@ -319,6 +370,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
     const start = (m.index ?? 0) + m[0].length;
     const rest = task.slice(start);
     const verb = (m[1] ?? "").toLowerCase().replace(/\s+/g, " ");
+    // "About" in capitals is a page or link name ("Click About"), and "about 10 minutes" is an approximation: no topic.
+    if (verb === "about" && (m[1] !== "about" || /^\d/.test(rest))) continue;
     const brkAt = rest.search(CLAUSE_BREAK);
     const own = brkAt >= 0 ? rest.slice(0, brkAt) : rest;
     // A sentence after "with" or "as" is a message: a subject pronoun starts it, or one with a helping verb comes before
@@ -383,7 +436,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   }
   // R4 proper nouns. A proper noun that starts an after_verb span and cuts a value short is a cut of it ("My Quarterly
   // Report Draft" of "My Quarterly Report Draft 2026"). A name that the span only goes on after is not.
-  for (const m of task.matchAll(/(?:^|[^.!?]\s+)((?:[A-Z][\w'-]*)(?:\s+[A-Z][\w'-]*){0,5})/g)) {
+  // Letters of any script: "Gödel’s" is one word, not "G". A curly apostrophe belongs to the word as a straight one does.
+  for (const m of task.matchAll(/(?:^|[^.!?]\s+)((?:\p{Lu}[\p{L}\p{N}_'’-]*)(?:\s+\p{Lu}[\p{L}\p{N}_'’-]*){0,5})/gu)) {
     const at = (m.index ?? 0) + m[0].length - (m[1] ?? "").length;
     const noun = stripTrailing(m[1] ?? "");
     const from = starts.get(at);
@@ -402,11 +456,144 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   }
   // R6 whole task
   add(task, "whole_task", 0);
+  markDates(task, out);
   return out;
 }
 
+/** A --var key that names the start or the end of a date range: "start", "from_date", "check_in", "end_date", "to". */
+const VAR_START = /(?:^|[_-])(?:start|from|begin|check_?in)(?:[_-]|$)/i;
+const VAR_END = /(?:^|[_-])(?:end|to|until|check_?out)(?:[_-]|$)/i;
+
 export function varSpans(vars: Record<string, string>): Span[] {
-  return Object.entries(vars).map(([k, v]) => ({ id: `v_${k}`, text: v, source: "var" as const, secret: SECRET_KEY.test(k) }));
+  return Object.entries(vars).map(([k, v]) => {
+    const span: Span = { id: `v_${k}`, text: v, source: "var" as const, secret: SECRET_KEY.test(k) };
+    const date = span.secret ? null : parseDate(v);
+    if (date) {
+      span.date = date;
+      if (VAR_START.test(k) !== VAR_END.test(k)) span.dateRole = VAR_START.test(k) ? "start" : "end";
+    }
+    return span;
+  });
+}
+
+/** A month name, its short form, or "Sept", with an optional dot. Group 1 is the name. */
+const MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+/** A day number with an optional ordinal suffix. Group 1 is the number. */
+const DAY = "(\\d{1,2})(?:st|nd|rd|th)?";
+const WEEKDAY = /^(sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?)\.?,?\s+/i;
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DAY_MONTH = new RegExp(`^${DAY}\\s+(?:of\\s+)?${MONTH}(?:,?\\s+(\\d{4}))?$`, "i");
+const MONTH_DAY = new RegExp(`^${MONTH}\\s+${DAY}(?:,?\\s+(\\d{4}))?$`, "i");
+
+/** The number of days in month `m` (1-12) of year `y`. */
+export function daysIn(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/** A real calendar date with a four-digit year. */
+export function isDate(y: number, m: number, d: number): boolean {
+  return Number.isInteger(y) && Number.isInteger(m) && Number.isInteger(d) && y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= daysIn(y, m);
+}
+
+/** A month and a day without a year ("Sep 1", "1st of September"), or null. */
+function dayMonth(text: string): { m: number; d: number } | null {
+  const t = text.trim().replace(/\s+/g, " ").replace(WEEKDAY, "");
+  const a = t.match(DAY_MONTH);
+  const b = a ? null : t.match(MONTH_DAY);
+  if ((a && a[3] !== undefined) || (b && b[3] !== undefined)) return null;
+  const m = MONTHS.indexOf(((a ? a[2] : b?.[1]) ?? "").slice(0, 3).toLowerCase()) + 1;
+  const d = Number(a ? a[1] : b?.[2]);
+  return (a || b) && m > 0 && d >= 1 && d <= daysIn(2024, m) ? { m, d } : null;
+}
+
+/**
+ * The date that `text` names as a whole, or null. It reads:
+ * - ISO dates, and dates that start with the year ("2026-09-01", "2026/9/1");
+ * - numeric dates with "/", ".", or "-" and a four-digit year ("9/15/2026", "15.9.2026");
+ * - month names, short names, and "Sept" in either order, with an ordinal, "of", a weekday, and commas ("1 September
+ *   2026", "September 1st, 2026", "Tuesday, September 1st, 2026", "1st of September 2026").
+ * A date that does not exist ("31 September 2026"), a wrong weekday, a two-digit year, and a date without a year give
+ * null. A numeric date whose first two numbers can both be a month ("9/1/2026") is `ambiguous`: see DateFact.
+ */
+export function parseDate(text: string): DateFact | null {
+  let t = text.trim().replace(/\s+/g, " ").replace(/[.,;]$/, "");
+  const ymd = t.match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/);
+  if (ymd) {
+    const [y, m, d] = [Number(ymd[1]), Number(ymd[3]), Number(ymd[4])];
+    return isDate(y, m, d) ? { y, m, d } : null;
+  }
+  const num = t.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/);
+  if (num) {
+    const [a, sep, b, y] = [Number(num[1]), num[2] as string, Number(num[3]), Number(num[4])];
+    if (a > 12 && isDate(y, b, a)) return { y, m: b, d: a };
+    if (b > 12 && isDate(y, a, b)) return { y, m: a, d: b };
+    if (a === b && isDate(y, a, b)) return { y, m: a, d: b };
+    // Both numbers can be a month: 9/1/2026 is 1 September or 9 January. Only a field of the same shape reads it.
+    return a <= 12 && b <= 12 && isDate(y, a, b) && isDate(y, b, a) ? { y, m: a, d: b, ambiguous: sep } : null;
+  }
+  const wd = t.match(WEEKDAY);
+  if (wd) t = t.slice(wd[0].length);
+  const a = t.match(DAY_MONTH);
+  const b = a ? null : t.match(MONTH_DAY);
+  const year = a ? a[3] : b?.[3];
+  if ((!a && !b) || year === undefined) return null;
+  const y = Number(year);
+  const m = MONTHS.indexOf(((a ? a[2] : b?.[1]) ?? "").slice(0, 3).toLowerCase()) + 1;
+  const d = Number(a ? a[1] : b?.[2]);
+  if (!isDate(y, m, d)) return null;
+  if (wd && WEEKDAYS.indexOf((wd[1] ?? "").slice(0, 3).toLowerCase()) !== new Date(Date.UTC(y, m - 1, d)).getUTCDay()) return null;
+  return { y, m, d };
+}
+
+const RANGE_WORD = /^(?:to|until|till|through|thru|-|\u2013|\u2014)$/;
+const START_WORDS = /\b(?:start(?:s|ing)?|begin(?:s|ning)?|check-?in|from)(?:\s+(?:date|day|on|at|to|as|is|=|:))*\s*$/;
+const END_WORDS = /\b(?:end(?:s|ing)?|check-?out|until)(?:\s+(?:date|day|on|at|to|as|is|=|:))*\s*$/;
+const before = (a: DateFact, b: DateFact): boolean => a.y * 10_000 + a.m * 100 + a.d <= b.y * 10_000 + b.m * 100 + b.d;
+
+/**
+ * Date facts on the spans whose whole text is a date, and range roles. "from A to B", "between A and B", "A – B", and
+ * "A until B" make A the start and B the end. So do "start" and "end" (or "check-in" and "check-out") in the words just
+ * before two dates. A start or an end without a year takes the year of the other one ("between Sep 1 and Sep 15, 2026").
+ * No span is added or removed: new spans would change typed_values and the operation head.
+ */
+function markDates(task: string, spans: Span[]): void {
+  for (const s of spans) {
+    const date = s.secret || s.source === "whole_task" ? null : parseDate(s.text);
+    if (date) s.date = date;
+  }
+  const low = task.toLowerCase();
+  const found = spans
+    .filter((s) => !s.secret && s.source !== "whole_task" && s.source !== "clause" && (s.date !== undefined || dayMonth(s.text) !== null))
+    .map((s) => ({ s, at: low.indexOf(s.text.toLowerCase()) }))
+    .filter((f) => f.at >= 0)
+    .sort((x, y) => x.at - y.at || y.s.text.length - x.s.text.length);
+  // A date inside a longer date ("September 1" in "September 1, 2026") is not a date of its own.
+  const dates = found.filter((f, i) => !found.some((g, j) => j !== i && g.at <= f.at && g.at + g.s.text.length >= f.at + f.s.text.length && g.s.text.length > f.s.text.length));
+  const pair = (start: Span, end: Span): void => {
+    // A date without a year takes the year of its partner: the start is not after the end.
+    const sd = start.date ?? null;
+    const ed = end.date ?? null;
+    if (!sd && ed && !ed.ambiguous) { const dm = dayMonth(start.text); if (dm) { const y = dm.m * 100 + dm.d > ed.m * 100 + ed.d ? ed.y - 1 : ed.y; if (isDate(y, dm.m, dm.d)) start.date = { y, m: dm.m, d: dm.d }; } }
+    if (!ed && sd && !sd.ambiguous) { const dm = dayMonth(end.text); if (dm) { const y = dm.m * 100 + dm.d < sd.m * 100 + sd.d ? sd.y + 1 : sd.y; if (isDate(y, dm.m, dm.d)) end.date = { y, m: dm.m, d: dm.d }; } }
+    if (!start.date || !end.date) return;
+    if (!start.date.ambiguous && !end.date.ambiguous && !before(start.date, end.date)) return;
+    start.dateRole = "start";
+    end.dateRole = "end";
+  };
+  for (let i = 0; i + 1 < dates.length; i++) {
+    const p = dates[i] as { s: Span; at: number };
+    const q = dates[i + 1] as { s: Span; at: number };
+    if (p.s.dateRole || q.s.dateRole) continue;
+    // Quote marks around the dates do not count: 'from "1 September 2026" to "15 September 2026"'.
+    const between = low.slice(p.at + p.s.text.length, q.at).replace(/["\u201c\u201d\u2018\u2019']/g, "").trim();
+    const lead = low.slice(Math.max(0, p.at - 40), p.at).replace(/["\u201c\u201d\u2018\u2019']/g, "");
+    if (RANGE_WORD.test(between) || (between === "and" && /\bbetween\s*$/.test(lead))) pair(p.s, q.s);
+  }
+  // "start date 1 Sep 2026 and end date 15 Sep 2026": one start word and one end word.
+  const starts = dates.filter((f) => !f.s.dateRole && START_WORDS.test(low.slice(Math.max(0, f.at - 40), f.at)));
+  const ends = dates.filter((f) => !f.s.dateRole && END_WORDS.test(low.slice(Math.max(0, f.at - 40), f.at)));
+  if (starts.length === 1 && ends.length === 1 && starts[0] !== ends[0]) pair((starts[0] as { s: Span }).s, (ends[0] as { s: Span }).s);
 }
 
 const KEY_WORD = /\b(Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Arrow(?:Up|Down|Left|Right)|Page(?:Up|Down)|Home|End|F\d{1,2})\b/g;

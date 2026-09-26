@@ -2,11 +2,11 @@ import type { ChoiceQuestion, Questions } from "@typesafe-ai/sdk";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
-import { cutText } from "../../src/fast/policy.js";
+import { FastRunner, actionKey, riskOf, searchField } from "../../src/fast/loop.js";
+import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
-import type { Action, Observation, Page, UnsentText } from "../../src/fast/model.js";
-import { StalePage } from "../../src/fast/model.js";
+import type { Action, DateInfo, Observation, Page, Popup, TokenFacts, UnsentText } from "../../src/fast/model.js";
+import { EditRefused, StalePage } from "../../src/fast/model.js";
 import type { RunnerHints, TextReply, TextSource } from "../../src/io.js";
 import { emptyResult } from "../../src/io.js";
 import type { RunConfig, Span } from "../../src/types.js";
@@ -52,7 +52,7 @@ const byUrl = (map: Record<string, PartialAnswers | ((q: Questions, state: unkno
     return other[name] ?? {};
   };
 
-interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[] }
+interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[]; attended?: boolean; earlyDecisions?: boolean }
 
 function setup(task: string, script: PageScript, oracle: OracleScript, over: Partial<RunConfig> = {}, opts: SetupOpts = {}) {
   const page = fakePage(script);
@@ -68,7 +68,8 @@ function setup(task: string, script: PageScript, oracle: OracleScript, over: Par
     openPage: async () => { opened += 1; return page; },
     oracle: o, human, log, sleep: async () => undefined, ...(opts.now ? { now: opts.now } : {}), ...(opts.providePage ? { page } : {}), ...(opts.warm ? { warm: opts.warm } : {}),
     ...(opts.text ? { text: opts.text } : {}), ...(opts.signal ? { signal: opts.signal } : {}), ...(opts.hints ? { hints: opts.hints } : {}), ...(opts.fromAssistant ? { fromAssistant: true } : {}),
-    ...(opts.unsent ? { unsent: opts.unsent } : {}),
+    ...(opts.unsent ? { unsent: opts.unsent } : {}), ...(opts.attended !== undefined ? { attended: opts.attended } : {}),
+    ...(opts.earlyDecisions !== undefined ? { earlyDecisions: opts.earlyDecisions } : {}),
   };
   const runner = new FastRunner(deps);
   return { runner, page, chrome, oracle: o, log, human, counts: () => ({ launches, opened }) };
@@ -403,7 +404,7 @@ describe("FastRunner hand-off and plan", () => {
     const bad = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" }, DONE, {}, { warm: async () => { throw new Error("warm failed"); } });
     expect((await bad.runner.run()).outcome).toBe("done");
   });
-  it("warm hook: not called when the plan asks Jev; that request opens the connection", async () => {
+  it("warm hook: called once after a plan request, which opened the first connection; the warm opens the second one", async () => {
     let warms = 0;
     const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" },
       byUrl({ [ARTICLE.url]: { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } }, { plan: { goal: { choice: "act", confidence: 0.9 } } }), {}, { warm: async () => { warms += 1; } });
@@ -411,7 +412,7 @@ describe("FastRunner hand-off and plan", () => {
     const r = await t.runner.run();
     expect(r.outcome).toBe("done");
     expect(t.oracle.requests.map((x) => x.name)).toEqual(["plan", "step"]);
-    expect(warms).toBe(0);
+    expect(warms).toBe(1);
     expect(t.counts().launches).toBe(1);
   });
   it("plan blocks (ambiguous_profile, no_start_url) never launch Chrome", async () => {
@@ -719,7 +720,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
    * A runner whose plan request waits for `gate`. `events` records, in order: warm, chrome (deps.chrome called),
    * navigate, plan:ask (the oracle got the plan request), plan:resolve (the gate opened).
    */
-  function gated(task: string, script: PageScript, over: Partial<RunConfig> = {}, opts: { providePage?: boolean; navigateFails?: Error; unset?: ("goal" | "profile")[]; plan?: PartialAnswers } = {}) {
+  function gated(task: string, script: PageScript, over: Partial<RunConfig> = {}, opts: { providePage?: boolean; navigateFails?: Error; navigateGate?: Promise<void>; unset?: ("goal" | "profile")[]; plan?: PartialAnswers } = {}) {
     const events: string[] = [];
     const gate = deferred();
     const page = fakePage(script);
@@ -736,7 +737,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     const c = cfg(task, over);
     for (const k of opts.unset ?? []) delete c[k];
     const navigate = page.navigate.bind(page);
-    page.navigate = async (url: string, ms: number) => { events.push("navigate"); if (opts.navigateFails) throw opts.navigateFails; await navigate(url, ms); };
+    page.navigate = async (url: string, ms: number) => { events.push("navigate"); if (opts.navigateFails) throw opts.navigateFails; if (opts.navigateGate) await opts.navigateGate; await navigate(url, ms); };
     let launches = 0;
     const deps: FastRunnerDeps = {
       cfg: c, profiles: PROFILES,
@@ -767,9 +768,24 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     expect(t.log.lines).toContain(OVERLAP_LINE);
     expect(t.log.lines.filter((l) => l.startsWith("INFO open https://wikipedia.org"))).toHaveLength(1);
     expect(t.log.lines.filter((l) => l.startsWith("INFO plan profile=none via flag start=https://wikipedia.org via task_url goal=act(0.90) requests=1"))).toHaveLength(1);
+    // The page loaded before the plan resolved: no load is left to hide a warm, and the first step request would wait
+    // behind a warm GET. No warm.
     expect(t.events).not.toContain("warm");
     expect(t.chrome.closes).toBe(1);
     expect(t.launches()).toBe(1);
+  });
+  it("(a2) the page still loads when the plan resolves: the warm after the plan opens the second connection during the load", async () => {
+    const load = deferred();
+    const t = gated("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" }, {}, { unset: ["goal"], navigateGate: load.promise });
+    const run = t.runner.run();
+    await tick();
+    t.gate.resolve();
+    await tick();
+    expect(t.events).toEqual(["chrome", "plan:ask", "navigate", "plan:resolve", "warm"]);
+    load.resolve();
+    const r = await run;
+    expect(r.outcome).toBe("done");
+    expect(t.events.filter((e) => e === "warm")).toHaveLength(1);
   });
   it("(b) task without a URL (Jev picks the site): Chrome launches only after the plan resolved", async () => {
     const t = gated("open gmail or drive and click English", { pages: { home: HOME }, start: "home" }, {}, { unset: ["goal"] });
@@ -790,7 +806,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     s.gate.resolve();
     const r2 = await run2;
     expect(r2.outcome).toBe("done");
-    expect(s.events).toEqual(["plan:ask", "plan:resolve", "chrome", "navigate"]);
+    expect(s.events).toEqual(["plan:ask", "plan:resolve", "warm", "chrome", "navigate"]);
     expect(r2.start).toMatchObject({ url: "https://mail.google.com", how: "catalog_jev" });
     expect(s.oracle.requests.map((x) => x.name)).toEqual(["plan", "step"]);
     expect(s.log.lines).not.toContain(OVERLAP_LINE);
@@ -846,6 +862,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     t.gate.resolve();
     const r = await run;
     expect(r.outcome).toBe("done");
+    // No warm on the current page: no page load hides it. The chat and MCP idle warms keep the connections open.
     expect(t.events).toEqual(["plan:ask", "plan:resolve", "chrome"]);
     expect(r.start).toMatchObject({ how: "current_page" });
     expect(t.log.lines).not.toContain(OVERLAP_LINE);
@@ -1050,8 +1067,10 @@ describe("requests without a text source (regression)", () => {
     // Taken again on 2026-09-23, when one value head per field replaced the shared type_text_value head and a field that
     // can take new text stopped offering the whole task and clauses. Taken again on 2026-09-25, when only a sentence dot
     // started to end a clause: "wikipedia.org" is one clause span, and the pieces of a URL ("https://mail", "example/t/1")
-    // and of a quote ("to Ann") are no longer clause spans.
-    expect(digest(out)).toBe("71f56a00c305282df7f390a45af515304e15eb973b6f1a4a2940d2360bdd6de8");
+    // and of a quote ("to Ann") are no longer clause spans. Taken again on 2026-09-26, when the date rule went into the
+    // requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
+    // Taken again on 2026-09-26, when the order rule (ORDER_RULE) went into RULES (the ultrafast comparison).
+    expect(digest(out)).toBe("129d705cc603b5884dbfeaaf7436cd23f72b5de18cddcc9ecbe4360c03c2d31e");
   });
 });
 
@@ -1095,18 +1114,24 @@ describe("assistant-written text (generate)", () => {
   const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
   const says = (values: Record<string, string>): TextReply => ({ kind: "text", values });
 
-  function mail(task: string, steps: Decide[], over: Partial<RunConfig> = {}, opts: SetupOpts & { state?: Partial<MailState> } = {}) {
+  /** `values` answers the value requests (the var fallback); without it they get the fake oracle's defaults. */
+  function mail(task: string, steps: Decide[], over: Partial<RunConfig> = {}, opts: SetupOpts & { state?: Partial<MailState>; values?: (q: Questions) => PartialAnswers } = {}) {
     const state: MailState = { doc: DOC, values: {}, sent: null, clicks: 0, extra: [], ...opts.state };
-    const t = setup(task, { pages: { m: mailPage(state) }, start: "m" }, seq(...steps), { url: MAIL, vars: { token: "s3cr3t" }, ...over }, opts);
+    const script = seq(...steps);
+    const values = opts.values;
+    const oracle = values ? (name: string, st: unknown, q: Questions): PartialAnswers => (name === "value" ? values(q) : script(name, st, q)) : script;
+    const t = setup(task, { pages: { m: mailPage(state) }, start: "m" }, oracle, { url: MAIL, vars: { token: "s3cr3t" }, ...over }, opts);
     t.page.observe = async () => { t.page.observes += 1; t.page.stats.browserMs += 2; return mailPage(state); };
     const act = t.page.act.bind(t.page);
-    t.page.act = async (a, o, text) => {
-      await act(a, o, text);
-      if (a.kind === "fill" && a.node !== null) state.values[a.node] = text ?? "";
+    t.page.act = async (a, o, text, edit) => {
+      const r = await act(a, o, text, edit);
+      // An append adds a line to the text that the field holds; any other fill replaces it.
+      if (a.kind === "fill" && a.node !== null) state.values[a.node] = edit?.mode === "append" && (state.values[a.node] ?? "").trim() !== "" ? `${state.values[a.node]}\n${text ?? ""}` : text ?? "";
       if (a.kind === "click") {
         state.clicks += 1;
         if (a.label === "Send") { state.sent = `${state.values[3] ?? ""} | ${state.values[4] ?? ""}`; state.values[3] = ""; state.values[4] = ""; }
       }
+      return r;
     };
     t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); state.clicks += 1; };
     return { ...t, state };
@@ -1263,13 +1288,18 @@ describe("assistant-written text (generate)", () => {
   it("10: a value change during the wait re-asks; the fill then uses g1 with one write", async () => {
     let t!: ReturnType<typeof mail>;
     const text = fakeText([() => { t.state.values[4] = "draft"; return says({ f1: "Tuesday works." }); }]);
-    t = mail(TASK, [gen("Reply"), gen("Reply"), finish], {}, { text });
+    // The page typed "draft" during the wait: the Reply now holds text that the run did not type, so the re-ask also
+    // asks where the new text goes.
+    const replace: Decide = (q, s) => ({ ...gen("Reply")(q, s), type_text_mode: "replace_all" });
+    t = mail(TASK, [gen("Reply"), replace, finish], {}, { text });
     const r = await t.runner.run();
     expect(r.outcome).toBe("done");
     expect(text.requests).toHaveLength(1);
     expect(stepReqs(t)[1]?.state.retry_reason).toContain('text for "Reply" is ready as typed value g1; the page changed during the wait');
     expect(stepReqs(t)[1]?.state.typed_values?.[0]).toMatchObject({ id: "g1", text: "Tuesday works.", field: "Reply" });
-    expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: "Tuesday works." }]);
+    expect(Object.keys(stepReqs(t)[0]?.questions ?? {}).some((k) => k.startsWith("mode_"))).toBe(false);
+    expect(Object.keys(stepReqs(t)[1]?.questions ?? {})).toContain(`mode_${idx(stepReqs(t)[1]?.questions ?? {}, "type_text_target", "Reply")}`);
+    expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: "Tuesday works.", edit: { mode: "replace" } }]);
     expect(r.steps[0]?.gate).toBe("generated g1 cached");
   });
 
@@ -1315,13 +1345,20 @@ describe("assistant-written text (generate)", () => {
     expect(text.requests.map((q) => q.id)).toEqual(["t1"]);
     expect(fills(t).map((c) => c.text)).toEqual(["first"]);
     expect(t.log.lines.some((l) => l.includes('retry 1/1: "Reply" already holds the text written for it'))).toBe(true);
-    // After a send empties the field, the text is not written and sent again.
+    // After a send empties the field, the text is not written and sent again: the run blocks with a hint.
     const sent = mail(TASK, [gen("Reply"), clickOn("Send"), gen("Reply"), giveUp], {}, { text: fakeText([says({ f1: "first" }), says({ f1: "second" })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
     const r2 = await sent.runner.run();
     expect(sent.state.sent).toBe(" | first");
     expect(fills(sent).map((c) => c.text)).toEqual(["first"]);
-    expect(sent.log.lines.some((l) => l.includes('the text written for "Reply" was typed in this run and is not in the field now; a run writes one text per field'))).toBe(true);
-    expect(r2.blocked?.kind).toBe("impossible");
+    expect(r2.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 2; a run writes and sends one text per field. For the next text, call browse again' });
+    // A click that is not a send ("Attach") and that empties the field gives no send record: the generate re-asks.
+    const lost = mail(TASK, [gen("Reply"), clickOn("Attach"), gen("Reply"), giveUp], {}, { text: fakeText([says({ f1: "first" }), says({ f1: "second" })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const act = lost.page.act.bind(lost.page);
+    lost.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Attach") lost.state.values[4] = ""; };
+    const r3 = await lost.runner.run();
+    expect(lost.runner.sentTexts()).toEqual([]);
+    expect(lost.log.lines.some((l) => l.includes('the text written for "Reply" was typed in this run and is not in the field now; a run writes one text per field'))).toBe(true);
+    expect(r3.blocked?.kind).toBe("impossible");
   });
 
   it("13c: a later request for another field does not list a field that already got its text, and its text for that field is never typed", async () => {
@@ -1578,8 +1615,10 @@ describe("assistant-written text (generate)", () => {
     };
     // The pop-out shows "Draft one." again, and the page then discards it: the entry drops like any other.
     expect(await run([clickOn("Restore draft"), clickOn("Discard")])).toEqual([[null, REPLY]]);
-    // A secret fill replaces the entry, and the send empties the pop-out: the entry drops like any other.
-    expect(await run([typeValue("Reply (pop-out)", "v_token"), clickOn("Send")])).toEqual([]);
+    // A secret fill replaces the entry, and the send empties the pop-out: the entry drops like any other. The pop-out
+    // holds a signature that the run did not type, so Jev also says that the value replaces its text.
+    const replace: Decide = (q, s) => ({ ...typeValue("Reply (pop-out)", "v_token")(q, s), type_text_mode: "replace_all" });
+    expect(await run([replace, clickOn("Send")])).toEqual([]);
   });
 
   it("13n:a text that the page moves and changes (list marks, a signature) keeps its dialog and its record", async () => {
@@ -1614,7 +1653,8 @@ describe("assistant-written text (generate)", () => {
     await e.runner.run();
     expect(early.requests).toHaveLength(1);
     expect(e.log.lines.some((l) => l.includes('"Reply (pop-out)" already holds the text written for it'))).toBe(true);
-    // "Pop out" adds a signature to the text. After the send, the pop-out gets no second text: the record went with the text.
+    // "Pop out" adds a signature to the text. After the send, the pop-out gets no second text: the record went with the
+    // text, and the send is on the record.
     const text = fakeText([says({ f1: "Tuesday at 10:00 works for me." }), says({ f1: "Tuesday at 10:00 works for me." })]);
     const h2 = fakeHuman({ interactive: true, confirm: [true, true, true] });
     const t = mail(TASK, [gen("Reply"), clickOn("Pop out"), clickOn("Send"), gen("Reply (pop-out)"), giveUp], {}, { text, human: h2, state: { extra: pop } });
@@ -1624,17 +1664,19 @@ describe("assistant-written text (generate)", () => {
       if (a.label === "Pop out") { t.state.values[11] = `${t.state.values[4] ?? ""}\n\n-- \nAnn Lee, Acme`; t.state.values[4] = ""; }
       if (a.label === "Send") t.state.values[11] = "";
     };
-    await t.runner.run();
+    const r = await t.runner.run();
     expect(text.requests).toHaveLength(1);
     expect(fills(t)).toHaveLength(1);
-    expect(t.log.lines.some((l) => l.includes('the text written for "Reply (pop-out)" was typed in this run and is not in the field now'))).toBe(true);
+    expect(r.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 3; a run writes and sends one text per field. For the next text, call browse again' });
   });
 
   it("13o: a control that held the text before the fill does not take its record: it keeps its own text request", async () => {
     // Notes already holds "Q3 plan review notes, draft 1". After the Subject fill, the page turns Subject into a heading.
     const notes = [el("e50", "fill", "Notes", "textbox", { node: 50, form: 7, multiline: true })];
     const text = fakeText([says({ f1: "Q3 plan", f2: "Q3 plan review notes, draft 2" }), says({ f1: "Notes text" })]);
-    const t = mail(TASK, [gen("Subject"), clickOn("Comment"), gen("Notes"), giveUp], {},
+    // Notes holds text that the run did not type: Jev also says that the new text replaces it.
+    const replace: Decide = (q, s) => ({ ...gen("Notes")(q, s), type_text_mode: "replace_all" });
+    const t = mail(TASK, [gen("Subject"), clickOn("Comment"), replace, giveUp], {},
       { text, human: fakeHuman({ interactive: true, confirm: [true, true] }), state: { extra: notes, values: { 50: "Q3 plan review notes, draft 1" } } });
     const act = t.page.act.bind(t.page);
     t.page.act = async (a, o, value) => { await act(a, o, value); if (a.kind === "fill" && a.node === 3) { t.state.values[3] = ""; t.state.hidden = [3]; } };
@@ -2571,12 +2613,472 @@ describe("assistant-written text (generate)", () => {
     expect(r.blocked?.kind).toBe("captcha");
   });
 
+  describe("25: the var fallback (plugin runs)", () => {
+    const VARS = { message: "Tuesday at 10:00 works for me." };
+    const pick = (id: string, conf: number, p: Record<string, number>) => ({ choice: id, confidence: conf, probabilities: p });
+    const onReply = (value: ReturnType<typeof pick>): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Reply"), confidence: 0.9 }, type_text_value: value });
+    const split = onReply(pick("generate", 0.45, { generate: 0.52, v_message: 0.45, none: 0.03 }));
+    const valueReqs = (t: { oracle: { requests: { name: string; questions: Questions }[] } }) => t.oracle.requests.filter((r) => r.name === "value").map((r) => r.questions["value_4"] as ChoiceQuestion);
+
+    it("a head that splits between generate and a var asks the vars alone; a var at 0.75 or above is typed, with no text request", async () => {
+      const text = fakeText([says({ f1: "written" })]);
+      const t = mail("reply to Ann with my message", [split, finish], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: () => ({ value_4: pick("v_message", 0.85, { v_message: 0.92, none: 0.08 }) }) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(fills(t)).toEqual([{ op: "act", id: "e4", kind: "fill", text: VARS.message }]);
+      expect(text.requests).toHaveLength(0);
+      const [only] = valueReqs(t);
+      expect(criteriaKeys(only)).toEqual(["v_message", "none"]);
+      expect((only?.instructions as { question: string }).question).toBe(VALUE_Q);
+      expect(r.steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.85, result: "ok", jev_requests: 2 });
+      expect(t.log.lines).toContain("INFO step 1 var fallback: [4] answered generate@0.45; the vars alone -> v_message@0.85");
+    });
+
+    it("the vars alone at none or below 0.75: the head without the vars decides, and a confident generate asks the assistant", async () => {
+      for (const only of [pick("none", 0.9, { none: 0.95, v_message: 0.05 }), pick("v_message", 0.74, { v_message: 0.86, none: 0.14 })]) {
+        const text = fakeText([says({ f1: "Tuesday works." })]);
+        const t = mail("reply to Ann", [split, finish], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: (q) => (criteriaKeys(q["value_4"]).includes("generate") ? { value_4: pick("generate", 0.9, { generate: 0.95, none: 0.05 }) } : { value_4: only }) });
+        const r = await t.runner.run();
+        expect(r.outcome).toBe("done");
+        const [a, b] = valueReqs(t);
+        expect(criteriaKeys(a)).toEqual(["v_message", "none"]);
+        expect(criteriaKeys(b)).not.toContain("v_message");
+        expect(b?.criteria["generate"]).toBe(GENERATE);
+        expect(text.requests).toHaveLength(1);
+        expect(fills(t).map((f) => f.text)).toEqual(["Tuesday works."]);
+        const shown = only.choice === "none" ? "none" : `${only.choice}@${only.confidence.toFixed(2)}`;
+        expect(t.log.lines).toContain(`INFO step 1 var fallback: [4] answered generate@0.45; the vars alone -> ${shown}; without the vars -> generate@0.90`);
+      }
+    });
+
+    it("none from the head without the vars keeps the first answer: low_value, a ban, and a re-ask", async () => {
+      const text = fakeText([says({ f1: "x" })]);
+      const t = mail("reply to Ann", [split, giveUp], { vars: { token: "s3cr3t", ...VARS } }, { text, fromAssistant: true, values: () => ({ value_4: "none" }) });
+      const r = await t.runner.run();
+      expect(valueReqs(t)).toHaveLength(2);
+      expect(r.steps[0]?.gate).toBe("low_value 0.45 < 0.55 (data_entry)");
+      expect(text.requests).toHaveLength(0);
+      expect(fills(t)).toEqual([]);
+    });
+
+    it("an assistant's var uses its own confidence: below the gate it goes to the fallback, at the gate it is typed; the CLI types a var at 1", async () => {
+      const low = mail("reply to Ann with my message", [onReply(pick("v_message", 0.3, { v_message: 0.48, generate: 0.47, none: 0.05 })), finish], { vars: VARS }, { text: fakeText(), fromAssistant: true, values: () => ({ value_4: pick("v_message", 0.9, { v_message: 0.95, none: 0.05 }) }) });
+      const r = await low.runner.run();
+      expect(r.steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.9 });
+      expect(valueReqs(low)).toHaveLength(1);
+      const ok = mail("reply to Ann with my message", [onReply(pick("v_message", 0.6, { v_message: 0.7, generate: 0.25, none: 0.05 })), finish], { vars: VARS }, { text: fakeText(), fromAssistant: true });
+      expect((await ok.runner.run()).steps[0]).toMatchObject({ value: VARS.message, value_conf: 0.6 });
+      expect(valueReqs(ok)).toHaveLength(0);
+      // The vars alone and the head without them do not help: the low var stays, and it is low_value.
+      const alone = mail("reply to Ann with my message", [onReply(pick("v_message", 0.3, { v_message: 0.5, none: 0.5 })), giveUp], { vars: VARS }, { fromAssistant: true });
+      expect((await alone.runner.run()).steps[0]?.gate).toBe("low_value 0.30 < 0.55 (data_entry)");
+      const cli = mail("reply to Ann with my message", [onReply(pick("v_message", 0.2, { v_message: 0.2, none: 0.8 })), finish], { vars: VARS });
+      expect((await cli.runner.run()).steps[0]).toMatchObject({ value: VARS.message, value_conf: 1 });
+      expect(valueReqs(cli)).toHaveLength(0);
+    });
+
+    it("a var that a fill of this run typed, and a secret var, start no fallback", async () => {
+      const onSubject: Decide = (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Subject"), confidence: 0.9 }, type_text_value: pick("generate", 0.45, { generate: 0.5, v_message: 0.45, none: 0.05 }) });
+      const t = mail("reply to Ann with my message and a subject", [onReply(pick("v_message", 0.9, { v_message: 0.95, none: 0.05 })), onSubject, giveUp], { vars: { token: "s3cr3t", ...VARS } }, { text: fakeText(), fromAssistant: true });
+      const r = await t.runner.run();
+      expect(fills(t).map((f) => f.text)).toEqual([VARS.message]);
+      expect(r.steps[1]?.gate).toBe("low_value 0.45 < 0.55 (data_entry)");
+      expect(t.oracle.requests.filter((x) => x.name === "value")).toHaveLength(0);
+    });
+  });
+
+  describe("26: sends of assistant text", () => {
+    const opCriteria = (q: Questions) => (q["operation"] as ChoiceQuestion).criteria;
+    const sentState = (t: ReturnType<typeof mail>, i: number) => (stepReqs(t)[i]?.state as Record<string, unknown> | undefined)?.["sent_texts"];
+
+    it("a Send click that empties the field records a send: the next state has sent_texts and the DONE_SENT text", async () => {
+      const human = fakeHuman({ interactive: true, confirm: [true] });
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(t.log.lines).toContain('INFO step 2 sent: the text for "Reply" left the page after step 2 (click "Send")');
+      expect(opCriteria(stepReqs(t)[1]?.questions ?? {})["DONE"]).toBe(DONE_TEXT);
+      expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"]).toBe(DONE_SENT);
+      expect(sentState(t, 2)).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+    });
+
+    it("no send record for a text that stays, a Delete draft click, a click that is not a send, or a fill that did not stay", async () => {
+      const cases: { name: string; steps: Decide[]; clear?: string; drop?: boolean; extra?: Action[] }[] = [
+        // The send failed: the page keeps the text.
+        { name: "kept", steps: [gen("Reply"), clickOn("Send"), finish] },
+        // A destructive word that is not a send word.
+        { name: "delete", steps: [gen("Reply"), clickOn("Delete draft"), finish], clear: "Delete draft", extra: [el("e10", "click", "Delete draft", "button", { form: 7 })] },
+        { name: "attach", steps: [gen("Reply"), clickOn("Attach"), finish], clear: "Attach" },
+        // The editor dropped the insert: nothing showed that the page had the text.
+        { name: "dropped", steps: [gen("Reply"), clickOn("Send"), finish], drop: true },
+      ];
+      for (const c of cases) {
+        const t = mail(TASK, c.steps, {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }), state: { extra: c.extra ?? [] } });
+        const act = t.page.act.bind(t.page);
+        t.page.act = async (a, o, value) => {
+          const before = t.state.values[4];
+          await act(a, o, value);
+          if (c.drop && a.kind === "fill") t.state.values[4] = "";
+          if (a.label === "Send" && !c.drop) t.state.values[4] = before ?? "";
+          if (a.label === c.clear) t.state.values[4] = "";
+        };
+        const r = await t.runner.run();
+        expect(r.outcome, c.name).toBe("done");
+        expect(t.runner.sentTexts(), c.name).toEqual([]);
+        expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"], c.name).toBe(DONE_TEXT);
+        expect(sentState(t, 2), c.name).toBeUndefined();
+      }
+    });
+
+    it("a Comment click and an Enter record a send when the text leaves; so does a task value in a plugin run, and the CLI records none", async () => {
+      const comment = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act = comment.page.act.bind(comment.page);
+      comment.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Comment") comment.state.values[4] = ""; };
+      await comment.runner.run();
+      expect(comment.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      const enter = mail(TASK, [gen("Reply"), enterKey, finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      enter.page.press = async (key) => { enter.page.calls.push({ op: "press", key }); enter.state.values[4] = ""; };
+      await enter.runner.run();
+      expect(enter.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(enter.log.lines).toContain('INFO step 2 sent: the text for "Reply" left the page after step 2 (Enter)');
+      // A task value typed into a multiline field is unsent text in a plugin run, and its send is recorded too.
+      const quoted = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), finish], {}, { fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      await quoted.runner.run();
+      expect(quoted.runner.sentTexts()).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      // The CLI has no unsent text, so no send record and no change to its requests.
+      const cli = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), finish], {}, { human: fakeHuman({ interactive: true, confirm: [true] }) });
+      await cli.runner.run();
+      expect(cli.runner.sentTexts()).toEqual([]);
+      expect(opCriteria(stepReqs(cli)[2]?.questions ?? {})["DONE"]).toBe(DONE_TEXT);
+    });
+
+    it("an Enter that picks an option records a send only when the option has a send word", async () => {
+      for (const [option, sends] of [["Open Q3 Roadmap", false], ["Send to #general", true]] as const) {
+        const t = mail(TASK, [gen("Reply"), enterKey, finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+        const observe = t.page.observe;
+        t.page.observe = async () => {
+          const o = await observe();
+          const v = o.actions.find((a) => a.node === 4)?.value ?? "";
+          return { ...o, focus: { node: 4, label: "Reply", role: "textbox", submitLabel: "Send", editable: true, value: v, form: 7, multiline: true, enterOption: { node: 20, label: option } } };
+        };
+        // The pick takes the text out of the field, as a command bar that opens an item does.
+        t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); t.state.values[4] = ""; };
+        const r = await t.runner.run();
+        expect(r.outcome, option).toBe("done");
+        expect(t.page.calls, option).toContainEqual({ op: "press", key: "Enter" });
+        expect(t.runner.sentTexts(), option).toEqual(sends ? [{ field: "Reply", text: "Tuesday works." }] : []);
+        expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"], option).toBe(sends ? DONE_SENT : DONE_TEXT);
+      }
+    });
+
+    it("a text that the send moved into another field in view is no send: no control may hold it", async () => {
+      // An older adapter without `texts`: only the fields in view show where the text is.
+      const t = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }), state: { extra: [el("e10", "fill", "Reply (pop-out)", "textbox", { form: 8, multiline: true })] } });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => { await act(a, o, value); if (a.label === "Comment") { t.state.values[10] = t.state.values[4] ?? ""; t.state.values[4] = ""; } };
+      const observe = t.page.observe;
+      t.page.observe = async () => { const { texts: _texts, ...o } = await observe(); return o; };
+      await t.runner.run();
+      expect(t.runner.sentTexts()).toEqual([]);
+    });
+
+    it("the step after a send waits while the page still shows the text, and decides on the page without it", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act = t.page.act.bind(t.page);
+      let sending = 0;
+      t.page.act = async (a, o, value) => { const before = t.state.values[4]; await act(a, o, value); if (a.label === "Send") { t.state.values[4] = before ?? ""; sending = 4; } };
+      const observe = t.page.observe.bind(t.page);
+      t.page.observe = async () => { if (sending > 0 && --sending === 0) t.state.values[4] = ""; return observe(); };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.log.lines).toContain('INFO step 3 sent: the text for "Reply" left the page after step 2 (click "Send")');
+      expect(sentState(t, 2)).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(opCriteria(stepReqs(t)[2]?.questions ?? {})["DONE"]).toBe(DONE_SENT);
+      // A text that never leaves: the wait ends after fastWaitMs worth of polls, and the step decides with no record.
+      const kept = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act2 = kept.page.act.bind(kept.page);
+      kept.page.act = async (a, o, value) => { const before = kept.state.values[4]; await act2(a, o, value); if (a.label === "Send") kept.state.values[4] = before ?? ""; };
+      await kept.runner.run();
+      expect(kept.page.observes).toBe(4 + Math.ceil(LIMITS.fastWaitMs / LIMITS.waitPollMs));
+      expect(kept.runner.sentTexts()).toEqual([]);
+      // A form that the page hides after the send keeps its value in a hidden control: no send record (the control still
+      // holds the text), and no wait, because no rendered control shows the text.
+      const hid = mail(TASK, [gen("Reply"), clickOn("Send"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const act3 = hid.page.act.bind(hid.page);
+      hid.page.act = async (a, o, value) => { const before = hid.state.values[4]; await act3(a, o, value); if (a.label === "Send") { hid.state.values[4] = before ?? ""; hid.state.hidden = [4]; } };
+      const observe3 = hid.page.observe.bind(hid.page);
+      hid.page.observe = async () => { const o = await observe3(); return { ...o, texts: (o.texts ?? []).filter(([n]) => !(hid.state.hidden ?? []).includes(n)) }; };
+      expect((await hid.runner.run()).outcome).toBe("done");
+      expect(hid.page.observes).toBe(4);
+      expect(hid.runner.sentTexts()).toEqual([]);
+    });
+
+    it("a later action other than WAIT ends the watch: a text that it takes out of the page is no send", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), clickOn("Attach"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: fakeHuman({ interactive: true, confirm: [true, true] }) });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => { const before = t.state.values[4]; await act(a, o, value); if (a.label === "Send") t.state.values[4] = before ?? ""; if (a.label === "Attach") t.state.values[4] = ""; };
+      await t.runner.run();
+      expect(t.state.clicks).toBe(2);
+      expect(t.runner.sentTexts()).toEqual([]);
+    });
+
+    it("a text request after a send lists the sent texts and never the sent field; a field with a sent task value blocks a generate", async () => {
+      const text = fakeText([says({ f1: "Re: Tuesday" })]);
+      const t = mail('reply "Tuesday works." to Ann', [typeValue("Reply", "s1"), clickOn("Send"), gen("Subject"), gen("Reply"), giveUp], {}, { text, fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const r = await t.runner.run();
+      expect(text.requests.map((q) => q.fields.map((f) => f.label))).toEqual([["Subject"]]);
+      expect(text.requests[0]?.sent_texts).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+      expect(r.blocked).toMatchObject({ kind: "needs_text", hint: 'the text for "Reply" was sent in step 2; a run writes and sends one text per field. For the next text, call browse again' });
+    });
+
+    it("after a send, a generate needs TYPE_TEXT at 0.50 or above", async () => {
+      const weak: Decide = (q) => ({ page_kind: "task_page", operation: { choice: "TYPE_TEXT", confidence: 0.4, probabilities: { TYPE_TEXT: 0.4, DONE: 0.35, CLICK: 0.25 } }, type_text_target: { choice: idx(q, "type_text_target", "Subject"), confidence: 0.9 }, type_text_value: { choice: "generate", confidence: 0.9 } });
+      const text = fakeText([says({ f1: "Tuesday works." }), says({ f1: "Re: Tuesday" })]);
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), weak, finish], {}, { text, human: fakeHuman({ interactive: true, confirm: [true] }) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(text.requests).toHaveLength(1);
+      expect(t.log.lines.some((l) => l.includes("retry 1/1: text after a send: TYPE_TEXT 0.40 < 0.5"))).toBe(true);
+      expect(fills(t)).toHaveLength(1);
+    });
+  });
+
+  describe("27: the send gate in the form of unsent text", () => {
+    const clickAt = (label: string, conf: number): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: conf } });
+
+    it("a Send button in the form of a field with unsent text needs only the submit target gate, and the dialog still asks", async () => {
+      const human = fakeHuman({ interactive: true, confirm: [true] });
+      const t = mail(TASK, [gen("Reply"), clickAt("Send", 0.55), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.state.sent).toBe(" | Tuesday works.");
+      expect(human.details).toEqual([{ kind: "action", action: 'click button "Send"', host: "mail.example", typed: [{ label: "Reply", text: "Tuesday works." }] }]);
+      expect(t.log.lines).toContain("INFO step 2 send in the form of unsent text: target 0.55 passes the submit gate 0.5; the click needs the user's OK");
+      expect(r.steps[1]).toMatchObject({ risk: "destructive", target_conf: 0.55, result: "ok" });
+    });
+
+    it("a run without a dialog blocks needs_confirmation at that click, and never clicks", async () => {
+      const human = fakeHuman({ interactive: false });
+      const t = mail(TASK, [gen("Reply"), clickAt("Send", 0.55)], {}, { text: fakeText([says({ f1: "Tuesday works." })]), human, hints: { noConfirm: "NO DIALOG" } });
+      const r = await t.runner.run();
+      expect(r.blocked).toMatchObject({ kind: "needs_confirmation", hint: 'destructive action click button "Send": NO DIALOG' });
+      expect(t.state.clicks).toBe(0);
+    });
+
+    it("the destructive gate stays for a send button in another form, with no unsent text, and with confirm never", async () => {
+      const other = [el("e10", "click", "Send now", "button", { form: 8 })];
+      const runs: { name: string; steps: Decide[]; over?: Partial<RunConfig>; human: ReturnType<typeof fakeHuman>; extra?: Action[] }[] = [
+        { name: "another form", steps: [gen("Reply"), clickAt("Send now", 0.55), giveUp], human: fakeHuman({ interactive: true, confirm: [true] }), extra: other },
+        { name: "no unsent text", steps: [clickAt("Send", 0.55), giveUp], human: fakeHuman({ interactive: true, confirm: [true] }) },
+        { name: "confirm never", steps: [gen("Reply"), clickAt("Send", 0.55), giveUp], over: { confirm: "never" }, human: fakeHuman({ interactive: true, confirm: [true] }) },
+      ];
+      for (const c of runs) {
+        const t = mail(TASK, c.steps, c.over ?? {}, { text: fakeText([says({ f1: "Tuesday works." })]), human: c.human, state: { extra: c.extra ?? [] } });
+        await t.runner.run();
+        expect(t.log.lines.some((l) => l.includes("retry 1/1: low_target 0.55 < 0.7 (destructive)")), c.name).toBe(true);
+        expect(t.state.clicks, c.name).toBe(0);
+        expect(c.human.prompts, c.name).toEqual([]);
+      }
+    });
+  });
+
   it("24: the RunResult keys equal those of emptyResult", async () => {
     const r = await mail(TASK, [gen("Reply"), finish], {}, { text: fakeText([says({ f1: "Tuesday works." })]) }).runner.run();
     const empty = emptyResult("t", "act");
     expect(Object.keys(r)).toEqual(Object.keys(empty));
     expect(Object.keys(r.stats)).toEqual(Object.keys(empty.stats));
     expect(Object.keys(r.steps[0] ?? {}).sort()).toEqual(Object.keys((await setup("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" }, byUrl({ [HOME.url]: { page_kind: "task_page", operation: "WAIT" } }), { maxSteps: 1 }).runner.run()).steps[0] ?? {}).sort());
+  });
+  describe("25: autonomous runs (confirm autonomous)", () => {
+    /** A Human that fails the test if the loop asks it anything. */
+    const noDialog = (interactive = true): ReturnType<typeof fakeHuman> => {
+      const h = fakeHuman({ interactive });
+      h.confirm = async () => { throw new Error("an autonomous run opened a dialog"); };
+      return h;
+    };
+    const AUTO = { confirm: "autonomous" } as const;
+    const waitOp: Decide = () => ({ page_kind: "task_page", operation: "WAIT" });
+
+    it("a destructive Send with no unsent text runs with no dialog; the record holds the audit and the other fields of the form", async () => {
+      const human = noDialog();
+      const t = mail("send the reply", [clickOn("Send"), finish], AUTO, { human, state: { values: { 1: "q3", 3: "Re: Meeting" } } });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(human.prompts).toEqual([]);
+      expect(t.state.sent).toBe("Re: Meeting | ");
+      expect(r.steps[0]).toMatchObject({ gate: "autonomous", risk: "destructive", result: "ok" });
+      // The search box is outside form 7, so the audit does not list it.
+      expect(r.steps[0]?.unattended).toEqual({ action: 'click button "Send"', host: "mail.example", why: ["destructive"], texts: [], fields: [{ label: "Subject", value: "Re: Meeting" }] });
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(t.log.lines.some((l) => l.startsWith("WARN") && l.includes('step 1 unattended: click button "Send" (destructive)'))).toBe(true);
+    });
+
+    it("a click that is not a risk word runs while unsent text is in a field: the text stays (left false); the Send after it takes it out (left true)", async () => {
+      const human = noDialog();
+      const t = mail(TASK, [gen("Reply"), clickOn("Comment"), clickOn("Send"), finish], AUTO, { human, text: fakeText([says({ f1: "Tuesday works." })]) });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(human.prompts).toEqual([]);
+      expect(t.state.sent).toBe(" | Tuesday works.");
+      expect(r.steps.map((s) => s.gate)).toEqual([expect.stringMatching(/^generated g1 t1/), "autonomous", "autonomous", "done"]);
+      expect(r.steps[0]?.unattended).toBeUndefined();
+      expect(r.steps[1]?.unattended).toMatchObject({ action: 'click button "Comment"', why: ["unsent_text"], texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: false }] });
+      expect(r.steps[2]?.unattended).toMatchObject({ action: 'click button "Send"', why: ["destructive", "unsent_text"], texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: true }] });
+    });
+
+    it("Enter with unsent text runs and records the audit; the fields come from the focused field's form", async () => {
+      const t = mail(TASK, [gen("Reply"), enterKey, finish], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]), state: { values: { 1: "q3", 3: "Re: Tuesday" } } });
+      const observe = t.page.observe;
+      t.page.observe = async () => {
+        const o = await observe();
+        const v = o.actions.find((a) => a.node === 4)?.value ?? "";
+        return { ...o, focus: { node: 4, label: "Reply", role: "textbox", submitLabel: "Send", editable: true, value: v, form: 7, multiline: true } };
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls).toContainEqual({ op: "press", key: "Enter" });
+      expect(r.steps[1]).toMatchObject({ action: "press_key", gate: "autonomous" });
+      expect(r.steps[1]?.unattended).toEqual({
+        action: 'press Enter on "Reply | Send"', host: "mail.example", why: ["destructive", "unsent_text"],
+        texts: [{ label: "Reply", text: "Tuesday works.", chars: 14, left: false }], fields: [{ label: "Subject", value: "Re: Tuesday" }],
+      });
+    });
+
+    it("a field that a popover hides after the click keeps its text (left false) while filled lists it; gone from filled, the text left", async () => {
+      for (const [filled, left] of [[true, false], [false, true]] as const) {
+        const t = mail(TASK, [gen("Reply"), clickOn("Comment"), finish], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]) });
+        const observe = t.page.observe;
+        // After the Comment click, a modal popover hides the form: Reply is not in actions or texts.
+        t.page.observe = async () => {
+          const o = await observe();
+          if (t.state.clicks === 0) return o;
+          return { ...o, actions: o.actions.filter((a) => a.node !== 4), texts: (o.texts ?? []).filter(([n]) => n !== 4), filled: filled ? o.filled ?? [] : (o.filled ?? []).filter((n) => n !== 4) };
+        };
+        const r = await t.runner.run();
+        expect(r.steps[1]?.unattended?.texts, `filled ${filled}`).toEqual([{ label: "Reply", text: "Tuesday works.", chars: 14, left }]);
+      }
+    });
+
+    it("unsent text over 6000 characters does not block; the record keeps the full text", async () => {
+      const note = "word ".repeat(1220).trim();
+      const t = mail("reply to Ann with the note", [typeValue("Reply", "v_note"), clickOn("Comment"), finish], { ...AUTO, vars: { note } }, { fromAssistant: true, human: noDialog() });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(note.length).toBeGreaterThan(LIMITS.confirmTextChars);
+      expect(r.steps[1]?.unattended?.texts).toEqual([{ label: "Reply", text: note, chars: note.length, left: false }]);
+    });
+
+    it.each([
+      ["autonomous", AUTO, () => noDialog()],
+      ["confirmed", {}, () => fakeHuman({ interactive: true, confirm: [true, true] })],
+    ] as const)("a stale %s click writes no audit, and its gate does not go to the WAIT that the next decision takes", async (gate, over, human) => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send"), waitOp, clickOn("Send"), finish], over, { human: human(), text: fakeText([says({ f1: "Tuesday works." })]) });
+      const act = t.page.act.bind(t.page);
+      let stale = true;
+      t.page.act = async (a, o, value) => {
+        if (a.label === "Send" && stale) { stale = false; throw new StalePage("the page changed"); }
+        await act(a, o, value);
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(r.steps.map((s) => `${s.action}:${s.gate}`)).toEqual([expect.stringMatching(/^fill:generated g1/), "wait:ok", `click:${gate}`, "none:done"]);
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(r.steps.filter((s) => s.unattended).map((s) => s.step)).toEqual(gate === "autonomous" ? [3] : []);
+      expect(t.state.sent).toBe(" | Tuesday works.");
+    });
+
+    it("a dry run writes no audit", async () => {
+      const r = await mail("send the reply", [clickOn("Send")], { ...AUTO, dryRun: true, maxSteps: 1 }, { human: noDialog(), state: { values: { 3: "Re: Meeting" } } }).runner.run();
+      expect(r.steps[0]).toMatchObject({ result: "skipped", error: "dry_run" });
+      expect(r.steps.some((s) => s.unattended)).toBe(false);
+    });
+
+    it("text that an earlier run left is marked earlier_run; the flag does not go back to the session", async () => {
+      const seed = [{ doc: DOC, node: 4, label: "Reply", text: "Tuesday works.", request: "t1" }];
+      const t = mail("click the Comment button", [clickOn("Comment"), finish], AUTO, { human: noDialog(), state: { values: { 4: "Tuesday works." } }, unsent: seed });
+      const r = await t.runner.run();
+      expect(r.steps[0]?.unattended?.texts).toEqual([{ label: "Reply", text: "Tuesday works.", chars: 14, left: false, earlier_run: true }]);
+      expect(t.runner.unsentText()).toEqual([{ ...seed[0], request: null }]);
+    });
+
+    it("a submit with no unsent text is in the audit; under confirm auto it has no audit and no dialog", async () => {
+      const extra = [el("e12", "click", "Save draft", "button", { form: 7 })];
+      const auto = await mail("save the draft", [clickOn("Save draft"), finish], AUTO, { human: noDialog(), state: { extra } }).runner.run();
+      expect(auto.steps[0]).toMatchObject({ risk: "submit", gate: "autonomous", unattended: { action: 'click button "Save draft"', why: ["submit"], texts: [] } });
+      const human = fakeHuman({ interactive: true });
+      const plain = await mail("save the draft", [clickOn("Save draft"), finish], {}, { human, state: { extra } }).runner.run();
+      expect(plain.steps[0]).toMatchObject({ risk: "submit", gate: "ok 0.90 (submit)" });
+      expect(plain.steps[0]?.unattended).toBeUndefined();
+      expect(human.prompts).toEqual([]);
+    });
+
+    it("a fill that replaces text that the run did not type records replaced_chars; a fill of an empty field or over its own text does not", async () => {
+      const t = mail("set the subject and the reply", [typeValue("Subject", "v_subj"), typeValue("Subject", "v_subj2"), typeValue("Reply", "v_r"), finish],
+        { ...AUTO, vars: { subj: "New subject", subj2: "Newer subject", r: "Fine." } }, { human: noDialog(), state: { values: { 3: "Old subject line" } } });
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(r.steps[0]?.unattended).toEqual({ action: 'fill textbox "Subject"', host: "mail.example", why: ["replaced"], texts: [{ label: "Subject", text: "New subject", chars: 11, left: false }], fields: [], replaced_chars: 16 });
+      expect(r.steps[1]?.unattended).toBeUndefined();
+      expect(r.steps[2]?.unattended).toBeUndefined();
+      // Only an autonomous run keeps this audit.
+      const plain = await mail("set the subject", [typeValue("Subject", "v_subj"), finish], { vars: { subj: "New subject" } }, { state: { values: { 3: "Old subject line" } } }).runner.run();
+      expect(plain.steps[0]?.unattended).toBeUndefined();
+    });
+
+    it("the audit fields leave out credential, secret, payment, and one-time-code fields", async () => {
+      const extra = [
+        el("e20", "fill", "Card number", "textbox", { form: 7 }), el("e21", "fill", "Billing", "textbox", { form: 7, autocomplete: "cc-number" }),
+        el("e22", "fill", "Verification code", "textbox", { form: 7 }), el("e23", "fill", "API token", "textbox", { form: 7 }),
+        el("e24", "fill", "Enter it", "textbox", { form: 7, autocomplete: "one-time-code" }), el("e25", "fill", "Notes", "textbox", { form: 7 }),
+      ];
+      const values = { 3: "Re: Meeting", 20: "4111 1111 1111 1111", 21: "4111", 22: "123456", 23: "tok-1", 24: "654321", 25: "call me" };
+      const r = await mail("send the reply", [clickOn("Send"), finish], AUTO, { human: noDialog(), state: { extra, values } }).runner.run();
+      expect(r.steps[0]?.unattended?.fields).toEqual([{ label: "Subject", value: "Re: Meeting" }, { label: "Notes", value: "call me" }]);
+      expect(JSON.stringify(r.steps)).not.toMatch(/4111|123456|654321|tok-1/);
+    });
+
+    it("an audited click whose input throws keeps a failed record with the audit: it may have run", async () => {
+      const t = mail(TASK, [gen("Reply"), clickOn("Send")], AUTO, { human: noDialog(), text: fakeText([says({ f1: "Tuesday works." })]) });
+      const act = t.page.act.bind(t.page);
+      t.page.act = async (a, o, value) => {
+        if (a.label === "Send") throw Object.assign(new Error("the target closed"), { name: "CdpError" });
+        await act(a, o, value);
+      };
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("failed");
+      expect(r.error?.kind).toBe("browser");
+      expect(r.steps[1]).toMatchObject({ result: "failed", gate: "autonomous", error: "may have run: the target closed", unattended: { why: ["destructive", "unsent_text"], texts: [{ label: "Reply", left: null }] } });
+    });
+
+    it("a one-time-code or password field with a plain label never takes a task or var value; a secret var in the CLI still can", async () => {
+      const extra = [el("e10", "fill", "Enter it", "textbox", { form: 7, inputType: "text", autocomplete: "one-time-code" }), el("e11", "fill", "Key", "textbox", { form: 7, inputType: "text", autocomplete: "new-password" })];
+      for (const fromAssistant of [true, false]) {
+        const r = await mail("enter the code", [typeValue("Enter it", "v_num")], { ...AUTO, vars: { num: "123456" } }, { human: noDialog(), fromAssistant, state: { extra } }).runner.run();
+        expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: 'field "Enter it" is a credential and needs a value: pass --var key=value (or /var key=value in chat)' });
+      }
+      const gen2 = await mail("set a key", [gen("Key")], AUTO, { human: noDialog(), text: fakeText([says({ f1: "x" })]), state: { extra } }).runner.run();
+      expect(gen2.blocked?.kind).toBe("needs_credential");
+      const cli = mail("enter the code", [typeValue("Enter it", "v_otp"), finish], { vars: { otp: "123456" } }, { state: { extra } });
+      expect((await cli.runner.run()).outcome).toBe("done");
+      expect(fills(cli)).toEqual([{ op: "act", id: "e10", kind: "fill", text: "123456" }]);
+    });
+  });
+
+  it("26: an autonomous run with no person blocks at once on a sign-in wall; with a person the headed run pauses", async () => {
+    const script = byUrl({ [LOGIN.url]: { page_kind: "sign_in_wall", operation: "BLOCKED", blocked_reason: "needs_sign_in" } }, { wall: { wall: { choice: "signin_wall", confidence: 0.9 } } });
+    const hints: RunnerHints = { unattendedWall: "NO PERSON" };
+    const alone = setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { headed: true, confirm: "autonomous" }, { human: fakeHuman({ interactive: false }), hints });
+    const r = await alone.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_sign_in", hint: "NO PERSON" });
+    expect(alone.human.prompts).toEqual([]);
+    const cli = await setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { confirm: "autonomous" }).runner.run();
+    expect(cli.blocked?.hint).toBe("an autonomous run with no person at a TTY does not wait for a sign-in; sign in first (run with --headed on a TTY), then run again");
+    // The MCP Human of an autonomous run is never interactive; `attended` says that a person can sign in.
+    const person = setup("open https://app.example/login and read", { pages: { l: LOGIN }, start: "l" }, script, { headed: true, confirm: "autonomous" }, { human: fakeHuman({ interactive: false }), attended: true });
+    const r2 = await person.runner.run();
+    expect(person.human.prompts.filter((p) => p.startsWith("pause:"))).toHaveLength(1);
+    expect(r2.blocked?.hint).toContain("pause used up or timed out");
   });
 });
 
@@ -2749,5 +3251,1613 @@ describe("value requests", () => {
     expect(t.page.calls).toContainEqual({ op: "act", id: "e10", kind: "fill", text: "Ann Lee" });
     expect(r.steps[0]).toMatchObject({ value: "Ann Lee", value_conf: 0.9, result: "ok", jev_requests: 2 });
     expect(r.outcome).toBe("done");
+  });
+});
+
+describe("the option that Enter picks", () => {
+  const DASH_URL = "https://app.example/dash";
+  const ASK = "Ask AI: “Q3 Roadmap” press ↵ to chat";
+  const OPEN = "Q3 Roadmap press ↵ to open";
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const bar = (submitLabel = "Send message", pick = ASK): Observation => obs(DASH_URL, [
+    el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "Q3 Roadmap", multiline: true, form: 3 }),
+    el("e2", "click", "Send message", "button", { form: 3 }),
+    el("e14", "click", pick, "option", { selected: "true" }),
+    el("e15", "click", OPEN, "option", { selected: "false" }),
+  ], "Q3 Roadmap", { focus: { node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel, editable: true, value: "Q3 Roadmap", form: 3, multiline: true, enterOption: { node: 14, label: pick } } });
+  const sent = obs(DASH_URL, [el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "", multiline: true })], "Chat\nQ3 Roadmap");
+  const run = (first: (q: Questions) => PartialAnswers, page = bar(), human = fakeHuman({ interactive: true, confirm: [true] })) => {
+    let n = 0;
+    return setup("open https://app.example/dash and send Q3 Roadmap to the AI chat", { pages: { b: page, s: sent }, start: "b", transitions: (c) => (c.op === "press" || (c.op === "act" && c.id === "e14") ? "s" : undefined) },
+      (name, _state, q) => (name !== "step" ? {} : n++ === 0 ? first(q) : done), { maxSteps: 3 }, { human });
+  };
+  const enter = (enterP: number, clickP: number, click: string) => (q: Questions): PartialAnswers => ({
+    page_kind: "task_page",
+    operation: { choice: "PRESS_ENTER", confidence: enterP, probabilities: { PRESS_ENTER: enterP, CLICK: clickP, DONE: Number((1 - enterP - clickP).toFixed(2)) } },
+    click_target: { choice: idx(q, "click_target", click), confidence: 0.9, probabilities: { [idx(q, "click_target", click)]: 0.95 } },
+  });
+
+  it("the Enter label, the risk, and the dialog name the option that Enter picks", async () => {
+    const t = run(enter(0.9, 0.05, OPEN));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([{ op: "press", key: "Enter" }]);
+    expect(t.human.prompts).toEqual([`confirm:About to press Enter on "Q3 Roadmap | Send message | picks ${ASK}" on ${DASH_URL}. Type y to allow: `]);
+    expect(r.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "destructive", gate: "confirmed", result: "ok" });
+  });
+
+  it("an option with a destructive name makes Enter destructive in a form without a send button", async () => {
+    const t = run(enter(0.6, 0.05, OPEN), bar("", "Delete project"));
+    await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([]);
+    expect(t.log.lines.some((l) => /retry 1\/1: Enter confidence 0\.60 below 0\.7/.test(l))).toBe(true);
+    // Without the option, the same Enter is a submit: 0.60 passes its gate.
+    const plain = bar("");
+    const { enterOption: _pick, ...focus } = plain.focus!;
+    const t2 = run(enter(0.6, 0.05, OPEN), { ...plain, focus });
+    await t2.runner.run();
+    expect(t2.page.calls.filter((c) => c.op === "press")).toHaveLength(1);
+  });
+
+  it("Enter below its gate and a click on the option that Enter picks share the probability; the run clicks the option at the Enter's risk", async () => {
+    const t = run(enter(0.5, 0.4, ASK));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([{ op: "act", id: "e14", kind: "click" }]);
+    expect(t.log.lines.some((l) => l.includes(`Enter and a click on "${ASK}" have 0.88 together; clicking it`))).toBe(true);
+    expect(r.steps[0]).toMatchObject({ operation: "CLICK", risk: "destructive", gate: "confirmed", result: "ok" });
+    expect(t.human.prompts[0]).toContain(`click option "${ASK}"`);
+  });
+
+  it("Enter never turns into a click on another option: the run asks again and sends no key", async () => {
+    const t = run(enter(0.5, 0.4, OPEN));
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press" || c.op === "act")).toEqual([]);
+    expect(t.log.lines.some((l) => /retry 1\/1: Enter confidence 0\.50 below 0\.7/.test(l))).toBe(true);
+    expect(r.steps[0]?.jev_requests).toBe(2);
+  });
+});
+
+describe("the end check: DONE and BLOCKED on a page that changed during the request", () => {
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const blocked = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.6, probabilities: { BLOCKED: 0.6, WAIT: 0.4 } }, blocked_reason: "impossible" } as const;
+  /** A page whose `fresh()` answers from `answers` in order, then true. */
+  const changing = (answers: boolean[], first: PartialAnswers, second: PartialAnswers | ((q: Questions) => PartialAnswers)) => {
+    let n = 0;
+    const t = setup("open https://app.example/dash and open the project", { pages: { d: DASH }, start: "d" },
+      (name, _state, q) => (name !== "step" ? {} : n++ === 0 ? first : typeof second === "function" ? second(q) : second), { maxSteps: 2 });
+    const checks: unknown[] = [];
+    t.page.fresh = async (_o, action) => { checks.push(action); return answers.shift() ?? true; };
+    return { t, checks };
+  };
+
+  it("DONE on a changed page observes again and asks again; the second DONE ends the run", async () => {
+    const { t, checks } = changing([false], done, done);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(checks).toEqual([undefined]);
+    expect(t.oracle.requests.filter((x) => x.name === "step")).toHaveLength(2);
+    expect(t.page.observes).toBe(2);
+    expect(r.steps).toHaveLength(1);
+    expect(t.log.lines.some((l) => /step 1 DONE@0\.90 on a page that changed during the request; asking again/.test(l))).toBe(true);
+  });
+
+  it("the check runs once per step: a page that stays changed ends on the second decision", async () => {
+    const { t, checks } = changing([false, false, false], done, done);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(checks).toHaveLength(1);
+  });
+
+  it("BLOCKED on a changed page asks again, and the new decision runs", async () => {
+    const { t } = changing([false], blocked, (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Licious"), confidence: 0.9 } }));
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ operation: "CLICK", result: "ok", jev_requests: 2 });
+    expect(t.page.calls.filter((c) => c.op === "act")[0]).toEqual({ op: "act", id: "e1", kind: "click" });
+  });
+
+  it("a page that did not change ends at once with one request", async () => {
+    const { t, checks } = changing([], blocked, done);
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("impossible");
+    expect(checks).toEqual([undefined]);
+    expect(t.oracle.requests.filter((x) => x.name === "step")).toHaveLength(1);
+  });
+});
+
+describe("WAIT polls until the page holds still", () => {
+  const LIST = "https://app.example/list";
+  const before = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nOld row");
+  const spinner = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nLoading", { busy: true });
+  const loading = obs(LIST, [el("e1", "click", "Old row", "button")], "rows\nLoading");
+  const results = obs(LIST, [el("e2", "click", "Q3 roadmap review", "button")], "rows\nQ3 roadmap review");
+  const DONE_ = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } as const;
+  const NOT_YET = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" } as const;
+
+  /** WAIT on `before`; each observe after it returns the next page of `sequence`. The step after the wait reads its page. */
+  const waitThenRead = (sequence: Observation[]) => {
+    let n = 0;
+    const t = setup("open https://app.example/list and open Q3 roadmap review", { pages: { b: before }, start: "b" },
+      (name, state) => (name !== "step" ? {} : n++ === 0 ? { page_kind: "task_page", operation: "WAIT" } : (state as { page: { text: string } }).page.text.includes("Q3") ? DONE_ : NOT_YET), { maxSteps: 3 });
+    const observe = t.page.observe.bind(t.page);
+    t.page.observe = async () => { await observe(); return sequence.length > 1 ? sequence.shift()! : sequence[0]!; };
+    return t;
+  };
+
+  it("a first change that shows a busy marker does not end the wait: the next step sees the results", async () => {
+    const t = waitThenRead([before, spinner, results, results]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.observes).toBe(4);
+  });
+
+  it("a change without a busy marker ends the wait when one more observation shows the same page", async () => {
+    const t = waitThenRead([before, loading, results, results]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.observes).toBe(4);
+  });
+});
+
+describe("fills that keep a field's text, refused fills, and a step that a submit click opened", () => {
+  const URL = "https://app.example/doc";
+  const DOC = "Release 4.2 notes\nThe QA team tested it.";
+  const LINE = "Reviewed by QA";
+  const TASK = 'add the line "Reviewed by QA" at the end of the document and save it';
+  const docPage = (value: string, extra: Action[] = []) => obs(URL, [
+    el("e1", "fill", "Document", "textbox", { node: 1, value, multiline: true, form: null }),
+    el("e2", "click", "Save", "button", { node: 2, form: null }),
+    ...extra,
+  ], `Notes\n${value}`, { doc: 5 });
+  const SAVED = obs(URL, [el("e1", "click", "Edit", "button", { node: 9 })], "Notes\nSaved", { doc: 5 });
+  type Decide = (q: Questions, state: { recent_actions: { action: string; kind: string; text: string | null }[]; retry_reason?: string }) => PartialAnswers;
+  /** Step requests take the next decision; the last one repeats. */
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as never) : {});
+  };
+  const fill = (mode: string | null, conf = 0.97, value: PartialAnswers[string] = { choice: "s1", confidence: 0.9 }): Decide => (q) => ({
+    page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Document"), confidence: 0.9 }, type_text_value: value,
+    ...(mode !== null ? { type_text_mode: { choice: mode, confidence: conf } } : {}),
+  });
+  const click = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const wait: Decide = () => ({ page_kind: "task_page", operation: "WAIT" });
+  const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
+  const appended = (before: string, text: string) => ({ mode: "append" as const, shape: "document" as const, before, after: `${before}\n${text}` });
+  const steps = (t: { oracle: { requests: { name: string; state: unknown; questions: Questions }[] } }) => t.oracle.requests.filter((r) => r.name === "step");
+  const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
+  const fills = (t: { page: { calls: { op: string; kind?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "fill");
+
+  /** The document page: a fill that runs moves to `after` (the document with the line), Save moves to SAVED. */
+  function doc(decide: Decide[], edits: PageScript["edits"] = (c) => appended(DOC, c.text ?? ""), over: Partial<RunConfig> = {}, opts: SetupOpts = {}) {
+    return setup(TASK, { pages: { d: docPage(DOC), after: docPage(`${DOC}\n${LINE}`), saved: SAVED }, start: "d", edits,
+      transitions: (c) => (c.op === "act" && c.kind === "fill" ? "after" : c.op === "act" && c.id === "e2" ? "saved" : undefined) }, seq(...decide), { url: URL, ...over }, opts);
+  }
+
+  it("a field that holds text the run did not type: the mode head, an append plan, and history 'fill (append)'", async () => {
+    const t = doc([fill("append"), click("Save"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const first = steps(t)[0];
+    const key = idx(first?.questions ?? {}, "type_text_target", "Document");
+    expect(Object.keys(first?.questions ?? {})).toContain(`mode_${key}`);
+    expect(((first?.questions[`value_${key}`] as ChoiceQuestion).instructions as { question: string }).question).toMatch(/^Which offered value is the new text/);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "append" } }]);
+    expect(stepStates(t)[1]?.recent_actions[0]).toMatchObject({ action: "Document", kind: "fill (append)", text: LINE });
+    expect(t.log.lines.some((l) => /step 1 edit append 0\.97 for \[e1\]/.test(l))).toBe(true);
+    // After Save the page has no held field: no mode head.
+    expect(Object.keys(steps(t)[2]?.questions ?? {}).some((k) => k.startsWith("mode_"))).toBe(false);
+  });
+
+  it("the var fallback on a held field keeps the mode of the first answer; its value requests carry no mode head", async () => {
+    const vars = { note: LINE };
+    const script = seq(fill("append", 0.97, { choice: "generate", confidence: 0.45, probabilities: { generate: 0.52, v_note: 0.45, none: 0.03 } }), click("Save"), finish);
+    const oracle = (name: string, state: unknown, q: Questions): PartialAnswers =>
+      (name === "value" ? { type_text_value: { choice: "v_note", confidence: 0.85, probabilities: { v_note: 0.92, none: 0.08 } } } : script(name, state, q));
+    const t = setup(TASK, { pages: { d: docPage(DOC), after: docPage(`${DOC}\n${LINE}`), saved: SAVED }, start: "d", edits: (c) => appended(DOC, c.text ?? ""),
+      transitions: (c) => (c.op === "act" && c.kind === "fill" ? "after" : c.op === "act" && c.id === "e2" ? "saved" : undefined) }, oracle, { url: URL, vars }, { text: fakeText(), fromAssistant: true, human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const values = t.oracle.requests.filter((x) => x.name === "value");
+    expect(values).toHaveLength(1);
+    expect(Object.keys(values[0]?.questions ?? {})).toEqual(["value_1"]);
+    expect(criteriaKeys(values[0]?.questions["value_1"])).toEqual(["v_note", "none"]);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "append" } }]);
+    expect(t.log.lines).toContain("INFO step 1 var fallback: [1] answered generate@0.45; the vars alone -> v_note@0.85");
+  });
+
+  it("a mode below 0.6 asks again one time, then blocks with the hint; nothing is typed", async () => {
+    const t = doc([fill("append", 0.55)]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain('low_mode append 0.55 < 0.6; the task must say if the new text replaces the text of "Document" or goes at its end');
+    expect(steps(t)[1]?.state).toMatchObject({ retry_reason: expect.stringContaining("low_mode append 0.55") });
+    expect(fills(t)).toEqual([]);
+    // A missing mode answer is a low one: there is no fallback to replace.
+    const m = doc([(q) => ({ ...fill(null)(q, { recent_actions: [] }), type_text_mode: { choice: "prepend", confidence: 0.99 } })]);
+    expect((await m.runner.run()).blocked?.hint).toContain("low_mode missing < 0.6");
+    expect(fills(m)).toEqual([]);
+  });
+
+  it("a replace of held text needs 0.8: 0.79 blocks, 0.85 replaces", async () => {
+    const low = doc([fill("replace_all", 0.79)]);
+    expect((await low.runner.run()).blocked?.hint).toContain("low_mode replace_all 0.79 < 0.8");
+    expect(fills(low)).toEqual([]);
+    const ok = doc([fill("replace_all", 0.85), click("Save"), finish], (c) => ({ mode: "replace", shape: "document", before: DOC, after: c.text ?? "" }));
+    expect((await ok.runner.run()).outcome).toBe("done");
+    expect(fills(ok)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE, edit: { mode: "replace" } }]);
+    expect(stepStates(ok)[1]?.recent_actions[0]?.kind).toBe("fill");
+  });
+
+  it("a value of none on a held field blocks needs_credential, not the mode gate", async () => {
+    const t = doc([fill("append", 0.97, "none")]);
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("needs_credential");
+    expect(fills(t)).toEqual([]);
+  });
+
+  it("a field whose text is all this run's own gets no mode head: a new text replaces it, as before", async () => {
+    const empty = docPage("");
+    const t = setup(TASK, { pages: { e: empty, own: docPage(LINE), saved: SAVED }, start: "e", transitions: (c) => (c.op === "act" && c.kind === "fill" ? "own" : c.op === "act" && c.id === "e2" ? "saved" : undefined) },
+      seq(fill(null), fill(null), click("Save"), finish), { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    for (const s of steps(t)) expect(Object.keys(s.questions).some((k) => k.startsWith("mode_"))).toBe(false);
+    expect(fills(t)).toEqual([{ op: "act", id: "e1", kind: "fill", text: LINE }, { op: "act", id: "e1", kind: "fill", text: LINE }]);
+  });
+
+  it("an append that lost a line of the field blocks before any click", async () => {
+    const t = doc([fill("append"), click("Save"), finish], (c) => ({ mode: "append", shape: "document", before: DOC, after: `Release 4.2 notes\n${c.text ?? ""}` }));
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.hint).toBe('the fill of "Document" did not go as planned: the field lost 1 line of its text, such as "The QA team tested it.". Check the field before any save or send');
+    expect(t.page.calls.some((c) => c.op === "act" && c.kind === "click")).toBe(false);
+    const shown = doc([fill("append"), click("Save"), finish], () => ({ mode: "append", shape: "document", before: DOC, after: DOC }));
+    expect((await shown.runner.run()).blocked?.hint).toContain("the field does not show the typed text");
+  });
+
+  it("an empty field that the page replaced instead of an append is not checked as an append", async () => {
+    const t = doc([fill("append"), click("Save"), finish], (c) => ({ mode: "replace", shape: "document", before: "", after: c.text ?? "" }));
+    expect((await t.runner.run()).outcome).toBe("done");
+    expect(stepStates(t)[1]?.recent_actions[0]?.kind).toBe("fill");
+  });
+
+  it("the same append again is not typed: the field still ends with the text that this run added", async () => {
+    const t = doc([fill("append"), fill("append"), click("Save"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(fills(t)).toHaveLength(1);
+    expect(r.steps[1]).toMatchObject({ operation: "TYPE_TEXT", result: "skipped", error: "already added" });
+    expect(r.steps[1]?.gate).toBe('"Document" already ends with this text, which this run added; it is not typed again');
+    expect(stepStates(t)[2]?.recent_actions[1]).toMatchObject({ kind: "fill (already added)", text: LINE, page_changed: false });
+  });
+
+  it("a refused fill observes and decides one time more with the reason, then blocks with it; nothing is typed", async () => {
+    const why = "the fill did not start: focus is on input.slate-shadow-input, not on the field";
+    const t = doc([fill("append")], () => new EditRefused(why));
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked).toMatchObject({ kind: "ambiguous", hint: `the fill of "Document" was refused: ${why}` });
+    expect(steps(t)).toHaveLength(2);
+    expect(steps(t)[1]?.state).toMatchObject({ retry_reason: `TYPE_TEXT on "Document" was not executed: ${why}. Check the current page and choose the next useful action.` });
+    expect(fills(t)).toEqual([]);
+    expect(t.log.lines.some((l) => l.includes("page keeps changing"))).toBe(false);
+  });
+
+  it("a fill that changed the page before its refusal blocks at once, and its text gates the next run (plugin)", async () => {
+    const t = doc([fill("append")], () => new EditRefused("the fill stopped after a new line: the caret is not in a new empty line inside the field", true), {}, { fromAssistant: true });
+    const r = await t.runner.run();
+    expect(r.blocked?.hint).toBe('the fill of "Document" did not go as planned: the fill stopped after a new line: the caret is not in a new empty line inside the field. Check the field before any save or send');
+    expect(steps(t)).toHaveLength(1);
+    expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: LINE, pending: true }]);
+  });
+
+  it("autonomous runs: an append has no replaced audit, a replace_all has one, and a fill that changed the page before its refusal keeps it", async () => {
+    const auto = { confirm: "autonomous" } as const;
+    const add = await doc([fill("append"), finish], undefined, auto).runner.run();
+    expect(add.outcome).toBe("done");
+    expect(add.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "ok" });
+    expect(add.steps[0]?.unattended).toBeUndefined();
+    const all = await doc([fill("replace_all"), finish], (c) => ({ mode: "replace", shape: "document", before: DOC, after: c.text ?? "" }), auto).runner.run();
+    expect(all.steps[0]?.unattended).toMatchObject({ why: ["replaced"], replaced_chars: [...DOC].length });
+    const lost = await doc([fill("replace_all")], () => new EditRefused("the page changed during the fill", true), auto).runner.run();
+    expect(lost.outcome).toBe("blocked");
+    expect(lost.steps[0]?.unattended).toMatchObject({ why: ["replaced"], replaced_chars: [...DOC].length });
+    // A refusal before any change: the fill did not run, so the next decision gets neither its gate nor its audit.
+    let n = 0;
+    const once = await doc([fill("replace_all"), wait, finish], () => (n++ === 0 ? new EditRefused("the fill did not start: focus is not on the field") : undefined), auto).runner.run();
+    expect(once.steps[0]).toMatchObject({ operation: "WAIT", gate: "ok" });
+    expect(once.steps[0]?.unattended).toBeUndefined();
+  });
+
+  it("an append stays only when the field shows the typed text (plugin): else its entry is pending", async () => {
+    const kept = doc([fill("append"), giveUp], () => undefined, {}, { fromAssistant: true });
+    await kept.runner.run();
+    expect(kept.runner.unsentText()).toEqual([expect.objectContaining({ node: 1, text: LINE })]);
+    expect(kept.runner.unsentText()[0]?.pending).toBeUndefined();
+    const lost = setup(TASK, { pages: { d: docPage(DOC) }, start: "d" }, seq(fill("append"), giveUp), { url: URL }, { fromAssistant: true });
+    await lost.runner.run();
+    expect(lost.runner.unsentText()).toMatchObject([{ node: 1, text: LINE, pending: true }]);
+  });
+
+  describe("a step that a submit click opened", () => {
+    const EDIT = obs(URL, [el("e1", "click", "Cancel", "button", { node: 1 }), el("e2", "click", "Save", "button", { node: 2, expanded: "false" })], "Release notes", { doc: 5 });
+    const POPOVER = obs(URL, [
+      el("e1", "click", "Cancel", "button", { node: 1 }), el("e2", "click", "Save", "button", { node: 2, expanded: "true" }),
+      el("e3", "fill", "e.g., Updated project requirements...", "textbox", { node: 33, value: "", multiline: true, form: 1 }),
+      el("e4", "click", "Cancel", "button", { node: 34, form: 1 }), el("e5", "click", "Confirm", "button", { node: 35, form: 1 }),
+    ], "Release notes\nSave Changes\nCancel\nConfirm", { doc: 5 });
+    const popover = (decide: Decide[], over: Partial<RunConfig> = {}) => setup("edit the notes and save them", { pages: { e: EDIT, p: POPOVER, s: SAVED }, start: "e",
+      transitions: (c) => (c.op === "act" && c.id === "e2" ? "p" : c.op === "act" && c.id === "e5" ? "s" : undefined) }, seq(...decide), { url: URL, ...over });
+
+    it("DONE while the popup of a Save click is open with Confirm is refused: the re-ask has no DONE, Confirm, then DONE", async () => {
+      const t = popover([click("Save"), finish, click("Confirm"), finish]);
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e2", "e5"]);
+      const reask = steps(t)[2];
+      expect(criteriaKeys(reask?.questions["operation"])).not.toContain("DONE");
+      expect((reask?.state as { retry_reason: string }).retry_reason).toContain('DONE was not executed: the click on "Save" opened a step that is still open, with "Confirm". The click did not finish the action');
+      expect(t.log.lines.some((l) => l.includes('"Save" opened a step with "Confirm"'))).toBe(true);
+      expect(criteriaKeys(steps(t)[3]?.questions["operation"])).toContain("DONE");
+    });
+
+    it("early decisions: a popup that shows only on the settled page is still the step that the click opened", async () => {
+      const t = setup("edit the notes and save them", { pages: { e: EDIT, p: POPOVER, s: SAVED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e5" ? "s" : undefined), late: (c) => (c.op === "act" && c.id === "e2" ? "p" : undefined) },
+      seq(click("Save"), finish, finish, click("Confirm"), finish), { url: URL }, { earlyDecisions: true });
+      const r = await t.runner.run();
+      expect(t.page.earlies).toContain(true);
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e2", "e5"]);
+      expect(t.log.lines.some((l) => l.includes('step 1 "Save" opened a step with "Confirm"'))).toBe(true);
+      expect(steps(t).some((x) => ((x.state as { retry_reason?: string }).retry_reason ?? "").includes('the click on "Save" opened a step that is still open'))).toBe(true);
+    });
+
+    it("a step that stays open blocks after two refused DONE answers, with a clear hint", async () => {
+      const t = popover([click("Save"), finish, wait, finish, wait, finish]);
+      const r = await t.runner.run();
+      expect(r.outcome).toBe("blocked");
+      expect(r.blocked?.kind).toBe("ambiguous");
+      expect(r.blocked?.hint).toBe('the click on "Save" opened a step that is still open, with "Confirm". The task is not done while that step is open; check the page');
+      expect(t.page.calls.filter((c) => c.op === "act" && c.id === "e5")).toEqual([]);
+    });
+
+    it("a new dialog with a cancel control after a submit click counts too; one without it, or after a navigational click, does not", async () => {
+      const plain = { ...EDIT, actions: EDIT.actions.map((a) => (a.id === "e2" ? { ...a, expanded: undefined } : a)) } as Observation;
+      const dialog = (labels: string[]) => obs(URL, [...plain.actions.filter((a) => a.kind !== "wait"), ...labels.map((l, i) => el(`e${i + 3}`, "click", l, "button", { node: 40 + i, form: 4 }))], "dialog", { doc: 5 });
+      const run = async (start: Observation, next: Observation, label: string) => {
+        const t = setup("save the notes", { pages: { a: start, b: next }, start: "a", transitions: (c) => (c.op === "act" && c.kind === "click" ? "b" : undefined) }, seq(click(label), finish), { url: URL });
+        return t.runner.run();
+      };
+      expect((await run(plain, dialog(["Cancel", "Delete"]), "Save")).steps[1]?.result).not.toBe("done");
+      expect((await run(plain, dialog(["Close", "Save another"]), "Save")).outcome).toBe("done");
+      const nav = obs(URL, [el("e1", "click", "Options", "button", { node: 1, expanded: "false" })], "x", { doc: 5 });
+      const menu = obs(URL, [el("e1", "click", "Options", "button", { node: 1, expanded: "true" }), el("e2", "click", "Save as PDF", "menuitem", { node: 50 })], "x", { doc: 5 });
+      expect((await run(nav, menu, "Options")).outcome).toBe("done");
+    });
+  });
+});
+
+describe("chip (token) fields", () => {
+  const UPLOAD = "https://app.example/upload";
+  const DOC = 1727000000002.5;
+  const FIRST = "Search org members or type a name...";
+  const SUBMIT = "Submit & Finalize (1 file)";
+  const CLOSED: Popup = { open: false, text: "", picks: [], busy: false };
+  type StepState = { retry_reason?: string; recent_actions: { action: string; kind: string; text: string | null; page_changed: boolean | null }[] };
+  type Decide = (q: Questions, state: StepState) => PartialAnswers;
+  interface ChipState {
+    draft: string; title: string; chips: string[]; focus: number | null;
+    /** The popup that a fill of the chip field opens, and the popup that shows now. */
+    popup: Popup | null; open: Popup | null;
+    /** The field takes a script Enter (React widgets). False: it reads only trusted keys. */
+    scriptEnter: boolean;
+    /** Enter adds the first option of an open list, not the typed text (react-select). */
+    enterPicks?: boolean;
+    /** The draft goes away when another control takes focus (react-select). */
+    clearOnBlur?: boolean;
+    multi?: boolean;
+    /** The form of the submit button. */
+    submitForm?: number;
+    /** The popup of the chip field stays open when Title takes focus, and it lies next to Title too. */
+    lingers?: boolean;
+    /** The options are role=option in a list with no form, and the first one is highlighted: Enter picks it (focus.enterOption). */
+    highlight?: boolean;
+    submitted: string | null;
+  }
+
+  /** The upload form: the chip field (node 1, named by its placeholder until it has a chip), Title, Submit, a Help link, and the popup options. */
+  function chipPage(s: ChipState): Observation {
+    const pop = s.focus === 1 ? s.open : null;
+    const token: TokenFacts = {
+      items: [[90, "Meeting Participants (Optional)", 0], ...s.chips.map((c, i): [number, string, number] => [100 + i, `${c} Remove participant`, 2])],
+      chips: s.chips.map((c) => `${c} Remove participant`),
+      ...(s.multi ? { multi: true as const } : {}),
+      ...(pop?.open ? { popup: true as const } : {}),
+    };
+    const actions = [
+      el("e1", "fill", s.chips.length === 0 ? FIRST : "textbox", "textbox", { node: 1, value: s.draft, form: 3, inputType: "text", token }),
+      el("e2", "fill", "Title (Optional)", "textbox", { node: 2, value: s.title, form: 3, inputType: "text",
+        token: { items: [[91, "Title (Optional)", 0]], chips: [], ...(s.lingers && s.focus === 2 && s.open?.open ? { popup: true as const } : {}) } }),
+      el("e3", "click", "Open Title (Optional)", "textbox", { node: 2, form: 3 }),
+      el("e4", "click", SUBMIT, "button", { node: 4, form: s.submitForm ?? 3 }),
+      el("e5", "click", "Help", "link", { node: 5, form: null }),
+      ...(pop?.picks ?? []).map((label, i) => el(`e${6 + i}`, "click", label, s.highlight ? "option" : "button", { node: 60 + i, form: s.highlight ? null : 9 })),
+    ];
+    const f = actions.find((a) => a.kind === "fill" && a.node === s.focus);
+    const values = ([[1, s.draft], [2, s.title]] as [number, string][]).filter(([, v]) => v.trim() !== "");
+    const text = ["Upload Source", ...s.chips, pop?.text ?? "", s.submitted !== null ? `Submitted: ${s.submitted}` : ""].filter(Boolean).join("\n");
+    return obs(UPLOAD, actions, text, {
+      doc: DOC, filled: values.map(([n]) => n), texts: values,
+      focus: f ? {
+        node: f.node as number, label: f.label, role: "textbox", submitLabel: SUBMIT, editable: true, value: f.value ?? "", form: 3, submitDefault: SUBMIT, multiline: false,
+        ...(s.highlight && f.node === 1 && pop?.picks[0] ? { enterOption: { node: 60, label: pop.picks[0] } } : {}),
+      } : null,
+    });
+  }
+
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as StepState) : {});
+  };
+  const fill = (label: string, id: string): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.8 }, type_text_value: { choice: id, confidence: 0.9 } });
+  const click = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const enter: Decide = () => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.85 } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const VARS = { a: "ann@example.com", b: "bob@example.com", title: "Weekly sync" };
+
+  function chips(steps: Decide[], state: Partial<ChipState> = {}, over: Partial<RunConfig> = {}, opts: SetupOpts & { popups?: (n: number) => Popup } = {}) {
+    const s: ChipState = { draft: "", title: "", chips: [], focus: null, popup: null, open: null, scriptEnter: true, submitted: null, ...state };
+    let reads = 0;
+    const add = (text: string): void => { s.chips.push(text); s.draft = ""; s.open = null; };
+    const t = setup("add the participants, set the title, then submit", {
+      pages: { u: chipPage(s) }, start: "u",
+      popup: (a, _current, focus) => {
+        if (focus && a.node !== null) s.focus = a.node;
+        if (opts.popups) return opts.popups(reads++);
+        return (s.focus === 1 ? s.open : null) ?? CLOSED;
+      },
+      commit: (a) => {
+        if (s.focus !== a.node) return { skipped: "focus" };
+        if (!s.scriptEnter || s.draft.trim() === "") return { prevented: false };
+        add(s.enterPicks && s.open?.picks[0] ? s.open.picks[0] : s.draft);
+        return { prevented: true };
+      },
+    }, seq(...steps), { url: UPLOAD, vars: VARS, maxSteps: 10, ...over }, opts);
+    t.page.observe = async () => { t.page.observes += 1; return chipPage(s); };
+    const act = t.page.act.bind(t.page);
+    t.page.act = async (a, o, text) => {
+      await act(a, o, text);
+      if (s.clearOnBlur && s.focus === 1 && a.node !== 1) s.draft = "";
+      if (a.kind === "fill" && a.node === 1) { s.draft = text ?? ""; s.focus = 1; s.open = s.popup; }
+      else if (a.node === 2) { if (a.kind === "fill") s.title = text ?? ""; s.focus = 2; }
+      else if (a.node === 4) { s.submitted = [...s.chips, s.title].join(" | "); s.focus = null; }
+      else if (a.node === 5) s.focus = null;
+      else if (a.node !== null && a.node >= 60) { add(a.label); s.focus = 1; }
+    };
+    t.page.press = async (key) => {
+      t.page.calls.push({ op: "press", key });
+      if (s.focus === 1 && s.draft.trim() !== "") add(s.enterPicks && s.open?.picks[0] ? s.open.picks[0] : s.draft);
+      else if (s.focus === 2) s.submitted = [...s.chips, s.title].join(" | ");
+    };
+    return { ...t, state: s };
+  }
+  const ops = (t: { page: { calls: { op: string; id?: string; kind?: string; text?: string }[] } }) => t.page.calls.filter((c) => c.op !== "navigate")
+    .map((c) => (c.op === "act" ? `${c.kind} ${c.id}${c.text !== undefined ? ` ${c.text}` : ""}` : c.op === "commit" ? `commit ${c.id}` : c.op));
+  const stepReqs = (t: { oracle: { requests: { name: string; state: unknown; questions: Questions }[] } }) =>
+    t.oracle.requests.filter((r) => r.name === "step").map((r) => ({ state: r.state as StepState, questions: r.questions }));
+  const NO_MEMBERS: Popup = { open: true, text: "No members found", picks: [], busy: false };
+  const MEMBER = "AL Ann Lee ann.lee@parallelloop.ai";
+
+  it("a field that added a value as a chip after Enter is learned; the next fill adds its value with a script Enter before Title", async () => {
+    const t = chips([fill(FIRST, "v_a"), enter, fill("textbox", "v_b"), fill("Title (Optional)", "v_title"), fill("Title (Optional)", "v_title"), click(SUBMIT), finish], { popup: NO_MEMBERS });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "press", "fill e1 bob@example.com", "commit e1", "fill e2 Weekly sync", "click e4"]);
+    expect(t.state.submitted).toBe("ann@example.com | bob@example.com | Weekly sync");
+    expect(t.log.lines.some((l) => /chip field: "Search org members or type a name\.\.\." added a value as a chip/.test(l))).toBe(true);
+    // The script Enter is in the history that Jev sees. The page changed, so the step asks again with no retry reason.
+    const after = stepReqs(t)[4]!.state;
+    expect(after.recent_actions.at(-1)).toEqual({ action: 'Enter in "textbox"', kind: "key", text: "bob@example.com", page_changed: true });
+    expect(after.retry_reason).toBeUndefined();
+    expect(r.steps.map((s) => `${s.action}:${s.result}`)).toEqual(["fill:ok", "press_key:ok", "fill:ok", "fill:ok", "click:ok", "none:done"]);
+    // The field had no evidence of a chip field yet: Jev's first Enter was a trusted Enter with the submit risk.
+    expect(r.steps[1]).toMatchObject({ risk: "submit" });
+  });
+
+  it("with options in the popup, code never presses Enter: a hint bans the fill for the re-ask, and Jev clicks the member", async () => {
+    const t = chips([fill("textbox", "v_n"), fill("Title (Optional)", "v_title"), click(MEMBER), fill("Title (Optional)", "v_title"), click(SUBMIT), finish],
+      { multi: true, chips: ["bob@example.com"], popup: { open: true, text: MEMBER, picks: [MEMBER], busy: false } }, { vars: { ...VARS, n: "Ann Lee" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 Ann Lee", "click e6", "fill e2 Weekly sync", "click e4"]);
+    expect(t.state.submitted).toBe(`bob@example.com | ${MEMBER} | Weekly sync`);
+    const reask = stepReqs(t)[2]!;
+    expect(reask.state.retry_reason).toContain('"textbox" holds "Ann Lee", which is not added yet. If it belongs there, click its matching suggestion or press Enter in that field');
+    expect(() => idx(reask.questions, "type_text_target", "Title (Optional)")).toThrow();
+  });
+
+  it("weak evidence (chips that the run did not add): one hint and no ban; the second submit goes on", async () => {
+    const t = chips([fill("textbox", "v_q"), click(SUBMIT), click(SUBMIT), finish], { chips: ["is:open"], scriptEnter: false }, { vars: { q: "login bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 login bug", "click e4"]);
+    expect(stepReqs(t)[2]!.state.retry_reason).toContain('"textbox" holds "login bug", which is not added yet');
+    expect(idx(stepReqs(t)[2]!.questions, "click_target", SUBMIT)).toBeTruthy();
+    expect(t.log.lines.filter((l) => /chip gate \(weak\)/.test(l))).toHaveLength(1);
+  });
+
+  it("a strong value that the field does not take: the hint bans the submit, and DONE then blocks; the form never goes out", async () => {
+    const t = chips([fill("textbox", "v_q"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], scriptEnter: false }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked).toMatchObject({ kind: "ambiguous", hint: 'typed value not added: "textbox" holds "bug", which is not added yet. The form is not sent without it' });
+    expect(ops(t)).toEqual(["fill e1 bug", "commit e1"]);
+    expect(t.state.submitted).toBeNull();
+    expect(() => idx(stepReqs(t)[2]!.questions, "click_target", SUBMIT)).toThrow();
+  });
+
+  it("a lost value (the page cleared the draft on blur) still gates the submit, then blocks", async () => {
+    const t = chips([fill("textbox", "v_q"), click("Help"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], clearOnBlur: true }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(stepReqs(t)[3]!.state.retry_reason).toContain('"textbox" lost "bug": the field is empty, and no chip holds it. If it belongs there, type it again, then click its matching suggestion or press Enter in that field');
+    expect(r.blocked?.hint).toContain('typed value not added: "textbox" lost "bug"');
+    expect(t.state.submitted).toBeNull();
+  });
+
+  it("a fill that replaces a value not added yet adds that value first; a submit adds the last one", async () => {
+    const t = chips([fill("textbox", "v_a"), fill("textbox", "v_b"), fill("textbox", "v_b"), click(SUBMIT), click(SUBMIT), finish], { multi: true, chips: ["carol@example.com"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "commit e1", "fill e1 bob@example.com", "commit e1", "click e4"]);
+    expect(t.state.submitted).toBe("carol@example.com | ann@example.com | bob@example.com | ");
+  });
+
+  it("a popup that the chip field showed before a fill of Title, and that lies next to Title after it, did not open with that fill", async () => {
+    const t = chips([fill(FIRST, "v_a"), enter, fill("Title (Optional)", "v_title"), click(SUBMIT), finish], { popup: NO_MEMBERS, lingers: true });
+    // The page keeps the popup open after the Enter (a late search result), so it is open when Title takes focus.
+    const press = t.page.press.bind(t.page);
+    t.page.press = async (key, o) => { await press(key, o); t.state.open = NO_MEMBERS; };
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 ann@example.com", "press", "fill e2 Weekly sync", "click e4"]);
+    expect(t.log.lines.some((l) => /chip gate/.test(l))).toBe(false);
+  });
+
+  it("a draft that this run did not type and a secret never gate; a submit of another form does not, DONE does", async () => {
+    const preset = chips([click(SUBMIT), finish], { multi: true, chips: ["x"], draft: "carol@example.com", focus: 1 });
+    expect((await preset.runner.run()).outcome).toBe("done");
+    expect(ops(preset)).toEqual(["click e4"]);
+    const other = chips([fill("textbox", "v_b"), click(SUBMIT), finish], { multi: true, chips: ["x"], submitForm: 4 });
+    expect((await other.runner.run()).outcome).toBe("done");
+    expect(ops(other)).toEqual(["fill e1 bob@example.com", "click e4", "commit e1"]);
+    const secret = chips([fill("textbox", "v_token"), click(SUBMIT), finish], { multi: true, chips: ["x"] }, { vars: { token: "s3cr3t-value" } });
+    expect((await secret.runner.run()).outcome).toBe("done");
+    expect(ops(secret)).toEqual(["fill e1 s3cr3t-value", "click e4"]);
+  });
+
+  it("Jev's Enter in a strong chip field is a script Enter with the data_entry risk; a field that ignores it gets the trusted Enter", async () => {
+    const script = chips([fill("textbox", "v_b"), enter, finish], { multi: true, chips: ["x"] }, { confirm: "always" });
+    const r = await script.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(script)).toEqual(["fill e1 bob@example.com", "commit e1"]);
+    expect(r.steps[1]).toMatchObject({ operation: "PRESS_KEY", action: "press_key", value: "Enter", risk: "data_entry", gate: "ok 0.85 (data_entry) script Enter added", result: "ok" });
+    expect(stepReqs(script)[2]!.state.recent_actions.at(-1)).toEqual({ action: "PRESS_ENTER", kind: "key", text: null, page_changed: true });
+    // A search box with filter chips: the script Enter does nothing, so Jev's Enter reaches the page as a trusted key.
+    const trusted = chips([fill("textbox", "v_b"), enter, finish], { multi: true, chips: ["x"], scriptEnter: false });
+    const r2 = await trusted.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(ops(trusted)).toEqual(["fill e1 bob@example.com", "commit e1", "press"]);
+    expect(r2.steps[1]).toMatchObject({ risk: "submit", result: "ok" });
+    expect(trusted.state.chips).toEqual(["x", "bob@example.com"]);
+  });
+
+  it("Jev's Enter with options open that adds another value than the typed one blocks", async () => {
+    const t = chips([fill("textbox", "v_q"), enter, finish],
+      { multi: true, chips: ["frontend"], enterPicks: true, popup: { open: true, text: "debug\nCreate \"bug\"", picks: ["debug", "Create \"bug\""], busy: false } }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toMatch(/^Enter in "textbox" added "debug[^"]*", not "bug"$/);
+  });
+
+  it("a click that picks the pending value does not wait for it: a 'Create' option, and the option that Enter picks", async () => {
+    // 'Create "bug"' has the submit risk ("create"). Its list has no form, so every form is in scope, and the entry of
+    // "bug" gated the click that adds it.
+    const create = chips([fill("textbox", "v_q"), click('Create "bug"'), finish],
+      { multi: true, chips: ["frontend"], highlight: true, popup: { open: true, text: 'Create "bug"\ndebug', picks: ['Create "bug"', "debug"], busy: false } }, { vars: { q: "bug" } });
+    expect((await create.runner.run()).outcome).toBe("done");
+    expect(ops(create)).toEqual(["fill e1 bug", "click e6"]);
+    expect(create.log.lines.some((l) => /chip gate/.test(l))).toBe(false);
+    // Enter with a highlighted option: the trusted Enter, whose label names the option. No script Enter.
+    const member: Partial<ChipState> = { multi: true, chips: ["x"], highlight: true, enterPicks: true, popup: { open: true, text: MEMBER, picks: [MEMBER], busy: false } };
+    const vars = { vars: { ...VARS, n: "Ann Lee" } };
+    const pick = chips([fill("textbox", "v_n"), enter, finish], member, vars);
+    const r = await pick.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(pick)).toEqual(["fill e1 Ann Lee", "press"]);
+    expect(r.steps[1]).toMatchObject({ risk: "submit", result: "ok" });
+    expect(pick.state.chips).toEqual(["x", MEMBER]);
+    // Enter below its gate becomes a click on the option that it picks, at the Enter's submit risk. The entry of "Ann
+    // Lee" does not gate that click.
+    const low: Decide = (q) => ({
+      page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.45, probabilities: { PRESS_ENTER: 0.45, CLICK: 0.45, DONE: 0.1 } },
+      click_target: { choice: idx(q, "click_target", MEMBER), confidence: 0.9, probabilities: { [idx(q, "click_target", MEMBER)]: 0.95 } },
+    });
+    const clicked = chips([fill("textbox", "v_n"), low, finish], member, vars);
+    const r2 = await clicked.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(ops(clicked)).toEqual(["fill e1 Ann Lee", "click e6"]);
+    expect(r2.steps[1]).toMatchObject({ operation: "CLICK", risk: "submit", result: "ok" });
+    // A submit button of the form of the field still waits for the value.
+    const submit = chips([fill("textbox", "v_q"), click(SUBMIT), finish], { multi: true, chips: ["frontend"], scriptEnter: false }, { vars: { q: "Submit" } });
+    expect((await submit.runner.run()).outcome).toBe("blocked");
+    expect(submit.state.submitted).toBeNull();
+  });
+
+  it("Enter in another field of the form runs the gate first: the script Enter goes to the chip field, then Jev asks again", async () => {
+    const t = chips([fill("textbox", "v_b"), click("Open Title (Optional)"), enter, click(SUBMIT), finish], { multi: true, chips: ["x"], title: "Weekly sync" });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 bob@example.com", "click e3", "commit e1", "click e4"]);
+    // The gate focused the chip field for its script Enter.
+    expect(t.page.popups[0]).toBe(true);
+    expect(t.state.submitted).toBe("x | bob@example.com | Weekly sync");
+  });
+
+  it("the gate reads the popup once, on a page that settled after its input: a popup that still loads gets the hint, not a script Enter", async () => {
+    const searching: Popup = { open: true, text: "Searching members...", picks: [], busy: true };
+    const listed: Popup = { open: true, text: MEMBER, picks: [MEMBER], busy: false };
+    const t = chips([fill("textbox", "v_n"), fill("Title (Optional)", "v_title"), click(MEMBER), fill("Title (Optional)", "v_title"), click(SUBMIT), finish],
+      { multi: true, chips: ["bob@example.com"], popup: listed }, { vars: { ...VARS, n: "Ann Lee" } }, { popups: () => searching });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    // One read, with focus: a script Enter could follow. The popup loads, so there is no script Enter. The hint bans
+    // the Title fill, and Jev clicks the member.
+    expect(t.page.popups).toEqual([true]);
+    expect(ops(t)).toEqual(["fill e1 Ann Lee", "click e6", "fill e2 Weekly sync", "click e4"]);
+    expect(stepReqs(t)[2]!.state.retry_reason).toContain('"textbox" holds "Ann Lee", which is not added yet');
+  });
+
+  it("a learned chip field takes no assistant-written text, and its value head offers no generate", async () => {
+    const t = chips([fill("textbox", "v_b"), finish], { multi: true, chips: ["x"] }, {}, { text: fakeText([]) });
+    await t.runner.run();
+    const q = stepReqs(t)[0]!.questions;
+    expect(Object.keys((valueQ(q, "textbox") as ChoiceQuestion).criteria)).not.toContain("generate");
+    expect(Object.keys((valueQ(q, "Title (Optional)") as ChoiceQuestion).criteria)).toContain("generate");
+    expect(JSON.stringify(t.oracle.requests)).not.toMatch(/"(items|chips|multi|learned)":/);
+  });
+});
+
+describe("mention pickers", () => {
+  const CHAT = "https://chat.example/c/1";
+  const DOC = 1727000000001.5;
+  const PLACEHOLDER = "Type a message — use @ to tag agents, sources & artifacts";
+  type StepState = { retry_reason?: string; elements: { label: string; mentions?: unknown }[] };
+  type Decide = (q: Questions, state: StepState) => PartialAnswers;
+  /**
+   * The composer holds `text` and then its chips. `open`: the picker shows; `staged`: its checked users. `inline`: focus
+   * stays in the composer while the picker is open. `tags`: a chip field (a multiselect combobox) of the form holds this
+   * draft; undefined: no such field.
+   */
+  interface ChatState { node: number; text: string; chips: string[]; open: boolean; staged: string[]; inline?: boolean; tags?: string; sent: { text: string; chips: string[] }[] }
+
+  /**
+   * A chat composer (form 1) with a Mention button and a Send button, and a picker in a portal popup (popup 2, list 4):
+   * a single-select agent, multi-select users with a checked state, "Done (N)" when a user is checked, and a search box.
+   */
+  function chatPage(s: ChatState): Observation {
+    const value = [s.text, ...s.chips.map((c) => `@${c}`)].filter(Boolean).join(" ");
+    const chips = s.chips.length > 0 ? { mentions: [...s.chips], bareText: s.text } : {};
+    const actions: Action[] = [
+      el("e1", "fill", PLACEHOLDER, "textbox", { node: s.node, value, form: 1, multiline: true, ...chips }),
+      el("e2", "click", `Open ${PLACEHOLDER}`, "textbox", { node: s.node, value, form: 1, multiline: true }),
+      el("e3", "click", "Mention", "button", { node: 2, form: 1 }),
+      el("e4", "click", "Send message", "button", { node: 3, form: 1 }),
+    ];
+    if (s.tags !== undefined) actions.push(el("e20", "fill", "Tags", "combobox", { node: 20, value: s.tags, form: 1, inputType: "text", token: { items: [], chips: [], multi: true } }));
+    if (s.open) {
+      actions.push(
+        el("e5", "fill", "Search sources, artifacts, agents...", "combobox", { node: 14, value: "", form: 2, popup: [2] }),
+        el("e6", "click", "Research Agent Finds and summarises project context", "option", { node: 10, form: 2, selected: "true", popup: [4, 2] }),
+        el("e7", "click", "Ann Lee", "option", { node: 11, form: 2, checked: String(s.staged.includes("Ann Lee")), selected: "false", popup: [4, 2] }),
+        el("e8", "click", "Bob Roy", "option", { node: 12, form: 2, checked: String(s.staged.includes("Bob Roy")), selected: "false", popup: [4, 2] }),
+      );
+      if (s.staged.length > 0) actions.push(el("e9", "click", `Done (${s.staged.length})`, "button", { node: 13, form: 2, popup: [2] }));
+    }
+    const inPicker = s.open && !s.inline;
+    const focus = inPicker
+      ? { node: 14, label: "Search sources, artifacts, agents...", role: "combobox", submitLabel: "", editable: true, value: "", form: 2, submitDefault: "", multiline: false, popup: [2] }
+      : { node: s.node, label: PLACEHOLDER, role: "textbox", submitLabel: "", editable: true, value, form: 1, submitDefault: "", multiline: true, ...(s.chips.length > 0 ? { mentions: [...s.chips] } : {}) };
+    return obs(CHAT, actions, `Website Redesign chat\n${s.sent.map((m) => `You: ${m.text} ${m.chips.map((c) => `@${c}`).join(" ")}`).join("\n")}`, {
+      doc: DOC, focus, filled: value ? [s.node] : [], texts: value ? [[s.node, value]] : [],
+    });
+  }
+
+  const seq = (...steps: Decide[]) => {
+    let i = 0;
+    return (name: string, state: unknown, q: Questions): PartialAnswers => (name === "step" ? (steps[Math.min(i++, steps.length - 1)] as Decide)(q, state as StepState) : {});
+  };
+  const clickOn = (label: string): Decide => (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const typeInto = (id: string): Decide => (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", PLACEHOLDER), confidence: 0.9 }, type_text_value: { choice: id, confidence: 0.9 } });
+  const enterKey: Decide = () => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.9, probabilities: { PRESS_ENTER: 0.9, CLICK: 0.1 } } });
+  const finish: Decide = () => ({ page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } });
+  const giveUp: Decide = () => ({ page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "impossible" });
+
+  function chat(task: string, steps: Decide[], state: Partial<ChatState> = {}, opts: SetupOpts = {}, over: Partial<RunConfig> = {}) {
+    const s: ChatState = { node: 1, text: "", chips: [], open: false, staged: [], sent: [], ...state };
+    const send = () => { s.sent.push({ text: s.text, chips: [...s.chips] }); s.text = ""; s.chips = []; s.open = false; s.staged = []; };
+    const human = opts.human ?? fakeHuman({ interactive: true, confirm: [true, true, true, true] });
+    const t = setup(task, { pages: { c: chatPage(s) }, start: "c" }, seq(...steps), { url: CHAT, ...over }, { ...opts, human });
+    t.page.observe = async () => { t.page.observes += 1; return chatPage(s); };
+    const act = t.page.act.bind(t.page);
+    t.page.act = async (a, o, text, fill) => {
+      await act(a, o, text, fill);
+      if (a.kind === "fill" && a.node === s.node) {
+        // A select-all fill replaces the chips too; an append fill keeps them.
+        if (fill?.mode === "append") s.text = [s.text, text ?? ""].filter(Boolean).join(" ");
+        else { s.text = text ?? ""; s.chips = []; }
+        s.open = false; s.staged = [];
+        return;
+      }
+      if (a.kind === "fill" && a.node === 20) { s.tags = text ?? ""; return; }
+      if (a.kind !== "click") return;
+      const name = a.label.split(" Finds")[0] ?? a.label;
+      if (a.label === "Mention") { s.open = !s.open; s.staged = []; }
+      else if (a.label === "Send message") send();
+      else if (a.role === "option" && name === "Research Agent") { s.chips.push(name); s.open = false; }
+      else if (a.role === "option") s.staged = s.staged.includes(name) ? s.staged.filter((x) => x !== name) : [...s.staged, name];
+      else if (/^Done/.test(a.label)) { s.chips.push(...s.staged); s.staged = []; s.open = false; }
+      else if (a.node === s.node) { s.open = false; s.staged = []; }
+    };
+    t.page.press = async (key) => { t.page.calls.push({ op: "press", key }); if (key === "Enter" && (!s.open || s.inline)) send(); };
+    return { ...t, s };
+  }
+  const MENTION_TASK = "mention Ann Lee and ask her for the report status";
+  const clicks = (t: { page: { calls: { op: string; kind?: string; id?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "click").map((c) => c.id);
+  const reasons = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((r) => r.name === "step").map((r) => (r.state as StepState).retry_reason ?? "");
+
+  it("D1 comes before the chip-field gate: a send outside a picker with checked items asks again and reads no chip popup", async () => {
+    // The chip-field gate can focus its field to read the popup. Focus outside the picker closes it and drops the checked
+    // items, so the mention gate runs first. Here the Tags field holds the draft "urgent" that the run typed.
+    const typeTag: Decide = (q) => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Tags"), confidence: 0.9 }, type_text_value: { choice: "v_tag", confidence: 0.9 } });
+    const t = chat(MENTION_TASK, [typeTag, clickOn("Mention"), clickOn("Ann Lee"), clickOn("Send message"), giveUp], { tags: "" }, {}, { vars: { tag: "urgent" } });
+    const r = await t.runner.run();
+    expect(t.s.tags).toBe("urgent");
+    expect(reasons(t)[4]).toContain('click "Done (1)" first');
+    expect(t.page.popups).toEqual([]);
+    expect(t.s.sent).toEqual([]);
+    expect(r.outcome).toBe("blocked");
+  });
+
+  it("D1: Send with a checked option that is not added re-asks and names Done; Done, then Send, sends the chip", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Send message"), clickOn("Done (1)"), clickOn("Send message"), finish], { text: "Hi Ann, could you share the report status?", open: true, staged: ["Ann Lee"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(reasons(t)[1]).toContain('the open picker holds 1 checked item that is not added yet (Ann Lee); click "Done (1)" first');
+    expect(t.s.sent).toEqual([{ text: "Hi Ann, could you share the report status?", chips: ["Ann Lee"] }]);
+    expect(clicks(t)).toEqual(["e9", "e4"]);
+    expect(t.log.lines.some((l) => l.includes('mention @Ann Lee added to "Type a message'))).toBe(true);
+  });
+
+  it("D1: Send is banned for the re-ask; a send that stays chosen (Enter) blocks, and nothing is sent", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Send message"), enterKey], { text: "Hi Ann", open: true, staged: ["Ann Lee"], inline: true });
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain('click "Done (1)" first');
+    expect(t.s.sent).toEqual([]);
+    expect(clicks(t)).toEqual([]);
+  });
+
+  it("D1: a click outside that does not send re-asks one time, then runs", async () => {
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Mention"), giveUp], { text: "Hi Ann", open: true, staged: ["Ann Lee"] });
+    await t.runner.run();
+    expect(reasons(t)[1]).toContain('click "Done (1)" first');
+    expect(clicks(t)).toEqual(["e3"]);
+  });
+
+  it("D1: Enter outside the picker re-asks; clicks inside the picker run", async () => {
+    const t = chat(MENTION_TASK, [enterKey, clickOn("Done (1)"), finish], { text: "Hi Ann", open: true, staged: ["Ann Lee"], inline: true });
+    await t.runner.run();
+    expect(reasons(t)[1]).toContain('click "Done (1)" first');
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(clicks(t)).toEqual(["e9"]);
+    expect(t.s.chips).toEqual(["Ann Lee"]);
+  });
+
+  it("D1 applies only to a task that asks to mention someone", async () => {
+    const t = chat('Send "Hi Ann" in the chat', [clickOn("Send message"), finish], { text: "Hi Ann", open: true, staged: ["Ann Lee"] });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.s.sent).toEqual([{ text: "Hi Ann", chips: [] }]);
+  });
+
+  it("D4b (r93): a chip that the run added and no task name asks for blocks the send; the message typed again replaces it", async () => {
+    const task = 'Send "Deploy is done, please verify on staging" in the chat';
+    const t = chat(task, [clickOn("Research Agent"), clickOn("Send message"), typeInto("s1"), clickOn("Send message"), finish], { open: true });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(reasons(t)[2]).toContain("holds the mention @Research Agent, which the task does not ask for");
+    expect(t.s.sent).toEqual([{ text: "Deploy is done, please verify on staging", chips: [] }]);
+    // The retype is a plain fill: a select-all removes the chip that no name asks for.
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "Deploy is done, please verify on staging" }]);
+
+    const stays = chat(task, [clickOn("Research Agent"), clickOn("Send message"), enterKey], { open: true });
+    const r2 = await stays.runner.run();
+    expect(r2.blocked?.kind).toBe("ambiguous");
+    expect(r2.blocked?.hint).toContain("@Research Agent");
+    expect(stays.s.sent).toEqual([]);
+  });
+
+  it("D4b: a chip that shows late, in an observation after no action, still counts as the run's", async () => {
+    const task = 'Send "Deploy is done" in the chat';
+    const unsure: Decide = (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Mention"), confidence: 0.1 } });
+    const t = chat(task, [unsure, clickOn("Send message")], { text: "Deploy is done" });
+    const observe = t.page.observe.bind(t.page);
+    // The chip of an earlier click renders late: the re-ask observation is the first one that shows it.
+    t.page.observe = async () => { if (t.page.observes === 1) t.s.chips = ["Research Agent"]; return observe(); };
+    const r = await t.runner.run();
+    expect(r.blocked?.kind).toBe("ambiguous");
+    expect(r.blocked?.hint).toContain("holds the mention @Research Agent, which the task does not ask for");
+    expect(t.s.sent).toEqual([]);
+  });
+
+  it("D4b: Enter is gated too, and a chip from a draft that was there before the run is not the run's", async () => {
+    const task = 'Send "Deploy is done" in the chat';
+    const enter = chat(task, [clickOn("Research Agent"), enterKey, enterKey], { open: true, inline: true, text: "Deploy is done" });
+    const r = await enter.runner.run();
+    expect(r.blocked?.hint).toContain("@Research Agent");
+    expect(enter.s.sent).toEqual([]);
+
+    const draft = chat(task, [clickOn("Send message"), finish], { text: "Deploy is done", chips: ["Bob Roy"] });
+    const r2 = await draft.runner.run();
+    expect(r2.outcome).toBe("done");
+    expect(draft.s.sent).toEqual([{ text: "Deploy is done", chips: ["Bob Roy"] }]);
+  });
+
+  it("D5: after the chip, the fill of the text goes at the end with no select-all, and the chip stays; D6: the dialog shows it", async () => {
+    const human = fakeHuman({ interactive: true, confirm: [true] });
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), typeInto("v_message"), clickOn("Send message"), finish], {}, { human }, { vars: { message: "could you share the report status?" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "could you share the report status?", edit: { mode: "append", keepChips: true } }]);
+    expect(r.steps[3]?.gate).toMatch(/ append \(keeps the mentions\)$/);
+    expect(t.s.sent).toEqual([{ text: "could you share the report status?", chips: ["Ann Lee"] }]);
+    expect(human.details).toEqual([{ kind: "action", action: 'click button "Send message"', host: "chat.example", typed: [],
+      sends: [{ label: cutText(PLACEHOLDER, LIMITS.nameChars), text: "could you share the report status? @Ann Lee", mentions: ["Ann Lee"] }] }]);
+  });
+
+  it("D5: with text and the chip, a new fill would remove the chip: it re-asks and types nothing", async () => {
+    // The draft "Hi Ann" is text that this run did not type, so the fill has a mode head (richtext). A replace would
+    // remove the chip too: the mention gate asks again.
+    const replace: Decide = (q, s) => ({ ...typeInto("v_message")(q, s), type_text_mode: { choice: "replace_all", confidence: 0.95 } });
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), replace, giveUp], { text: "Hi Ann" }, {}, { vars: { message: "could you share the report status?" } });
+    await t.runner.run();
+    expect(reasons(t)[4]).toContain('a fill would remove the mention @Ann Lee from "Type a message');
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([]);
+    expect(t.s.chips).toEqual(["Ann Lee"]);
+  });
+
+  it("D5 and the mode head: an append after draft text keeps the chip; a chip that this run added is not held text", async () => {
+    const append: Decide = (q, s) => ({ ...typeInto("v_message")(q, s), type_text_mode: { choice: "append", confidence: 0.95 } });
+    const t = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), append, clickOn("Send message"), finish], { text: "Hi Ann" }, {}, { vars: { message: "could you share the report status?" } });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "could you share the report status?", edit: { mode: "append", keepChips: true } }]);
+    expect(t.s.sent).toEqual([{ text: "Hi Ann could you share the report status?", chips: ["Ann Lee"] }]);
+    // With no draft text, the field holds only the chip that this run added: no mode head asks.
+    const bare = chat(MENTION_TASK, [clickOn("Mention"), clickOn("Ann Lee"), clickOn("Done (1)"), typeInto("v_message"), giveUp], {}, {}, { vars: { message: "could you share the report status?" } });
+    await bare.runner.run();
+    const modeHeads = bare.oracle.requests.filter((x) => Object.keys(x.questions).some((k) => k.startsWith("mode_")));
+    expect(modeHeads).toEqual([]);
+    expect(bare.page.calls.filter((c) => c.kind === "fill")).toEqual([{ op: "act", id: "e1", kind: "fill", text: "could you share the report status?", edit: { mode: "append", keepChips: true } }]);
+  });
+
+  it("D6: a send with no assistant text shows what the field sends; text that the dialog already shows is not repeated", async () => {
+    const human = fakeHuman({ interactive: true, confirm: [true] });
+    const t = chat('Send "Deploy is done" in the chat', [clickOn("Send message"), finish], { text: "Deploy is done" }, { human });
+    await t.runner.run();
+    expect((human.details[0] as { sends?: unknown }).sends).toEqual([{ label: cutText(PLACEHOLDER, LIMITS.nameChars), text: "Deploy is done", mentions: [] }]);
+
+    const h2 = fakeHuman({ interactive: true, confirm: [true] });
+    const mcp = chat('Send "Deploy is done" in the chat', [typeInto("s1"), clickOn("Send message"), finish], {}, { human: h2, fromAssistant: true });
+    await mcp.runner.run();
+    expect(h2.details[0]).toMatchObject({ typed: [{ text: "Deploy is done" }] });
+    expect((h2.details[0] as { sends?: unknown }).sends).toBeUndefined();
+  });
+
+  it("a message field whose label stays the placeholder: fills of new text are not repeats", async () => {
+    const t = chat('Type "one" then "two" then "three" in the chat', [typeInto("s1"), typeInto("s2"), typeInto("s3"), finish]);
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.kind === "fill").map((c) => c.text)).toEqual(["one", "two", "three"]);
+  });
+});
+
+describe("date fields", () => {
+  const URL = "https://app.test/usage";
+  /** A month-day-year group as the snapshot shows it: one fill action at the month part. */
+  const group = (id: string, node: number, label: string, [m, d, y]: [string, string, string], extra: Partial<DateInfo> = {}): Action => el(id, "fill", label, "textbox", {
+    node, value: `${m}/${d}/${y}`, form: 5, multiline: false,
+    date: { kind: "group", sep: "/", order: "MDY", pad: false, short: false, ...extra,
+      parts: [{ part: "month", node, value: m, spin: false }, { part: "day", node: node + 1, value: d, spin: false }, { part: "year", node: node + 2, value: y, spin: false }] },
+  });
+  const trigger = el("e1", "click", "Aug 24, 2026 – Sep 23, 2026", "button", { node: 1, form: null });
+  const picker = (start: [string, string, string], end: [string, string, string]): Observation => obs(URL, [
+    trigger,
+    group("e2", 10, "Date range start (M/D/YYYY)", start, { role: "start", range: 1 }),
+    group("e3", 13, "Date range end (M/D/YYYY)", end, { role: "end", range: 1 }),
+    el("e4", "click", "Cancel", "button", { node: 30, form: 5 }),
+    el("e5", "click", "Update", "button", { node: 31, form: 5 }),
+  ], `Usage\n${start.join("/")} - ${end.join("/")}`);
+  const TASK = "Set the usage date range from 1 September 2026 to 15 September 2026 and click Update";
+  const pages = {
+    closed: obs(URL, [trigger], "Usage\nShowing 2026-08-24 to 2026-09-23"),
+    open: picker(["8", "24", "2026"], ["9", "23", "2026"]),
+    start: picker(["9", "1", "2026"], ["9", "23", "2026"]),
+    both: picker(["9", "1", "2026"], ["9", "15", "2026"]),
+    done: obs(URL, [trigger], "Usage\nShowing 2026-09-01 to 2026-09-15"),
+  };
+  /** The value of the state row whose label starts with `label`. */
+  const row = (state: unknown, label: string): string | undefined => (state as { elements: { label: string; value?: string }[] }).elements.find((e) => e.label.startsWith(label))?.value;
+  const retry = (state: unknown): string | undefined => (state as { retry_reason?: string }).retry_reason;
+  /** The date heads answer as the lab: the start date into the start field, the end date into the end field. */
+  const heads = (q: Questions): PartialAnswers => {
+    const out: PartialAnswers = {};
+    const start = idx(q, "type_text_target", "Date range start");
+    const end = idx(q, "type_text_target", "Date range end");
+    out[`value_${start}`] = { choice: "s1", confidence: 0.99, probabilities: { s1: 0.99, s2: 0.005, none: 0.005 } };
+    out[`value_${end}`] = { choice: "s2", confidence: 0.97, probabilities: { s1: 0.01, s2: 0.97, none: 0.02 } };
+    return out;
+  };
+  const click = (q: Questions, label: string, conf = 0.9): PartialAnswers => ({ operation: { choice: "CLICK", confidence: 0.85, probabilities: { CLICK: 0.85, TYPE_TEXT: 0.1, DONE: 0.05 } }, click_target: { choice: idx(q, "click_target", label), confidence: conf } });
+  const type = (q: Questions, label: string): PartialAnswers => ({ operation: { choice: "TYPE_TEXT", confidence: 0.7, probabilities: { TYPE_TEXT: 0.7, CLICK: 0.25, DONE: 0.05 } }, type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.95 } });
+  const flow = (call: { op: string; id?: string }, current: string): string | undefined => {
+    if (call.op === "act" && call.id === "e1") return "open";
+    if (call.op === "setDate" && call.id === "e2") return current === "both" ? "both" : "start";
+    if (call.op === "setDate" && call.id === "e3") return "both";
+    if (call.op === "act" && call.id === "e5") return "done";
+    return undefined;
+  };
+
+  it("Update waits for the date fields; the start goes in day first, the end next, then Update and DONE", async () => {
+    const t = setup(TASK, { pages, start: "closed", transitions: flow }, (name, state, q) => {
+      if (name !== "step") return {};
+      const start = row(state, "Date range start");
+      if (start === undefined) {
+        if ((state as { page: { text: string } }).page.text.includes("2026-09-01")) return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, CLICK: 0.1 } } };
+        return click(q, "Aug 24, 2026");
+      }
+      // The first ask on the open picker clicks Update, as Jev did in every bench run before the date fields.
+      if (start === "8/24/2026" && retry(state) === undefined) return { ...click(q, "Update"), ...heads(q) };
+      if (start === "8/24/2026") return { ...type(q, "Date range start"), ...heads(q) };
+      if (row(state, "Date range end") === "9/23/2026") return { ...type(q, "Date range end"), ...heads(q) };
+      return { ...click(q, "Update"), ...heads(q) };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.map((c) => c.op === "setDate" ? `${c.id}:${JSON.stringify(c.plan)}` : `${c.op}:${c.id ?? c.url}`)).toEqual([
+      "navigate:https://app.test/usage", "act:e1",
+      'e2:{"parts":[{"node":11,"text":"1","spin":false},{"node":10,"text":"9","spin":false}]}',
+      'e3:{"parts":[{"node":14,"text":"15","spin":false}]}',
+      "act:e5",
+    ]);
+    const states = stepStates(t) as unknown as { retry_reason?: string; recent_actions: { action: string; kind: string; text: string | null }[] }[];
+    expect(states[2]?.retry_reason).toContain("Update\" was not executed: date_unset: date field \"Date range start (M/D/YYYY)\" shows 8/24/2026, not 1 September 2026; date field \"Date range end (M/D/YYYY)\" shows 9/23/2026, not 15 September 2026");
+    // The re-ask does not offer the gated Update.
+    const reask = t.oracle.requests.filter((x) => x.name === "step")[2];
+    expect(JSON.stringify((reask?.questions["click_target"] as ChoiceQuestion).criteria)).not.toContain("Update");
+    expect(r.steps[1]).toMatchObject({ operation: "TYPE_TEXT", action: "fill", value: "1 September 2026", value_conf: 0.99, result: "ok" });
+    expect(r.steps[1]?.gate).toContain("date 2026-09-01");
+    expect(states.at(-1)?.recent_actions.slice(1, 4)).toEqual([
+      { action: "Date range start (M/D/YYYY)", kind: "fill", text: "1 September 2026", page_changed: true },
+      { action: "Date range end (M/D/YYYY)", kind: "fill", text: "15 September 2026", page_changed: true },
+      { action: "Update", kind: "click", text: null, page_changed: true },
+    ]);
+  });
+
+  it("DONE waits while a date field shows another date, and the re-ask does not offer DONE", async () => {
+    const t = setup(TASK, { pages, start: "open", transitions: flow }, (name, state, q) => {
+      if (name !== "step") return {};
+      const ops = Object.keys((q["operation"] as ChoiceQuestion).criteria);
+      if (retry(state) === undefined) return { operation: { choice: "DONE", confidence: 0.8, probabilities: { DONE: 0.8, TYPE_TEXT: 0.2 } }, ...heads(q) };
+      expect(ops).not.toContain("DONE");
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other", ...heads(q) };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(t.page.calls.filter((c) => c.op !== "navigate")).toEqual([]);
+    const states = stepStates(t) as unknown as { retry_reason?: string }[];
+    expect(states[1]?.retry_reason).toMatch(/^DONE was not executed: date_unset: date field "Date range start \(M\/D\/YYYY\)" shows 8\/24\/2026/);
+  });
+
+  it("Enter in the picker waits for the date fields too", async () => {
+    const focused = { ...pages.open, focus: { node: 10, label: "M", role: "textbox", submitLabel: "", editable: true, value: "8", form: 5 } };
+    const t = setup(TASK, { pages: { open: focused }, start: "open" }, (name, state, q) => {
+      if (name !== "step") return {};
+      if (retry(state) === undefined) return { operation: { choice: "PRESS_ENTER", confidence: 0.9, probabilities: { PRESS_ENTER: 0.9, TYPE_TEXT: 0.1 } }, ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("blocked");
+    expect(t.page.calls.filter((c) => c.op === "press")).toEqual([]);
+    expect((stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason).toContain("date_unset: date field \"Date range start (M/D/YYYY)\" shows 8/24/2026");
+  });
+
+  it("a wrong read-back gets a second pass in another order, then date_mismatch with the value the field shows; the field stays offered", async () => {
+    // The page puts the day back each time: the field shows 9/24/2026.
+    const wrong = picker(["9", "24", "2026"], ["9", "23", "2026"]);
+    let asks = 0;
+    const t = setup(TASK, { pages: { open: pages.open, wrong }, start: "open", transitions: (c) => (c.op === "setDate" ? "wrong" : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      asks += 1;
+      if (asks === 1) return { ...type(q, "Date range start"), ...heads(q) };
+      expect(row(state, "Date range start")).toBe("9/24/2026");
+      expect(idx(q, "type_text_target", "Date range start")).toBeDefined();
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    const plans = t.page.calls.filter((c) => c.op === "setDate").map((c) => JSON.stringify(c.plan));
+    expect(plans).toEqual([
+      '{"parts":[{"node":11,"text":"1","spin":false},{"node":10,"text":"9","spin":false}]}',
+      '{"parts":[{"node":11,"text":"1","spin":false}]}',
+    ]);
+    expect(r.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "failed", gate: "date_mismatch: \"Date range start (M/D/YYYY)\" shows 9/24/2026, not 1 September 2026" });
+    expect(stepStates(t)[1]?.recent_actions).toEqual([
+      { action: "Date range start (M/D/YYYY)", kind: "fill", text: "1 September 2026", page_changed: true },
+      { action: "Date range start (M/D/YYYY)", kind: "date_mismatch", text: "the field shows 9/24/2026", page_changed: false },
+    ]);
+  });
+
+  it("a second pass that reads back right is ok", async () => {
+    let n = 0;
+    const t = setup(TASK, { pages: { open: pages.open, wrong: picker(["9", "24", "2026"], ["9", "23", "2026"]), start: pages.start }, start: "open", transitions: (c) => (c.op === "setDate" ? (++n === 1 ? "wrong" : "start") : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      if (row(state, "Date range start") === "8/24/2026") return { ...type(q, "Date range start"), ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ result: "ok" });
+    expect(r.steps[0]?.gate).toContain("date 2026-09-01 second pass");
+  });
+
+  it("an invoice date and a due date: Save waits only for the due date that the heads give it, and names only that field", async () => {
+    const form = (due: string): Observation => obs("https://app.test/invoice", [
+      el("e1", "fill", "Invoice date (date)", "textbox", { node: 1, value: "2026-09-01", form: 2, inputType: "date", date: { kind: "date", order: "MDY", sep: "/" } }),
+      el("e2", "fill", "Due date (date)", "textbox", { node: 2, value: due, form: 2, inputType: "date", date: { kind: "date", order: "MDY", sep: "/" } }),
+      el("e3", "click", "Save", "button", { node: 3, form: 2 }),
+    ], "Invoice");
+    const task = "Set the due date to 15 September 2026 and click Save";
+    const t = setup(task, { pages: { a: form("2026-09-30"), b: form("2026-09-15"), c: obs("https://app.test/invoice", [], "Saved") }, start: "a", transitions: (c) => (c.op === "setDate" ? "b" : c.op === "act" && c.id === "e3" ? "c" : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      if ((state as { page: { text: string } }).page.text === "Saved") return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9 } } };
+      const due = { [`value_${idx(q, "type_text_target", "Invoice date")}`]: { choice: "s1", confidence: 0.3, probabilities: { s1: 0.3, none: 0.7 } }, [`value_${idx(q, "type_text_target", "Due date")}`]: { choice: "s1", confidence: 0.96, probabilities: { s1: 0.96, none: 0.04 } } };
+      if (row(state, "Due date") === "2026-09-30" && retry(state) === undefined) return { ...click(q, "Save"), ...due };
+      if (row(state, "Due date") === "2026-09-30") return { ...type(q, "Due date"), ...due };
+      return { ...click(q, "Save"), ...due };
+    }, { url: "https://app.test/invoice" });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    const reason = (stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason;
+    expect(reason).toContain("date field \"Due date (date)\" shows 2026-09-30, not 15 September 2026");
+    expect(reason).not.toContain("Invoice");
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([{ op: "setDate", id: "e2", plan: { native: "2026-09-15" } }]);
+  });
+
+  it("a native date outside min and max blocks and sets nothing", async () => {
+    const page = obs("https://app.test/book", [el("e1", "fill", "Check-in (date)", "textbox", { node: 1, value: "", form: 2, inputType: "date", date: { kind: "date", min: "2026-10-01", max: "2026-12-31", order: "MDY", sep: "/" } })]);
+    const t = setup("Set check-in to 15 September 2026", { pages: { a: page }, start: "a" },
+      byUrl({ [page.url]: (q) => ({ ...type(q, "Check-in"), [`value_${idx(q, "type_text_target", "Check-in")}`]: { choice: "s1", confidence: 0.95 } }) }), { url: page.url });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "impossible", hint: "date field \"Check-in (date)\" takes dates from 2026-10-01 to 2026-12-31; 15 September 2026 is outside them" });
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([]);
+  });
+
+  it("an ambiguous numeric date is never typed into a field of another shape; the hint names the fix", async () => {
+    const dotted = obs("https://app.test/de", [group("e1", 10, "Datum (D.M.YYYY)", ["24", "8", "2026"], { sep: ".", order: "DMY",
+      parts: [{ part: "day", node: 10, value: "24", spin: false }, { part: "month", node: 11, value: "8", spin: false }, { part: "year", node: 12, value: "2026", spin: false }] })]);
+    const t = setup("Set the date to 9/1/2026", { pages: { a: dotted }, start: "a" }, byUrl({ [dotted.url]: (q) => type(q, "Datum") }), { url: dotted.url });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: "date field \"Datum (D.M.YYYY)\" cannot take 9/1/2026: its day and month can change places. Write the month as a word or use YYYY-MM-DD" });
+    expect(t.page.calls.filter((c) => c.op !== "navigate")).toEqual([]);
+  });
+
+  it("a task without a date blocks a date fill with the date hint", async () => {
+    const t = setup("Open the usage page and click Update", { pages: { open: pages.open }, start: "open" }, byUrl({ [URL]: (q) => type(q, "Date range start") }), { url: URL });
+    const r = await t.runner.run();
+    expect(r.blocked).toMatchObject({ kind: "needs_credential", hint: "date field \"Date range start (M/D/YYYY)\" needs a date: give the date in the task, for example 1 September 2026 or 2026-09-01" });
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([]);
+  });
+
+  it("a calendar without date fields: Update and DONE wait while the selection is not the task range", async () => {
+    const day = (id: string, node: number, iso: string, sel: boolean, pos?: "start" | "middle" | "end"): Action =>
+      el(id, "click", `Day ${iso}`, "button", { node, form: 5, day: { grid: 1, day: iso, multi: true, sel, ...(pos ? { pos } : {}) } });
+    // react-day-picker added the clicks on Sep 1 and Sep 15 to the old range: Aug 24 - Sep 15.
+    const extended = obs(URL, [
+      day("e1", 1, "2026-08-24", true, "start"), day("e2", 2, "2026-09-01", true, "middle"), day("e3", 3, "2026-09-15", true, "end"),
+      el("e4", "click", "Update", "button", { node: 4, form: 5 }),
+    ], "Workflows");
+    const t = setup(TASK, { pages: { a: extended }, start: "a" }, (name, state, q) => {
+      if (name !== "step") return {};
+      const n = t.oracle.requests.filter((x) => x.name === "step").length;
+      if (n === 1) return click(q, "Update");
+      if (n === 2) return { operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9 } } };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL });
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "act")).toEqual([]);
+    const reasons = (stepStates(t) as unknown as { retry_reason?: string }[]).map((x) => x.retry_reason);
+    expect(reasons[1]).toContain("date_unset: the calendar shows 2026-08-24 to 2026-09-15 selected, not 1 September 2026 to 15 September 2026");
+    expect(r.outcome).toBe("blocked");
+  });
+
+  it("a plugin run never asks the assistant for a date field", async () => {
+    const text = fakeText([{ kind: "text", values: { f1: "1 September 2026" } }]);
+    const t = setup(TASK, { pages: { open: pages.open }, start: "open" }, byUrl({ [URL]: (q) => ({ ...type(q, "Date range start"), [`value_${idx(q, "type_text_target", "Date range start")}`]: { choice: "generate", confidence: 0.9 } }) }), { url: URL }, { text, fromAssistant: true });
+    const r = await t.runner.run();
+    expect(text.requests).toEqual([]);
+    expect(r.blocked?.kind).toBe("needs_credential");
+    expect(t.oracle.requests.some((x) => JSON.stringify(x.questions).includes("generate"))).toBe(false);
+  });
+  it("the date gate comes before the chip-field gate: Update with a chip draft in its form reads no chip popup", async () => {
+    // The chip-field gate can focus its field to read the popup, and focus outside the picker can close it. The date gate
+    // reads the observation only, so it runs first.
+    const withTags = (tags: string): Observation => {
+      const p = pages.open;
+      return { ...p, actions: [...p.actions, el("e6", "fill", "Tags", "combobox", { node: 40, value: tags, form: 5, inputType: "text", token: { items: [], chips: [], multi: true } })] };
+    };
+    const t = setup(TASK, { pages: { a: withTags(""), b: withTags("urgent") }, start: "a", transitions: (c) => (c.op === "act" && c.id === "e6" ? "b" : undefined) }, (name, state, q) => {
+      if (name !== "step") return {};
+      const n = t.oracle.requests.filter((x) => x.name === "step").length;
+      if (n === 1) return { ...type(q, "Tags"), type_text_value: { choice: "v_tag", confidence: 0.9 }, ...heads(q) };
+      if (n === 2) return { ...click(q, "Update"), ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL, vars: { tag: "urgent" } });
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e6"]);
+    expect((stepStates(t)[2] as unknown as { retry_reason: string }).retry_reason).toContain("Update\" was not executed: date_unset: date field \"Date range start (M/D/YYYY)\" shows 8/24/2026");
+    expect(t.page.popups).toEqual([]);
+    expect(r.outcome).toBe("blocked");
+  });
+
+  it("a date head has no var fallback: an assistant's date var below the value gate asks again, with no value request", async () => {
+    const t = setup("Set the usage start date and click Update", { pages: { open: pages.open }, start: "open" }, (name, _state, q) => {
+      if (name !== "step") return {};
+      if (t.oracle.requests.filter((x) => x.name === "step").length === 1) return { ...type(q, "Date range start"), type_text_value: { choice: "v_start_date", confidence: 0.5 } };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL, vars: { start_date: "2026-09-01" } }, { fromAssistant: true });
+    await t.runner.run();
+    expect(t.oracle.requests.filter((x) => x.name === "value")).toEqual([]);
+    expect((stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason).toContain("low_value 0.50");
+    expect(t.page.calls.filter((c) => c.op === "setDate")).toEqual([]);
+  });
+
+  it("an autonomous date fill over a date that the run did not type has no replaced audit", async () => {
+    const t = setup(TASK, { pages, start: "open", transitions: flow }, (name, state, q) => {
+      if (name !== "step") return {};
+      if (row(state, "Date range start") === "8/24/2026") return { ...type(q, "Date range start"), ...heads(q) };
+      return { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9 } }, blocked_reason: "other" };
+    }, { url: URL, confirm: "autonomous" });
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "ok" });
+    expect(r.steps[0]?.gate).toContain("date 2026-09-01");
+    expect(r.steps[0]?.unattended).toBeUndefined();
+  });
+});
+
+describe("GO_BACK and Enter in a search field (ported behavior of browser-use/jev-ultrafast)", () => {
+  const SEARCH = obs("https://www.wikipedia.org/", [el("e1", "fill", "Search Wikipedia", "searchbox", { value: "Alan Turing", inputType: "search" }), el("e2", "click", "English", "link"), el("e3", "click", "Search", "button")],
+    "Wikipedia", { focus: { node: 1, label: "Search Wikipedia", role: "searchbox", submitLabel: "Search", editable: true, value: "Alan Turing" } });
+  const ops = (q: Questions): string[] => Object.keys((q["operation"] as ChoiceQuestion).criteria);
+  const stop = { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+
+  it("GO_BACK below its gate runs no back; the re-ask of that step does not offer GO_BACK", async () => {
+    const seen: string[][] = [];
+    const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" }, (name, _state, q) => {
+      if (name !== "step") return {};
+      seen.push(ops(q));
+      return seen.length === 1 ? { page_kind: "task_page", operation: { choice: "GO_BACK", confidence: 0.33, probabilities: { GO_BACK: 0.33, SCROLL_DOWN: 0.3, WAIT: 0.37 } } } : stop;
+    }, { maxSteps: 1 });
+    await t.runner.run();
+    expect(t.page.calls.some((c) => c.op === "back")).toBe(false);
+    expect(seen[0]).toContain("GO_BACK");
+    expect(seen[1]).not.toContain("GO_BACK");
+    expect((stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason).toContain(`GO_BACK confidence 0.33 below ${GATES.goBack}`);
+  });
+
+  it("GO_BACK at its gate or above runs; a tab with no earlier web page does not offer it", async () => {
+    const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and go back", { pages: { a: ARTICLE }, start: "a", canGoBack: () => true },
+      byUrl({ [ARTICLE.url]: { page_kind: "task_page", operation: { choice: "GO_BACK", confidence: 0.6, probabilities: { GO_BACK: 0.6, WAIT: 0.4 } } } }), { maxSteps: 1 });
+    await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "back")).toHaveLength(1);
+    let offered: string[] = [];
+    const none = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a", canGoBack: () => false },
+      (name, _state, q) => { if (name === "step") offered = ops(q); return name === "step" ? stop : {}; }, { maxSteps: 1 });
+    await none.runner.run();
+    expect(offered).not.toContain("GO_BACK");
+    expect(offered).toContain("WAIT");
+  });
+
+  it("Enter in a search field is navigational: it runs at 0.43, where a submit re-asks", async () => {
+    const enter = { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.43, probabilities: { PRESS_ENTER: 0.43, CLICK: 0.3, TYPE_TEXT: 0.27 } } };
+    const t = setup("open wikipedia.org and search for Alan Turing", { pages: { s: SEARCH, a: ARTICLE }, start: "s", transitions: (c) => (c.op === "press" ? "a" : undefined) },
+      byUrl({ [SEARCH.url]: enter, [ARTICLE.url]: stop }), { maxSteps: 2 });
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press")).toEqual([{ op: "press", key: "Enter" }]);
+    expect(r.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "navigational", result: "ok" });
+    // The same Enter in a message composer, and in a search field whose Enter picks an option, stays a submit and re-asks.
+    const composer = obs("https://chat.example/", [el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "hello", multiline: true })], "chat",
+      { focus: { node: 1, label: "Search or ask AI anything...", role: "textbox", submitLabel: "", editable: true, value: "hello", multiline: true } });
+    const picks = obs("https://www.wikipedia.org/", SEARCH.actions.filter((a) => a.kind !== "wait"), "Wikipedia",
+      { focus: { ...(SEARCH.focus as NonNullable<Observation["focus"]>), enterOption: { node: 9, label: "Alan Turing (mathematician)" } } });
+    for (const page of [composer, picks]) {
+      const u = setup("open https://chat.example/ and search", { pages: { p: page }, start: "p" }, (name) => (name === "step" ? enter : {}), { maxSteps: 1 });
+      const ur = await u.runner.run();
+      expect(u.page.calls.some((c) => c.op === "press")).toBe(false);
+      expect(ur.steps[0]?.risk).toBe("submit");
+    }
+  });
+
+  it("searchField: searchbox, type search, or a search label; a multiline field only as a searchbox or combobox", () => {
+    const f = (focus: Partial<NonNullable<Observation["focus"]>>, action?: Partial<Action>) => searchField(
+      obs("https://x.example/", [], "x", { focus: { node: 1, label: "", role: "textbox", submitLabel: "", ...focus } }),
+      action ? el("e1", "fill", focus.label ?? "", action.role ?? "textbox", action) : undefined);
+    expect(f({ label: "Search Wikipedia", role: "searchbox" })).toBe(true);
+    expect(f({ label: "q" }, { inputType: "search" })).toBe(true);
+    expect(f({ label: "Search docs" })).toBe(true);
+    expect(f({ label: "Search", role: "combobox", multiline: true })).toBe(true);
+    expect(f({ label: "Search or ask AI anything...", multiline: true })).toBe(false);
+    expect(f({ label: "Email" })).toBe(false);
+    expect(f({ label: "Research notes" })).toBe(false);
+  });
+});
+
+describe("early decisions: the step request runs during the rest of the settle", () => {
+  const LIST = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e2", "click", "Home", "link")], "list");
+  const OPEN = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button")], "list\nFilters");
+  const LOADED = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button"), el("e4", "click", "Design", "checkbox")], "list\nFilters\nDesign");
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, CLICK: 0.1 } } };
+  const click = (label: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const texts = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((r) => r.name === "step").map((r) => (r.state as { page: { text: string } }).page.text);
+
+  it("a settled page that is the same keeps the answer: one request per step", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur },
+      byUrl({ [LIST.url]: (q, state) => ((state as { page: { text: string } }).page.text === "list" ? click("Open filters")(q) : done) }), { url: LIST.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(texts(t)).toEqual(["list", "list\nFilters"]);
+    expect(t.page.earlies).toEqual([false, true, false]);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(false);
+    expect(stepStates(t)[1]?.recent_actions).toEqual([{ action: "Open filters", kind: "click", text: null, page_changed: true }]);
+  });
+
+  it("a settled page that changed drops the answer on the early page and asks again: its action never runs", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN, loaded: LOADED }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "loaded" : undefined) },
+      byUrl({ [LIST.url]: (q, state) => { const text = (state as { page: { text: string } }).page.text; return text === "list" ? click("Open filters")(q) : text === "list\nFilters" ? click("Apply")(q) : done; } }), { url: LIST.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(texts(t)).toEqual(["list", "list\nFilters", "list\nFilters\nDesign"]);
+    expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e1"]);
+    expect(t.log.lines.some((l) => /step 2 the page changed after the early observation; the request on it is dropped \(1 in this run\)/.test(l))).toBe(true);
+    expect(r.steps).toHaveLength(2);
+  });
+
+  it("the page change of an action comes from the settled page: three actions whose change shows late are not a stall", async () => {
+    const P = [0, 1, 2, 3].map((n) => obs(`https://app.example/p${n}`, [el("e1", "click", "Next", "button")], `page ${n}`));
+    const pages = Object.fromEntries(P.map((o, n) => [`p${n}`, o]));
+    const t = setup("open https://app.example/p0 and go to page 3", { pages, start: "p0", late: (c, cur) => (c.op === "act" ? `p${Number(cur.slice(1)) + 1}` : undefined) },
+      (name, state, q) => (name !== "step" ? {} : (state as { page: { text: string } }).page.text === "page 3" ? done : click("Next")(q)), { url: P[0]!.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(r.steps.map((x) => x.result)).toEqual(["ok", "ok", "ok", "done"]);
+    const last = stepStates(t).at(-1)?.recent_actions ?? [];
+    expect(last.map((a) => a.page_changed)).toEqual([true, true, true]);
+    expect(t.log.lines.filter((l) => /request on it is dropped/.test(l))).toHaveLength(3);
+  });
+
+  it("earlyDecisions false: every observe waits for the whole settle", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur },
+      byUrl({ [LIST.url]: (q, state) => ((state as { page: { text: string } }).page.text === "list" ? click("Open filters")(q) : done) }), { url: LIST.url }, { earlyDecisions: false });
+    await t.runner.run();
+    expect(t.page.earlies.every((e) => !e)).toBe(true);
+  });
+});
+
+describe("early decisions: review fixes", () => {
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  const retryReasons = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((x) => x.name === "step").map((x) => (x.state as { retry_reason?: string }).retry_reason ?? "");
+  const fills = (t: { page: { calls: { op: string; kind?: string; id?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "fill").map((c) => c.id);
+
+  it("a step request that fails while the rest of the settle runs is never unhandled: the run fails and closes Chrome", async () => {
+    const LIST = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e2", "click", "Home", "link")], "list");
+    const OPEN = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button")], "list\nFilters");
+    const page = fakePage({ pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur });
+    const observe = page.observe.bind(page);
+    // The resumed settle takes 50 ms; the request fails after 5 ms, before the loop reads it.
+    page.observe = async (o) => { const resume = page.pending?.() === true; const r = await observe(o); if (resume) await new Promise((res) => setTimeout(res, 50)); return r; };
+    const base = fakeOracle(byUrl({ [LIST.url]: (q) => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Open filters"), confidence: 0.9 } }) }));
+    let n = 0;
+    const oracle: typeof base = { ...base, ask: async (name, state, qs) => {
+      if (name === "step" && ++n === 2) { await new Promise((r) => setTimeout(r, 5)); throw new Error("HTTP 503 from the API"); }
+      return base.ask(name, state, qs);
+    } };
+    const chrome = fakeChrome();
+    const r = await new FastRunner({ cfg: cfg("open https://app.example/list and open the filters", { url: LIST.url }), profiles: [], chrome: async () => chrome, openPage: async () => page,
+      oracle, human: fakeHuman({ interactive: false }), log: fakeLogger(), sleep: async () => undefined, earlyDecisions: true }).run();
+    expect(page.earlies).toContain(true);
+    expect(r.outcome).toBe("failed");
+    expect(r.error?.message).toContain("HTTP 503");
+    expect(chrome.closes).toBe(1);
+  });
+
+  describe("a chip field whose suggestion popup opens only on the settled page", () => {
+    const URL = "https://mail.example/compose";
+    const tok = (popup: boolean): TokenFacts => ({ items: [[90, "To", 0]], chips: [], ...(popup ? { popup: true as const } : {}) });
+    const page = (to: string, popup: boolean, subject: string, text: string) => obs(URL, [
+      el("e1", "fill", "To", "combobox", { node: 1, value: to, form: 3, inputType: "text", token: tok(popup) }),
+      el("e2", "fill", "Subject", "textbox", { node: 2, value: subject, form: 3, inputType: "text" }),
+      el("e4", "click", "Send", "button", { node: 4, form: 3 }),
+    ], text, { doc: 1, focus: { node: 1, label: "To", role: "combobox", submitLabel: "Send", editable: true, value: to, form: 3, multiline: false } });
+    const FORM = page("", false, "", "Compose");
+    const TYPED = page("bob@example.com", false, "", "Compose");
+    const OPEN = page("bob@example.com", true, "", "Compose\nNo contacts found");
+    const SUBJ = page("bob@example.com", true, "Hello", "Compose\nNo contacts found");
+    const fillA = (label: string, id: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.8 }, type_text_value: { choice: id, confidence: 0.9 } });
+    for (const early of [false, true]) {
+      it(`the chip gate stops the next fill (earlyDecisions ${early})`, async () => {
+        const t = setup("write to bob and set the subject", {
+          pages: { form: FORM, typed: TYPED, open: OPEN, subj: SUBJ }, start: "form",
+          transitions: (c, cur) => (c.op === "act" && c.id === "e1" ? "typed" : c.op === "act" && c.id === "e2" ? "subj" : cur === "typed" ? "open" : undefined),
+          late: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined),
+        }, (name, state, q) => {
+          if (name !== "step") return {};
+          const text = (state as { page: { text: string } }).page.text;
+          const to = (state as { elements: { label: string; value?: string }[] }).elements.find((e) => e.label === "To")?.value ?? "";
+          if (to === "") return fillA("To", "v_b")(q);
+          if (text.includes("No contacts") || text === "Compose") return (state as { retry_reason?: string }).retry_reason ? stop : fillA("Subject", "v_s")(q);
+          return stop;
+        }, { url: URL, vars: { b: "bob@example.com", s: "Hello" }, maxSteps: 4 }, { earlyDecisions: early });
+        await t.runner.run();
+        expect(fills(t)).toEqual(["e1"]);
+        expect(retryReasons(t).some((x) => /"To" holds "bob@example.com", which is not added yet/.test(x))).toBe(true);
+      });
+    }
+  });
+
+  it("a run that ends right after an early action ends its settle: the audit and the sent texts read the settled page", async () => {
+    const URL = "https://chat.example/c/1";
+    const COMPOSE = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "hello there", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat", { doc: 1, filled: [1], texts: [[1, "hello there"]] });
+    const SENT = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat\nhello there", { doc: 1, filled: [], texts: [] });
+    const t = setup("send the message", { pages: { c: COMPOSE, s: SENT }, start: "c", late: (c) => (c.op === "act" && c.id === "e2" ? "s" : undefined) },
+      byUrl({ [URL]: (q) => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } }) }),
+      { url: URL, maxSteps: 1, confirm: "autonomous" }, { earlyDecisions: true, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.steps[0]?.unattended?.texts[0]?.left).toBe(true);
+    expect(t.runner.sentTexts()).toEqual([{ field: "Message", text: "hello there" }]);
+    expect(t.page.pending?.()).toBe(false);
+    // The deferred record of step 1 goes to the logger before the record of the step cap.
+    expect(t.log.steps.map((x) => x.step)).toEqual([1, 2]);
+  });
+
+  it("the step log of an audited early action waits for the settled page: the MCP view reads where the text went", async () => {
+    const URL = "https://chat.example/c/1";
+    const COMPOSE = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "hello there", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat", { doc: 1, filled: [1], texts: [[1, "hello there"]] });
+    const SENT = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat\nhello there", { doc: 1, filled: [], texts: [] });
+    const t = setup("send the message", { pages: { c: COMPOSE, s: SENT }, start: "c", late: (c) => (c.op === "act" && c.id === "e2" ? "s" : undefined) },
+      byUrl({ [URL]: (q, state) => ((state as { page: { text: string } }).page.text === "Chat"
+        ? { page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } }
+        : { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.95, probabilities: { DONE: 0.95, CLICK: 0.05 } } }) }),
+      { url: URL, maxSteps: 3, confirm: "autonomous" }, { earlyDecisions: true, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+    const atLog: string[] = [];
+    const step = t.log.step.bind(t.log);
+    t.log.step = (rec) => { atLog.push(JSON.stringify(rec.unattended?.texts.map((x) => x.left) ?? null)); step(rec); };
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.outcome).toBe("done");
+    expect(atLog[0]).toBe("[true]");
+    expect(t.log.lines.findIndex((l) => l.startsWith("STEP 1"))).toBeLessThan(t.log.lines.findIndex((l) => l.startsWith("STEP 2")));
+    expect(t.log.lines.some((l) => /step 1 unattended, after the settle: Message left the page/.test(l))).toBe(true);
+  });
+
+  it("the settled page shows an option that Enter picks: the Enter decided without it is dropped", async () => {
+    const URL = "https://chat.example/c/9";
+    const acts = (v: string, menu: boolean) => [
+      el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }),
+      el("e2", "click", "Send", "button", { node: 2, form: 3 }),
+      ...(menu ? [el("e5", "click", "Ann Lee", "option", { node: 5 })] : []),
+    ];
+    const focus = (v: string, pick: boolean) => ({ node: 1, label: "Message", role: "textbox", submitLabel: "", editable: true, value: v, form: 3, multiline: true, ...(pick ? { enterOption: { node: 5, label: "Ann Lee" } } : {}) });
+    const EMPTY = obs(URL, acts("", false), "Chat", { doc: 1, focus: focus("", false) });
+    const EARLY = obs(URL, acts("@Ann", true), "Chat\nAnn Lee", { doc: 1, focus: focus("@Ann", false) });
+    const SETTLED = obs(URL, acts("@Ann", true), "Chat\nAnn Lee", { doc: 1, focus: focus("@Ann", true) });
+    expect(SETTLED.fingerprint).toBe(EARLY.fingerprint);
+    const t = setup("type @Ann in the message and press enter", {
+      pages: { e: EMPTY, early: EARLY, settled: SETTLED }, start: "e",
+      transitions: (c) => (c.op === "act" && c.id === "e1" ? "early" : undefined),
+      late: (c) => (c.op === "act" && c.id === "e1" ? "settled" : undefined),
+    }, (name, state, q) => {
+      if (name !== "step") return {};
+      const f = (state as { focus: { value?: string; enter_picks?: string } | null }).focus;
+      if ((f?.value ?? "") === "") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "v_m", confidence: 0.9 } };
+      if (f?.enter_picks) return stop;
+      return { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.95, probabilities: { PRESS_ENTER: 0.95, WAIT: 0.05 } } };
+    }, { url: URL, vars: { m: "@Ann" }, maxSteps: 3 }, { earlyDecisions: true });
+    await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(true);
+  });
+
+  it("the focus moved during the rest of the settle: the Enter decided for the search box is dropped", async () => {
+    const url = "https://chat.example/c/general";
+    const acts = (q: string) => [
+      el("e1", "fill", "Search messages", "searchbox", { value: q, inputType: "search" }),
+      el("e2", "fill", "Message #general", "textbox", { value: "Ship it now", multiline: true }),
+    ];
+    const f = (over: Partial<NonNullable<Observation["focus"]>>) => ({ node: 1, label: "Search messages", role: "searchbox", submitLabel: "", editable: true, value: "release", ...over });
+    const START = obs(url, acts(""), "general", { focus: f({ value: "" }) });
+    const TYPED = obs(url, acts("release"), "general", { focus: f({}) });
+    const MOVED = obs(url, acts("release"), "general", { focus: f({ node: 2, label: "Message #general", role: "textbox", value: "Ship it now", multiline: true }) });
+    expect(MOVED.fingerprint).toBe(TYPED.fingerprint);
+    let n = 0;
+    const t = setup(`open ${url} and search messages for "release"`, { pages: { start: START, typed: TYPED, moved: MOVED }, start: "start",
+      transitions: (c) => (c.op === "act" && c.id === "e1" ? "typed" : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "moved" : undefined) }, (name, _state, q) => {
+      if (name !== "step") return {};
+      n += 1;
+      if (n === 1) {
+        const v = valueQ(q, "Search messages");
+        return { page_kind: "task_page", operation: { choice: "TYPE_TEXT", confidence: 0.9, probabilities: { TYPE_TEXT: 0.9, WAIT: 0.1 } }, type_text_target: { choice: idx(q, "type_text_target", "Search messages"), confidence: 0.9 },
+          [`value_${idx(q, "type_text_target", "Search messages")}`]: { choice: Object.keys(v?.criteria ?? {}).find((x) => x !== "none" && x !== "generate") ?? "none", confidence: 0.95 } };
+      }
+      if (n === 2) return { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.6, probabilities: { PRESS_ENTER: 0.6, WAIT: 0.4 } } };
+      return stop;
+    }, { url, maxSteps: 3 }, { earlyDecisions: true });
+    await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(true);
+  });
+});
+
+describe("early decisions: a fill decided again on the settled page", () => {
+  const URL = "https://chat.example/c/2";
+  const page = (v: string, text: string) => obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], text, { doc: 1, filled: v ? [1] : [], texts: v ? [[1, v]] : [] });
+  const EMPTY = page("", "Chat");
+  const SHOWN = page("hello there", "Chat");
+  const CLEARED = page("", "Chat\nDraft discarded");
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  for (const early of [false, true]) {
+    it(`the page cleared the field after the early page showed the text: the entry is pending (earlyDecisions ${early})`, async () => {
+      const t = setup("type the message", { pages: { e: EMPTY, s: SHOWN, c: CLEARED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e1" ? (early ? "s" : "c") : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "c" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "v_m", confidence: 0.95 } };
+        return stop;
+      }, { url: URL, vars: { m: "hello there" }, maxSteps: 3 }, { earlyDecisions: early, fromAssistant: true });
+      await t.runner.run();
+      if (early) expect(t.page.earlies).toContain(true);
+      expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: "hello there", pending: true }]);
+    });
+    it(`a written text that the early page showed and the settled page cleared is not typed (earlyDecisions ${early})`, async () => {
+      const text = fakeText([{ kind: "text", values: { f1: "hello there" } }]);
+      const t = setup("write a short hello to the chat", { pages: { e: EMPTY, s: SHOWN, c: CLEARED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e1" ? (early ? "s" : "c") : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "c" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "generate", confidence: 0.9 } };
+        return stop;
+      }, { url: URL, maxSteps: 3 }, { earlyDecisions: early, text, fromAssistant: true });
+      await t.runner.run();
+      expect(t.page.calls.some((c) => c.op === "act" && c.kind === "fill" && c.text === "hello there")).toBe(true);
+      expect(t.runner.untypedText()).toEqual(["Message"]);
+    });
+  }
+});
+
+describe("early decisions: a send that the settled page reverses", () => {
+  const URL = "https://chat.example/c/3";
+  const page = (v: string, text: string) => obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], text, { doc: 1, filled: v ? [1] : [], texts: v ? [[1, v]] : [] });
+  const COMPOSE = page("hello there", "Chat");
+  const SENDING = page("", "Chat\nSending...");
+  const FAILED = page("hello there", "Chat\nMessage failed to send");
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  for (const [early, maxSteps] of [[false, 3], [true, 3], [true, 1]] as const) {
+    it(`the composer clears while it sends and the failed send puts the text back: no send (earlyDecisions ${early}, maxSteps ${maxSteps})`, async () => {
+      const t = setup("send the message", { pages: { c: COMPOSE, s: SENDING, f: FAILED }, start: "c",
+        transitions: (c) => (c.op === "act" && c.id === "e2" ? (early ? "s" : "f") : undefined), late: (c) => (c.op === "act" && c.id === "e2" ? "f" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } };
+        return stop;
+      }, { url: URL, maxSteps, confirm: "autonomous" }, { earlyDecisions: early, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+      await t.runner.run();
+      if (early) expect(t.page.earlies).toContain(true);
+      expect(t.runner.sentTexts()).toEqual([]);
+      expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: "hello there" }]);
+      // The request on the settled page has no sent texts. A dropped request on the early page can have them.
+      const steps = t.oracle.requests.filter((x) => x.name === "step");
+      const settled = steps.filter((x) => (x.state as { page: { text: string } }).page.text.includes("failed to send"));
+      expect(settled.every((x) => (x.state as { sent_texts?: unknown }).sent_texts === undefined)).toBe(true);
+      if (maxSteps > 1) expect(settled.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+describe("a value head that the oracle dropped", () => {
+  it("gets a value request of its own: a plain search box never blocks as needs_credential", async () => {
+    const inner = fakeOracle((name, _state, q) => {
+      if (name === "value") {
+        const head = Object.keys(q).find((k) => k.startsWith("value_")) ?? "value_1";
+        const opts = Object.keys((q[head] as ChoiceQuestion).criteria ?? {});
+        return { [head]: { choice: opts.find((o) => o !== "none" && o !== "generate") ?? "none", confidence: 0.95 } };
+      }
+      if (name !== "step") return {};
+      if (!q["type_text_target"]) return { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } };
+      return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Search Wikipedia"), confidence: 0.9 } };
+    });
+    let asked = 0;
+    const oracle: typeof inner = { ...inner, ask: async (name, state, qs) => {
+      const r = await inner.ask(name, state, qs);
+      if (name !== "step") return r;
+      asked += 1;
+      // As createOracle does with a head that has a bad shape twice: the value head is not in the answers.
+      const answers = Object.fromEntries(Object.entries(r.answers).filter(([k]) => !k.startsWith("value_")));
+      return { ...r, answers };
+    } };
+    const page = fakePage({ pages: { home: HOME, done: { ...HOME, text: "Wikipedia\nAlan Turing" } as Observation }, start: "home", transitions: (c) => (c.op === "act" && c.kind === "fill" ? "done" : undefined) });
+    const r = await new FastRunner({ cfg: cfg("open wikipedia.org and search for Alan Turing", { maxSteps: 3 }), profiles: [], chrome: async () => fakeChrome(), openPage: async () => page,
+      oracle, human: fakeHuman({ interactive: false }), log: fakeLogger(), sleep: async () => undefined }).run();
+    expect(asked).toBeGreaterThan(0);
+    expect(inner.requests.some((x) => x.name === "value")).toBe(true);
+    expect(r.blocked?.kind).not.toBe("needs_credential");
+    expect(page.calls.some((c) => c.op === "act" && c.kind === "fill" && c.text === "Alan Turing")).toBe(true);
+  });
+});
+
+describe("early decisions: the stall rule and the switch", () => {
+  const URL = "https://app.example/board";
+  const BOARD = obs(URL, [el("e1", "click", "Alpha", "button"), el("e2", "click", "Beta", "button"), el("e3", "click", "Gamma", "button"), el("e4", "click", "Delta", "button")], "Board");
+  const MOVED = obs(URL, [el("e1", "click", "Alpha", "button"), el("e5", "click", "Open card", "button")], "Board\nCard");
+  const at = (label: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.95, probabilities: { DONE: 0.95, CLICK: 0.05 } } };
+
+  it("three early actions that change nothing, also after their settles, block as a loop", async () => {
+    let n = 0;
+    const order = ["Alpha", "Beta", "Gamma", "Delta"];
+    const t = setup("open the board and find the card", { pages: { b: BOARD }, start: "b", late: (_c, cur) => cur }, (name, _s, q) => (name === "step" ? at(order[n++ % 4] as string)(q) : {}), { url: URL, maxSteps: 8 }, { earlyDecisions: true });
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.blocked?.kind).toBe("loop_detected");
+    expect(t.page.calls.filter((c) => c.op === "act")).toHaveLength(3);
+  });
+
+  it("two actions that change nothing and a third whose change shows only after its settle are no loop", async () => {
+    let n = 0;
+    const t = setup("open the board and find the card", { pages: { b: BOARD, m: MOVED }, start: "b", late: (c, cur) => (c.op === "act" && c.id === "e3" ? "m" : cur) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text.includes("Card")) return done;
+        return at(["Alpha", "Beta", "Gamma"][n++] as string)(q);
+      }, { url: URL, maxSteps: 8 }, { earlyDecisions: true });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("JEV_EARLY_DECISIONS=0 turns early decisions off when the deps do not set them", async () => {
+    const was = process.env["JEV_EARLY_DECISIONS"];
+    process.env["JEV_EARLY_DECISIONS"] = "0";
+    try {
+      const t = setup("open the board and find the card", { pages: { b: BOARD, m: MOVED }, start: "b", late: (c, cur) => (c.op === "act" && c.id === "e3" ? "m" : cur) },
+        (name, state, q) => (name !== "step" ? {} : (state as { page: { text: string } }).page.text.includes("Card") ? done : at("Gamma")(q)), { url: URL, maxSteps: 4 });
+      await t.runner.run();
+      expect(t.page.earlies.every((e) => !e)).toBe(true);
+    } finally {
+      if (was === undefined) delete process.env["JEV_EARLY_DECISIONS"]; else process.env["JEV_EARLY_DECISIONS"] = was;
+    }
   });
 });

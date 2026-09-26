@@ -1,5 +1,6 @@
-import { redactData } from "./task.js";
 // Thin Oracle over TypeSafeClient. Counts requests and tokens. Checks size before sending.
+// The answer check is ported from browser-use/jev-ultrafast (jev_ultrafast/model.py). MIT License, Copyright (c) 2026 Browser Use.
+import { redactData } from "./task.js";
 import type { ChoiceResponse, EntryType, NoulResponse, Questions, ScoreResponse, TypeSafeClient, Usage } from "@typesafe-ai/sdk";
 import { LIMITS } from "./types.js";
 import type { Logger } from "./io.js";
@@ -49,6 +50,33 @@ export function assertOptionCount(questions: Questions): void {
   }
 }
 
+/**
+ * Why a choice answer has a bad shape, or null when it is good. The chosen label must be an option of its question, and
+ * the probabilities must be options too, each a finite number from 0 to 1, with a sum of 1 (0.02 tolerance). The chosen
+ * label must have the highest probability. As browser-use/jev-ultrafast `validate_choice` (jev_ultrafast/model.py;
+ * MIT License, Copyright (c) 2026 Browser Use).
+ */
+export function choiceProblem(answer: ChoiceResponse, question: Questions[string] | undefined): string | null {
+  const options = question?.type === "choice" ? new Set(Object.keys(question.criteria)) : null;
+  const probs = answer.probabilities as Record<string, unknown> | undefined;
+  if (typeof answer.choice !== "string" || (options !== null && !options.has(answer.choice))) return `choice "${String(answer.choice)}" is not an option`;
+  if (!probs || typeof probs !== "object") return "no probabilities";
+  const unit = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+  if (!unit(answer.confidence)) return `confidence ${String(answer.confidence)} is not a number from 0 to 1`;
+  let sum = 0;
+  let top = 0;
+  for (const [label, p] of Object.entries(probs)) {
+    if (options !== null && !options.has(label)) return `probability for "${label}", which is not an option`;
+    if (!unit(p)) return `probability ${String(p)} for "${label}" is not a number from 0 to 1`;
+    sum += p;
+    top = Math.max(top, p);
+  }
+  if (Math.abs(sum - 1) >= 0.02) return `probabilities add up to ${sum.toFixed(3)}, not 1`;
+  const chosen = probs[answer.choice];
+  if (!unit(chosen) || chosen < top - 1e-6) return `choice "${answer.choice}" does not have the highest probability`;
+  return null;
+}
+
 /** Read a choice answer by name; null when absent or of another type. */
 export function choiceOf(a: Answers, name: string): ChoiceResponse | null {
   const v = a[name];
@@ -68,17 +96,38 @@ export function createOracle(client: TypeSafeClient, model: string, log: Logger)
     async ask(name, state, questions) {
       assertOptionCount(questions);
       checkBudget(state, questions);
-      const t0 = Date.now();
       const est = estimateTokens({ state, questions });
       log.debug(`jev ${name}: ${Object.keys(questions).length} questions, ~${est} tokens`, state);
-      const r = await client.systemOne({ state, questions, model });
-      stats.ms += Date.now() - t0;
-      stats.requests += 1;
-      stats.inputTokens += r.usage.input_tokens;
-      stats.outputTokens += r.usage.output_tokens;
-      stats.model = r.model;
-      log.debug(`jev ${name} done in ${Date.now() - t0}ms: ${r.usage.input_tokens} in / ${r.usage.output_tokens} out`, r.answers);
-      return { answers: r.answers as Answers, model: r.model, usage: r.usage };
+      const send = async () => {
+        const t0 = Date.now();
+        const r = await client.systemOne({ state, questions, model });
+        stats.ms += Date.now() - t0;
+        stats.requests += 1;
+        stats.inputTokens += r.usage.input_tokens;
+        stats.outputTokens += r.usage.output_tokens;
+        stats.model = r.model;
+        log.debug(`jev ${name} done in ${Date.now() - t0}ms: ${r.usage.input_tokens} in / ${r.usage.output_tokens} out`, r.answers);
+        return r;
+      };
+      /** The choice answers with a bad shape, and why. */
+      const problems = (answers: Answers): [string, string][] => Object.entries(answers).flatMap(([key, a]) => {
+        const problem = a?.type === "choice" ? choiceProblem(a, questions[key]) : null;
+        return problem === null ? [] : [[key, problem] as [string, string]];
+      });
+      let r = await send();
+      // A choice answer with a bad shape: the request goes out one time more (it is rare: none in 434 logged answers,
+      // then a choice that did not have the highest probability). A head that is bad again is dropped before any code
+      // reads it: a missing head never runs an action.
+      if (problems(r.answers as Answers).length > 0) {
+        for (const [key, problem] of problems(r.answers as Answers)) log.warn(`jev ${name}: answer "${key}" has a bad shape (${problem}); asking again`);
+        r = await send();
+      }
+      const answers: Answers = { ...(r.answers as Answers) };
+      for (const [key, problem] of problems(answers)) {
+        delete answers[key];
+        log.warn(`jev ${name}: answer "${key}" dropped: ${problem}`);
+      }
+      return { answers, model: r.model, usage: r.usage };
     },
   };
 }

@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Command menu fixture</title></head>
+<body>
+  <h1>Dashboard</h1>
+  <!-- A composer with a detached cmdk list: focus stays in the contenteditable, and no ARIA link names the list. A
+       hidden cmdk input controls the list. After a 300 ms debounce and a request, the list shows "Ask AI" first and
+       highlighted. A document Enter handler picks the highlighted item, as the real command bar does. -->
+  <div id="composer" contenteditable="true" aria-label="Ask anything" style="min-height:40px;border:1px solid"></div>
+  <div cmdk-root>
+    <div hidden><input cmdk-input role="combobox" aria-expanded="true" aria-controls="list"></div>
+    <div cmdk-list id="list" role="listbox" aria-label="Suggestions"><p>No recent conversations</p></div>
+  </div>
+  <!-- A mention editor whose popup is portaled to the body. -->
+  <div id="comment" contenteditable="true" aria-label="Comment" style="min-height:40px;border:1px solid;margin-top:16px"></div>
+  <p id="out"></p>
+  <script>
+    const composer = document.getElementById('composer'), list = document.getElementById('list');
+    let t;
+    composer.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(async () => {
+        const query = composer.innerText.trim();
+        await (await fetch('/api/wait?ms=250')).text();
+        list.innerHTML = '';
+        for (const [i, label] of [['ask', 'Ask AI: ' + query], ['q3', 'Q3 Roadmap']].entries()) {
+          const item = document.createElement('div');
+          item.setAttribute('cmdk-item', '');
+          item.setAttribute('role', 'option');
+          item.setAttribute('aria-selected', String(i === 0));
+          item.setAttribute('data-selected', String(i === 0));
+          item.dataset.value = label[0];
+          item.textContent = label[1];
+          item.addEventListener('click', () => { window.picked = item.dataset.value; });
+          list.appendChild(item);
+        }
+      }, 300);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const selected = list.querySelector('[cmdk-item][data-selected="true"]');
+      if (selected && document.activeElement === composer) { e.preventDefault(); selected.click(); }
+    });
+    const comment = document.getElementById('comment');
+    comment.addEventListener('input', () => {
+      if (!comment.innerText.includes('@') || document.getElementById('mentions')) return;
+      setTimeout(() => {
+        const pop = document.createElement('div');
+        pop.id = 'mentions';
+        pop.setAttribute('role', 'listbox');
+        pop.innerHTML = '<div role="option" data-highlighted="">Ann Lee</div><div role="option">Bob Stone</div>';
+        document.body.appendChild(pop);
+      }, 100);
+    });
+  </script>
+</body>
+</html>

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TextField } from "../../src/io.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "../../src/fast/generate.js";
 import type { Action } from "../../src/fast/model.js";
-import { actionKey, canWriteInto } from "../../src/fast/policy.js";
+import { actionKey, canWriteInto, cutText } from "../../src/fast/policy.js";
 import { redact, varSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
@@ -20,6 +20,7 @@ describe("canWriteInto", () => {
     ["a text input", box("Subject", { inputType: "text", maxLength: 120 })],
     ["a field labelled Reply to Ann", box("Reply to Ann", { multiline: true })],
     ["autocomplete off", box("Notes", { inputType: "text", autocomplete: "off" })],
+    ["a multiline composer whose placeholder offers search too", box("Search or ask AI anything...", { multiline: true })],
   ])("accepts %s", (_name, a) => {
     expect(canWriteInto(a)).toBe(true);
   });
@@ -33,6 +34,8 @@ describe("canWriteInto", () => {
     ["inputType url", box("Link", { inputType: "url" })],
     ["autocomplete email", box("Your details", { autocomplete: "email" })],
     ...["To", "Cc", "Bcc", "Amount", "Card number", "API key", "Search mail", "Password", "  to  "].map((l) => [`the label ${JSON.stringify(l)}`, box(l)] as [string, Action]),
+    ["a single-line search field", box("Search or ask AI anything...", { inputType: "text" })],
+    ["a multiline field with another exact-value word", box("Search by email address", { multiline: true })],
   ])("rejects %s", (_name, a) => {
     expect(canWriteInto(a)).toBe(false);
   });
@@ -73,6 +76,23 @@ describe("pickFields", () => {
     const p = pickFields(page, reply, { banned, bound }, same);
     expect(labels(p)).toEqual(["Reply", "Subject", "Footer", "Extra"]);
     for (const l of ["Notes", "Cc", "Search mail", "Signature", "Password", "Summary", "Tags", "Send"]) expect(labels(p)).not.toContain(l);
+  });
+  it("a target that holds text the run did not type gets a longer current_value with its lines, and an append sets mode", () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `Line ${i + 1} of the release notes`).join("\n\n");
+    const doc = el("e1", "fill", "Release notes", "textbox", { value: lines, form: 7, multiline: true });
+    const page2 = obs("https://a.b/", [doc, ...actions.slice(3)]);
+    const [append] = pickFields(page2, doc, none, same, { mode: "append" });
+    expect(append?.field.mode).toBe("append");
+    expect(append?.field.current_value.split("\n")).toHaveLength(30);
+    expect(append?.field.current_value.length).toBeGreaterThan(LIMITS.valueChars);
+    expect(append?.field.current_value.length).toBeLessThanOrEqual(LIMITS.heldValueChars);
+    const [replace, next] = pickFields(page2, doc, none, same, { mode: "replace" });
+    expect(replace?.field.mode).toBeUndefined();
+    expect(replace?.field.current_value).toBe(append?.field.current_value);
+    // Only the target: the extra fields keep the short form and no mode.
+    expect(next?.field).toMatchObject({ label: "Subject", current_value: "" });
+    expect(next?.field.mode).toBeUndefined();
+    expect(pickFields(page2, doc, none, same)[0]?.field.current_value.length).toBeLessThanOrEqual(LIMITS.valueChars);
   });
   it("a target with a null form gives only f1", () => {
     const lone = el("e1", "fill", "Comment", "textbox", { value: "", form: null, multiline: true });
@@ -120,6 +140,14 @@ describe("buildTextRequest", () => {
   it("cuts the page text to LIMITS.textChars", () => {
     const big = buildTextRequest({ id: "t2", task: "t", obs: obs("https://a.b/", [], "x".repeat(9000)), history: [], fields, redactor: same });
     expect(big.untrusted_page_text.length).toBe(LIMITS.textChars);
+  });
+  it("lists the texts that a send of the run took out of the page before the page text: redacted, flat, and cut", () => {
+    const long = `Tuesday works, token s3cr3t.\u202E\n${"See you then. ".repeat(20)}`;
+    const sent = buildTextRequest({ id: "t2", task: "t", obs: page, history: [], fields, redactor, sent: [{ field: "Reply\u200B s3cr3t", text: long }] });
+    expect(Object.keys(sent)).toEqual(["id", "goal", "page", "fields", "recent_actions", "sent_texts", "untrusted_page_text"]);
+    expect(sent.sent_texts).toEqual([{ field: "Reply ***", text: cutText(flatText(long.replace("s3cr3t", "***")), LIMITS.spanChars) }]);
+    expect(JSON.stringify(sent)).not.toContain("s3cr3t");
+    expect(buildTextRequest({ id: "t2", task: "t", obs: page, history: [], fields, redactor, sent: [] })).not.toHaveProperty("sent_texts");
   });
 });
 

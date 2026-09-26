@@ -6,12 +6,18 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, GENERATE, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, VALUE_Q, VALUE_Q_GEN, actionSpace, answerLines, buildStep, buildValueStep, cutText, readStep, readValue, rulesFor } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, DATE_NONE, DATE_RULE, DATE_VALUE_Q, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MENTION_RULE, MODES, ORDER_RULE, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, mentionMatches, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
-import type { Observation } from "../../src/fast/model.js";
+import type { Action, DateInfo, Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
 
 const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
+/** The option key of the target head row whose element string carries `label`. */
+const idxOf = (questions: Record<string, unknown>, head: string, label: string): string => {
+  const found = Object.entries((questions[head] as ChoiceQuestion | undefined)?.criteria ?? {}).find(([, v]) => String((v as { element?: string }).element ?? "").includes(label));
+  if (!found) throw new Error(`no ${head} option for ${label}`);
+  return found[0];
+};
 const valueHeads = (questions: Record<string, unknown>): string[] => Object.keys(questions).filter((k) => k.startsWith("value_"));
 const span = (id: string, text: string, secret = false, source: Span["source"] = "quoted"): Span => ({ id, text, source, secret });
 
@@ -26,9 +32,10 @@ function input(over: Partial<StepInput> = {}): StepInput {
 describe("RULES", () => {
   it("keeps the proto rules and adds the jev-ultrafast lines", () => {
     const all = RULES.join("\n");
+    expect(all).toContain("Do the steps of the goal in the order that the goal gives them.");
     expect(all).toContain("detailed view");
     expect(all).toContain("autocomplete suggestion");
-    expect(all).toContain("date pickers");
+    expect(all).not.toContain("date picker");
     expect(all).toContain("Recent WAIT actions are not evidence of loading");
     expect(all).toContain("PRESS_ENTER submits the focused field. GO_BACK returns to the previous page.");
     expect(rulesFor("extract").join("\n")).toContain("SCROLL_DOWN when it is not");
@@ -241,6 +248,38 @@ describe("Enter readiness", () => {
   });
 });
 
+describe("the option that Enter picks", () => {
+  const LABEL = "Ask AI: “Q3 Roadmap” press ↵ to chat";
+  const page = (enterOption?: { node: number; label: string }): Observation => obs("https://app.example/dash", [
+    el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "Q3 Roadmap", multiline: true }),
+    el("e14", "click", LABEL, "option", { selected: "true" }),
+    el("e15", "click", "Q3 Roadmap press ↵ to open", "option", { selected: "false" }),
+  ], "Q3 Roadmap", { focus: { node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel: "Send message", editable: true, value: "Q3 Roadmap", multiline: true, ...(enterOption ? { enterOption } : {}) } });
+
+  it("the state shows the option label as focus.enter_picks, never its node; the Enter text names focus.enter_picks and holds no page text", () => {
+    const built = buildStep(input({ task: "open the Q3 Roadmap artifact", obs: page({ node: 14, label: LABEL }) }));
+    const focus = (built.state as { focus: Record<string, unknown> }).focus;
+    expect(focus).toEqual({ node: 1, label: "Q3 Roadmap", role: "textbox", submitLabel: "Send message", editable: true, value: "Q3 Roadmap", enter_picks: LABEL });
+    const enter = (built.questions.operation as ChoiceQuestion).criteria["PRESS_ENTER"];
+    expect(enter).toBe(ENTER_PICKS);
+    expect(JSON.stringify(built.questions.operation)).not.toContain("Ask AI");
+  });
+
+  it("a long option label is cut, and without an option the Enter text and the focus stay as before", () => {
+    const long = "Ask AI: " + "x".repeat(200);
+    const built = buildStep(input({ obs: page({ node: 14, label: long }) }));
+    expect(((built.state as { focus: { enter_picks: string } }).focus.enter_picks).length).toBeLessThanOrEqual(LIMITS.nameChars);
+    const plain = buildStep(input({ obs: page() }));
+    expect((plain.questions.operation as ChoiceQuestion).criteria["PRESS_ENTER"]).toBe("Press Enter to submit the focused field.");
+    expect((plain.state as { focus: Record<string, unknown> }).focus).not.toHaveProperty("enter_picks");
+  });
+
+  it("a secret in the option label is redacted like the page", () => {
+    const built = buildStep(input({ obs: page({ node: 14, label: "Ask AI: s3cr3tvalue" }), spans: [span("v_token", "s3cr3tvalue", true, "var")] }));
+    expect(JSON.stringify(built.state)).not.toContain("s3cr3tvalue");
+  });
+});
+
 describe("requests without a text source (regression)", () => {
   const digest = (v: unknown): string => createHash("sha256").update(JSON.stringify(v)).digest("hex");
   const reply = (over: Partial<Observation> = {}): Observation => obs("https://mail.example/t/1", [
@@ -279,8 +318,50 @@ describe("requests without a text source (regression)", () => {
     const out = cases().map((c) => { const b = buildStep(c); return { state: b.state, questions: b.questions }; });
     expect(JSON.stringify(out)).not.toContain("s3cr3t");
     // Taken again on 2026-09-23, when one value head per field replaced the shared type_text_value head and a field that
-    // can take new text stopped offering the whole task and clauses.
-    expect(digest(out)).toBe("178a072984aa987ea32ac9fd740b7ab5dc35d88cd51db2e887485cab5ee72209");
+    // can take new text stopped offering the whole task and clauses. Taken again on 2026-09-26, when the date rule went into
+    // the requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
+    // Taken again on 2026-09-26, when the order rule (ORDER_RULE) went into RULES (the ultrafast comparison).
+    expect(digest(out)).toBe("b58b416ba298d3e549bf6eebee98eadf8a7d991ae2c5fe4a7ab809dc2c938dc7");
+  });
+});
+
+describe("a topic after \"about\" is a query, never a message", () => {
+  it("a search box offers it; a field that can take new text does not, with or without a text source", () => {
+    const task = "Find and open the Wikipedia article about Gödel’s incompleteness theorems.";
+    const page = obs("https://en.wikipedia.org/", [el("e1", "fill", "Search Wikipedia", "searchbox", { value: "" }), el("e2", "fill", "Note", "textbox", { value: "", multiline: true })]);
+    const spans = extractSpans(task);
+    const topic = spans.find((x) => x.source === "after_verb" && x.verb === "about");
+    expect(topic?.text).toBe("Gödel’s incompleteness theorems");
+    for (const canGenerate of [false, true]) {
+      const b = buildStep(input({ task, obs: page, spans, canGenerate }));
+      const keys = (k: string) => Object.keys((b.questions[k] as ChoiceQuestion).criteria);
+      expect(keys("value_1")).toContain(topic?.id);
+      expect(keys("value_2")).not.toContain(topic?.id);
+    }
+  });
+  it("a text that the task also gives as a value or a name is not hidden: an earlier \"about\" does not take it", () => {
+    const head = (task: string, label: string, canGenerate: boolean): string[] => {
+      const page = obs("https://a.b/", [el("e1", "fill", label, "textbox", { value: "" })]);
+      const spans = extractSpans(task);
+      const q = buildStep(input({ task, obs: page, spans, canGenerate })).questions["value_1"] as ChoiceQuestion | undefined;
+      return Object.keys(q?.criteria ?? {}).map((k) => spans.find((s) => s.id === k)?.text ?? k);
+    };
+    for (const g of [false, true]) {
+      expect(head("Search for articles about Rust, then type Rust in the Tag field", "Tag", g)).toContain("Rust");
+      expect(head("Find the issue about Checkout and set the label to Checkout", "Label", g)).toContain("Checkout");
+    }
+    expect(head("Create a GitHub issue about Login Timeout", "Title", false)).toContain("Login Timeout");
+    // A topic that is only a topic stays hidden from a field that takes new text.
+    expect(head("Write a note about the launch and save it", "Note", false)).not.toContain("the launch");
+    // A name that is the whole topic: a single-line field (a title, a subject) offers it; a multiline field does not.
+    const multiline = (task: string, label: string, canGenerate: boolean): string[] => {
+      const page = obs("https://a.b/", [el("e1", "fill", label, "textbox", { value: "", multiline: true })]);
+      const spans = extractSpans(task);
+      const q = buildStep(input({ task, obs: page, spans, canGenerate })).questions["value_1"] as ChoiceQuestion | undefined;
+      return Object.keys(q?.criteria ?? {}).map((k) => spans.find((s) => s.id === k)?.text ?? k);
+    };
+    for (const g of [false, true]) expect(multiline("Write a note about Project Phoenix and save it", "Note", g)).not.toContain("Project Phoenix");
+    expect(head("Email Bob about Project Phoenix", "Subject", false)).toContain("Project Phoenix");
   });
 });
 
@@ -319,6 +400,8 @@ describe("value heads: one per TYPE_TEXT field", () => {
     expect(instr(off.questions["value_2"])).toEqual({ question: VALUE_Q, field: "[2] Reply", role: "textbox" });
     const filled = ask({ spans: taskSpans, obs: obs("https://a.b/", [el("e1", "fill", "Name", "textbox", { value: "Old Name" })]) });
     expect(instr(filled.questions["value_1"])).toEqual({ question: VALUE_Q, field: "[1] Name", role: "textbox", current_value: "Old Name" });
+    // The goal stays in the state for an act goal too (see assemble).
+    expect(off.state).toHaveProperty("goal", "reply to Ann that Tuesday at 10:00 works");
     expect(off.meta.values).toEqual({ "1": { spans: { s1: "s1", s2: "s2", s3: "s3", s4: "s4", s5: "s5", v_token: "v_token" }, generate: false }, "2": { spans: { s1: "s1", s3: "s3", v_token: "v_token" }, generate: false } });
     expect(valueHeads(ask({ spans: [] }).questions)).toEqual([]);
     expect(Object.keys(ask({}).questions)).not.toContain("type_text_value");
@@ -557,5 +640,358 @@ describe("value heads: one per TYPE_TEXT field", () => {
     };
     expect(readStep(answers, b.meta, inp).click).toMatchObject({ actionId: "e2", key: "2", label: "Send", conf: 0.9 });
     expect(readStep({ ...answers, operation: { type: "choice", choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9 } } }, b.meta, inp).click).toBeUndefined();
+  });
+});
+
+describe("mode heads: a field that holds text that the run did not type", () => {
+  const doc = "Release 4.2 notes\nThis release improves the editor.\n\nChanges\n- Faster saving";
+  const page = () => obs("https://a.b/doc", [
+    el("e1", "fill", "Title", "textbox", { value: "Release 4.2 notes", inputType: "text" }),
+    el("e2", "fill", "Document", "textbox", { value: doc, multiline: true }),
+    el("e3", "fill", "Comment", "textbox", { value: "", multiline: true }),
+    el("e4", "click", "Save", "button"),
+  ], doc, { doc: 1.5 });
+  const spans = [span("s1", "Reviewed by QA")];
+  const ask = (over: Partial<StepInput> = {}) => buildStep(input({ task: 'add the line "Reviewed by QA" at the end and save', obs: page(), spans, ...over }));
+  const instr = (q: unknown) => (q as ChoiceQuestion).instructions as Record<string, unknown>;
+  const modeHeads = (q: Record<string, unknown>) => Object.keys(q).filter((k) => k.startsWith("mode_"));
+
+  it("only a field in heldText gets a mode head, next to its value head, with the field's lines", () => {
+    expect(modeHeads(ask().questions)).toEqual([]);
+    const b = ask({ heldText: new Set([2]) });
+    expect(modeHeads(b.questions)).toEqual(["mode_2"]);
+    expect(b.meta.modes).toEqual({ "2": true });
+    expect(criteriaKeys(b.questions["mode_2"])).toEqual(["replace_all", "append"]);
+    expect((b.questions["mode_2"] as ChoiceQuestion).criteria).toEqual(MODES);
+    expect(instr(b.questions["mode_2"])).toEqual({ question: MODE_Q, goal: 'add the line "Reviewed by QA" at the end and save', field: "[2] Document", current_lines: ["Release 4.2 notes", "This release improves the editor.", "Changes", "- Faster saving"] });
+    // A banned field gets no head.
+    expect(modeHeads(ask({ heldText: new Set([2]), bannedActionIds: new Set(["e2"]) }).questions)).toEqual([]);
+  });
+
+  it("the value head of a held field asks for the new text; the TYPE_TEXT text says a fill can add to a field", () => {
+    const b = ask({ heldText: new Set([2]) });
+    expect(instr(b.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW, field: "[2] Document" });
+    expect(instr(b.questions["value_3"])).toMatchObject({ question: VALUE_Q });
+    expect((b.questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_HELD);
+    const g = ask({ heldText: new Set([2]), canGenerate: true });
+    expect(instr(g.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW_GEN });
+    expect((g.questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_HELD_GEN);
+    // Without a held field, the texts stay as they were.
+    expect((ask().questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe("Enter or replace text in an editable field. Another question chooses the value from the offered typed_values.");
+    expect((ask({ canGenerate: true }).questions["operation"] as ChoiceQuestion).criteria["TYPE_TEXT"]).toBe(TYPE_TEXT_GEN);
+  });
+
+  it("the value request of a held field carries its mode head too", () => {
+    const v = buildValueStep(input({ task: "add a line", obs: page(), spans, heldText: new Set([2]) }), "2");
+    expect(Object.keys(v?.questions ?? {})).toEqual(["value_2", "mode_2"]);
+    expect(v?.meta.modes).toEqual({ "2": true });
+    // A value request of the var fallback asks for the value only: the loop keeps the mode of the first answer.
+    const withVar = [...spans, span("v_note", "Reviewed by QA today", false, "var")];
+    const only = buildValueStep(input({ task: "add a line", obs: page(), spans: withVar, heldText: new Set([2]), canGenerate: true }), "2", { vars: ["v_note"] });
+    expect(Object.keys(only?.questions ?? {})).toEqual(["value_2"]);
+    expect(criteriaKeys(only?.questions["value_2"])).toEqual(["v_note", "none"]);
+    expect(instr(only?.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW });
+    expect(only?.meta.modes).toEqual({});
+    const rest = buildValueStep(input({ task: "add a line", obs: page(), spans: withVar, heldText: new Set([2]), canGenerate: true }), "2", { noVars: true });
+    expect(Object.keys(rest?.questions ?? {})).toEqual(["value_2"]);
+    expect(instr(rest?.questions["value_2"])).toMatchObject({ question: VALUE_Q_NEW_GEN });
+  });
+
+  it("readEdit maps replace_all to replace and append to append; readStep reads the chosen field's mode", () => {
+    const inp = input({ task: "add a line", obs: page(), spans, heldText: new Set([2]) });
+    const b = buildStep(inp);
+    const mode = (choice: string, confidence: number): Answers => ({ mode_2: { type: "choice", choice, confidence, probabilities: { [choice]: confidence } } });
+    expect(readEdit(mode("append", 0.97), b.meta, "2")).toEqual({ mode: "append", conf: 0.97, probs: { append: 0.97 } });
+    expect(readEdit(mode("replace_all", 0.85), b.meta, "2")).toMatchObject({ mode: "replace", conf: 0.85 });
+    expect(readEdit(mode("prepend", 0.9), b.meta, "2")).toBeUndefined();
+    expect(readEdit({}, b.meta, "2")).toBeUndefined();
+    expect(readEdit(mode("append", 0.97), b.meta, "3")).toBeUndefined();
+    const answers: Answers = { operation: { type: "choice", choice: "TYPE_TEXT", confidence: 0.8, probabilities: { TYPE_TEXT: 0.8 } }, type_text_target: { type: "choice", choice: "2", confidence: 0.9, probabilities: { "2": 0.9 } }, ...mode("append", 0.97) };
+    expect(readStep(answers, b.meta, inp).edit).toMatchObject({ mode: "append", conf: 0.97 });
+  });
+
+  it("fieldLines drops zero-width characters and blank lines", () => {
+    expect(fieldLines("\uFEFFRelease\n\n  two   words \n\u200B\n")).toEqual(["Release", "two words"]);
+  });
+});
+
+describe("sends and the var fallback", () => {
+  const brief = () => obs("https://app.example/workflows/new", [
+    el("e1", "fill", "Workflow title", "textbox", { value: "", form: null }),
+    el("e5", "fill", "Describe the workflow", "textbox", { value: "", form: 3, multiline: true }),
+    el("e6", "click", "Send message", "button", { form: 3 }),
+    el("e7", "fill", "Search", "searchbox", { value: "", inputType: "search", form: null }),
+  ], "New workflow", { doc: 2.5 });
+  const vars = [span("v_brief", "Send me a daily summary of new artifacts", false, "var"), span("v_channel", "#team-updates", false, "var"), span("v_token", "s3cr3t", true, "var")];
+  const spans = [span("s1", "the workflow", false, "after_verb"), span("s2", "Describe the workflow and send it", false, "whole_task"), ...vars];
+  const at = (over: Partial<StepInput> = {}) => input({ task: "Describe the workflow and send it", obs: brief(), spans, ...over });
+  const criteria = (q: unknown) => (q as ChoiceQuestion).criteria;
+  const instr = (q: unknown) => (q as ChoiceQuestion).instructions as Record<string, unknown>;
+
+  it("a text source shows each non-secret var with its key; the CLI and a secret var keep their text", () => {
+    const on = buildStep(at({ canGenerate: true }));
+    expect(criteria(on.questions["value_2"])).toMatchObject({ v_brief: { var: "brief", value: "Send me a daily summary of new artifacts" }, v_channel: { var: "channel", value: "#team-updates" }, v_token: "<secret value for token>", generate: GENERATE });
+    expect(criteria(on.questions["value_4"])).toMatchObject({ v_brief: { var: "brief", value: "Send me a daily summary of new artifacts" } });
+    const off = buildStep(at());
+    expect(criteria(off.questions["value_2"])).toMatchObject({ v_brief: "Send me a daily summary of new artifacts", v_token: "<secret value for token>" });
+    expect(JSON.stringify(on)).not.toContain("s3cr3t");
+  });
+
+  it("the vars-only value request offers the listed vars and none with VALUE_Q; noVars offers the head without its vars", () => {
+    const only = buildValueStep(at({ canGenerate: true }), "2", { vars: ["v_brief", "v_channel"] });
+    expect(Object.keys(only?.questions ?? {})).toEqual(["value_2"]);
+    expect(criteriaKeys(only?.questions["value_2"])).toEqual(["v_brief", "v_channel", "none"]);
+    expect(instr(only?.questions["value_2"])).toMatchObject({ question: VALUE_Q, field: "[2] Describe the workflow" });
+    expect(only?.meta.values["2"]).toEqual({ spans: { v_brief: "v_brief", v_channel: "v_channel" }, generate: false });
+    // The state is the state of the step request.
+    expect(only?.state).toEqual(buildStep(at({ canGenerate: true })).state);
+    const rest = buildValueStep(at({ canGenerate: true }), "2", { noVars: true });
+    expect(criteriaKeys(rest?.questions["value_2"])).toEqual(["s1", "generate", "none"]);
+    expect(instr(rest?.questions["value_2"])).toMatchObject({ question: VALUE_Q_GEN });
+    // A field with none of the listed vars has no head: no request.
+    expect(buildValueStep(at({ canGenerate: true }), "2", { vars: [] })).toBeNull();
+    expect(buildValueStep(at({ canGenerate: true, spans: [span("s1", "the workflow", false, "after_verb")] }), "2", { vars: ["v_brief"] })).toBeNull();
+  });
+
+  it("sentTexts adds sent_texts (redacted, cut) and the DONE_SENT text; without it the DONE text stays", () => {
+    const long = `Every Friday, write a weekly status report with token s3cr3t. ${"More words. ".repeat(20)}`;
+    const b = buildStep(at({ canGenerate: true, sentTexts: [{ field: "Describe the workflow", text: long }] }));
+    expect(criteria(b.questions["operation"])["DONE"]).toBe(DONE_SENT);
+    const state = b.state as Record<string, unknown>;
+    expect(state["sent_texts"]).toEqual([{ field: "Describe the workflow", text: cutText(long.replace("s3cr3t", "***"), LIMITS.spanChars) }]);
+    expect(Object.keys(state).slice(-2)).toEqual(["typed_values", "sent_texts"]);
+    expect(JSON.stringify(b)).not.toContain("s3cr3t");
+    const none = buildStep(at({ canGenerate: true }));
+    expect(criteria(none.questions["operation"])["DONE"]).toBe(DONE_TEXT);
+    expect((none.state as Record<string, unknown>)["sent_texts"]).toBeUndefined();
+    expect(buildStep(at({ canGenerate: true, sentTexts: [] }))).toEqual(none);
+    // DONE banned: no DONE option, but the state still holds the sent texts.
+    const banned = buildStep(at({ canGenerate: true, doneBanned: true, sentTexts: [{ field: "Reply", text: "Tuesday works." }] }));
+    expect(criteriaKeys(banned.questions["operation"])).not.toContain("DONE");
+    expect((banned.state as Record<string, unknown>)["sent_texts"]).toEqual([{ field: "Reply", text: "Tuesday works." }]);
+  });
+});
+
+describe("chip (token) fields", () => {
+  const facts = (over: Partial<TokenFacts> = {}): TokenFacts => ({ items: [[1, "Meeting Participants (Optional)", 0]], chips: [], ...over });
+  const field = (token?: TokenFacts) => el("e1", "fill", "textbox", "textbox", { node: 1, value: "", inputType: "text", ...(token ? { token } : {}) });
+
+  it("tokenEvidence: strong for a learned field or a multiselect listbox, weak for the chip shape, null otherwise", () => {
+    expect(tokenEvidence(field(facts({ learned: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ multi: true })))).toBe("strong");
+    expect(tokenEvidence(field(facts({ chips: ["ann@example.com Remove participant"] })))).toBe("weak");
+    // An open popup alone is not evidence here: the loop counts only a popup that opened with a fill.
+    expect(tokenEvidence(field(facts({ popup: true })))).toBeNull();
+    expect(tokenEvidence(field(facts()))).toBeNull();
+    expect(tokenEvidence(field())).toBeNull();
+    expect(tokenEvidence({ ...field(facts({ learned: true })), kind: "click" })).toBeNull();
+  });
+
+  it("canWriteInto: false only on strong evidence; the chip shape alone keeps a text field writable", () => {
+    expect(canWriteInto(field(facts({ learned: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ multi: true })))).toBe(false);
+    expect(canWriteInto(field(facts({ chips: ["Default branch"] })))).toBe(true);
+    expect(canWriteInto(field(facts({ popup: true })))).toBe(true);
+  });
+
+  it("the chip facts never reach the request; a strong field's value head offers no generate", () => {
+    const page = obs("https://a.b/upload", [
+      field(facts({ learned: true, chips: ["ann@example.com Remove participant"], popup: true })),
+      el("e2", "fill", "Title", "textbox", { node: 2, value: "", inputType: "text", token: facts() }),
+    ]);
+    const b = buildStep(input({ obs: page, canGenerate: true, spans: [span("s1", "bob@example.com")] }));
+    const request = JSON.stringify([b.state, b.questions]);
+    for (const key of ["token", "items", "chips", "learned", "multi", "popup"]) expect(request).not.toContain(`"${key}":`);
+    expect(criteriaKeys(b.questions["value_1"])).not.toContain("generate");
+    expect(criteriaKeys(b.questions["value_2"])).toContain("generate");
+  });
+});
+
+describe("mention facts", () => {
+  const TASK = "mention Ann Lee and ask her for the report status";
+  const PLACEHOLDER = "Type a message — use @ to tag agents, sources & artifacts";
+  const composer = (value = "", over: Record<string, unknown> = {}) => [
+    el("e1", "fill", PLACEHOLDER, "textbox", { node: 1, value, form: 1, multiline: true, ...over }),
+    el("e2", "click", `Open ${PLACEHOLDER}`, "textbox", { node: 1, value, form: 1, multiline: true }),
+    el("e3", "click", "Mention", "button", { node: 2, form: 1 }),
+    el("e4", "click", "Send message", "button", { node: 3, form: 1 }),
+  ];
+  const focusOn = (value: string, mentions?: string[]) => ({ node: 1, label: PLACEHOLDER, role: "textbox", submitLabel: "Send message", editable: true, value, form: 1, multiline: true, popup: [9], ...(mentions ? { mentions } : {}) });
+  const rulesOf = (q: unknown): unknown => (q as ChoiceQuestion).instructions;
+
+  it("adds the mention rule, and mentions: none on an empty message field, only when the task asks to mention someone", () => {
+    const page = obs("https://chat.example/", composer("Hi Ann"), "chat", { focus: focusOn("Hi Ann") });
+    const b = buildStep(input({ task: TASK, obs: page, spans: extractSpans(TASK) }));
+    const state = b.state as { elements: { label: string; mentions?: unknown }[]; focus: Record<string, unknown> };
+    expect(state.elements[0]).toMatchObject({ label: PLACEHOLDER, mentions: "none" });
+    expect(state.elements.slice(1).some((e) => "mentions" in e)).toBe(false);
+    expect(state.focus).toEqual({ node: 1, label: PLACEHOLDER, role: "textbox", submitLabel: "Send message", editable: true, value: "Hi Ann", mentions: "none" });
+    const rule = JSON.stringify(MENTION_RULE).slice(1, -1);
+    expect(JSON.stringify(rulesOf(b.questions["operation"]))).toContain(rule);
+    expect(JSON.stringify(rulesOf(b.questions["click_target"]))).toContain(rule);
+    // ORDER_RULE goes: "Post the update and mention Ann" names the send first, and the mention rule sends after the chip.
+    expect(rulesFor("act", undefined, true)).toEqual([...RULES.filter((r) => r !== ORDER_RULE), MENTION_RULE]);
+
+    const plain = 'Send "Hi team" in the chat';
+    const q = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
+    expect(JSON.stringify(q.state)).not.toContain("mentions");
+    expect(JSON.stringify(q.questions)).not.toContain(rule);
+  });
+
+  it("shows the chips of a field on its row and in focus in any task, and never the code facts", () => {
+    const page = obs("https://chat.example/", composer("Hi Ann @Ann Lee", { mentions: ["Ann Lee"], bareText: "Hi Ann", otherAtoms: 1, popup: [4] }), "chat", { focus: focusOn("Hi Ann @Ann Lee", ["Ann Lee"]) });
+    const plain = 'Send "Hi team" in the chat';
+    const b = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
+    const state = b.state as { elements: Record<string, unknown>[]; focus: Record<string, unknown> };
+    expect(state.elements[0]?.["mentions"]).toEqual(["Ann Lee"]);
+    expect(state.focus["mentions"]).toEqual(["Ann Lee"]);
+    const request = JSON.stringify(b);
+    for (const key of ["bareText", "otherAtoms", "popup"]) expect(request).not.toContain(`"${key}":`);
+  });
+
+  it("an option of a picker shows its checked and selected state in its row and in the click head; the option that Enter picks is only enter_picks", () => {
+    // An earlier version showed aria-selected of a combobox or cmdk option as `highlighted`. With `enter_picks` in the
+    // focus, that second name for the option that Enter picks made Jev press Enter on the command bar
+    // (search-command-open), so the option keeps `selected`.
+    const page = obs("https://chat.example/", [
+      el("e1", "click", "Research Agent", "option", { node: 5, selected: "true", popup: [4, 2] }),
+      el("e2", "click", "Ann Lee", "option", { node: 6, selected: "false", checked: "true", popup: [4, 2] }),
+      el("e3", "click", "Done (1)", "button", { node: 7, popup: [2] }),
+    ], "chat", { focus: { node: 4, label: "Search people", role: "combobox", submitLabel: "", editable: true, value: "", enterOption: { node: 5, label: "Research Agent" }, popup: [2] } });
+    const b = buildStep(input({ task: TASK, obs: page, spans: extractSpans(TASK) }));
+    const rows = (b.state as { elements: Record<string, unknown>[] }).elements;
+    expect(rows[0]).toMatchObject({ label: "Research Agent", selected: "true" });
+    expect(rows[1]).toMatchObject({ label: "Ann Lee", selected: "false", checked: "true" });
+    expect((b.state as { focus: Record<string, unknown> }).focus).toMatchObject({ enter_picks: "Research Agent" });
+    const criteria = (b.questions["click_target"] as ChoiceQuestion).criteria as Record<string, Record<string, unknown>>;
+    expect(criteria["1"]).toMatchObject({ element: "[1] Research Agent", selected: "true" });
+    expect(criteria["2"]).toMatchObject({ checked: "true", selected: "false" });
+    expect(JSON.stringify(b)).not.toContain("highlighted");
+  });
+
+  it("a message field never offers a name to mention; a single-line field, such as the picker search, offers it", () => {
+    const spans = extractSpans(TASK);
+    const page = obs("https://chat.example/", [...composer(), el("e5", "fill", "Search sources", "combobox", { node: 8, value: "", form: 2 })], "chat", { doc: 1 });
+    for (const canGenerate of [false, true]) {
+      const b = buildStep(input({ task: TASK, obs: page, spans, canGenerate }));
+      expect(criteriaKeys(b.questions["value_1"])).not.toContain("s1");
+      expect(criteriaKeys(b.questions["value_4"])).toContain("s1");
+    }
+    expect(spans[0]).toMatchObject({ id: "s1", text: "Ann Lee", source: "mention" });
+  });
+
+  it("the key of a message field holds its text: the label no longer changes with it", () => {
+    const [fill, open, button] = composer("Hi Ann");
+    expect(actionKey(fill!)).toBe(`n:1|${PLACEHOLDER}|Hi Ann`);
+    expect(actionKey(open!)).toBe(`n:1|Open ${PLACEHOLDER}|Hi Ann`);
+    expect(actionKey({ ...fill!, value: "" })).not.toBe(actionKey(fill!));
+    expect(actionKey(button!)).toBe("n:2|Mention");
+    expect(actionKey(el("e9", "fill", "Name", "textbox", { node: 9, value: "Ada", multiline: false }))).toBe("n:9|Name");
+  });
+
+  it("mentionMatches: the same words, or every word of the task name", () => {
+    expect(mentionMatches("Ann Lee", "Ann Lee")).toBe(true);
+    expect(mentionMatches("Ann Lee", "@ann.lee")).toBe(true);
+    expect(mentionMatches("Ann Lee", "Ann")).toBe(true);
+    expect(mentionMatches("Research Agent", "@Research Agent")).toBe(true);
+    expect(mentionMatches("Research Agent", "Ann Lee")).toBe(false);
+    expect(mentionMatches("Ann", "Ann Lee")).toBe(false);
+    expect(mentionMatches("", "Ann")).toBe(false);
+  });
+});
+
+describe("date fields", () => {
+  /** A month-day-year group as the snapshot shows it: one fill action at the month part. */
+  const group = (id: string, node: number, label: string, [m, d, y]: [string, string, string], extra: Partial<DateInfo> = {}): Action => el(id, "fill", label, "textbox", {
+    node, value: `${m}/${d}/${y}`, form: 5, multiline: false,
+    date: { kind: "group", sep: "/", order: "MDY", pad: false, short: false, ...extra,
+      parts: [{ part: "month", node, value: m, spin: false }, { part: "day", node: node + 1, value: d, spin: false }, { part: "year", node: node + 2, value: y, spin: false }] },
+  });
+  const task = "Set the usage date range from 1 September 2026 to 15 September 2026 and click Update";
+  const usage = (over: Partial<Observation> = {}): Observation => obs("https://app.test/usage", [
+    el("e1", "click", "Aug 24, 2026 – Sep 23, 2026", "button", { node: 1, form: null }),
+    group("e2", 10, "Date range start (M/D/YYYY)", ["8", "24", "2026"], { role: "start", range: 1 }),
+    group("e3", 13, "Date range end (M/D/YYYY)", ["9", "23", "2026"], { role: "end", range: 1 }),
+    el("e4", "click", "Tuesday, September 1st, 2026, selected", "button", { node: 20, form: 5, day: { grid: 3, day: "2026-09-01", multi: true, sel: true, pos: "middle" } }),
+    el("e5", "fill", "Search", "searchbox", { node: 21, value: "", form: null }),
+    el("e6", "click", "Update", "button", { node: 30, form: 5 }),
+  ], "Usage & Limits", over);
+  const ask = (over: Partial<StepInput> = {}) => buildStep(input({ task, obs: usage(), spans: extractSpans(task), ...over }));
+
+  it("a date field, a date part, and a box of at most 4 characters never take assistant text", () => {
+    expect(canWriteInto(group("e1", 1, "Date (M/D/YYYY)", ["8", "24", "2026"]))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Due (date)", "textbox", { inputType: "date", date: { kind: "date" } }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "M", "textbox", { inputType: "text", datePart: "month", maxLength: 2 }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Code", "textbox", { inputType: "text", maxLength: 4 }))).toBe(false);
+    expect(canWriteInto(el("e1", "fill", "Title", "textbox", { inputType: "text", maxLength: 5 }))).toBe(true);
+    expect(canWriteInto(el("e1", "fill", "Title", "textbox", { inputType: "text" }))).toBe(true);
+  });
+
+  it("a group is one row with TYPE_TEXT only; its value head offers the task dates and none with the date question", () => {
+    const b = ask();
+    const rows = (b.state as { elements: { label: string; value?: string; operations: string[] }[] }).elements;
+    expect(rows.find((r) => r.label === "Date range start (M/D/YYYY)")).toMatchObject({ value: "8/24/2026", operations: ["TYPE_TEXT"] });
+    expect(rows.find((r) => r.label === "Date range end (M/D/YYYY)")).toMatchObject({ value: "9/23/2026", operations: ["TYPE_TEXT"] });
+    const start = idxOf(b.questions, "type_text_target", "Date range start");
+    const head = b.questions[`value_${start}`] as ChoiceQuestion;
+    expect(head.instructions).toMatchObject({ question: DATE_VALUE_Q, field: `[${start}] Date range start (M/D/YYYY)`, current_value: "8/24/2026" });
+    expect(head.criteria).toEqual({ s1: "1 September 2026", s2: "15 September 2026", none: DATE_NONE });
+    // The date heads come first; the search box keeps its generic head with every span.
+    expect(valueHeads(b.questions).slice(0, 2)).toEqual([`value_${start}`, `value_${idxOf(b.questions, "type_text_target", "Date range end")}`]);
+    expect(criteriaKeys(b.questions[`value_${idxOf(b.questions, "type_text_target", "Search")}`])).toContain("s3");
+  });
+
+  it("a plugin run never offers generate in a date head, and the request keeps the texts without a text source", () => {
+    const b = ask({ canGenerate: true, obs: usage({ actions: usage().actions.filter((a) => a.label !== "Search") }) });
+    expect(b.meta.generate).toBe(false);
+    expect(JSON.stringify(b.questions)).not.toContain("generate");
+    for (const k of valueHeads(b.questions)) expect(criteriaKeys(b.questions[k])).not.toContain("generate");
+  });
+
+  it("an ambiguous numeric date is offered only to a field of its shape; a field with no fitting date has no head", () => {
+    const numeric = "Set the usage date range from 9/1/2026 to 9/15/2026 and click Update";
+    const b = ask({ task: numeric, spans: extractSpans(numeric) });
+    expect(criteriaKeys(b.questions[`value_${idxOf(b.questions, "type_text_target", "Date range start")}`])).toEqual(["s1", "s2", "none"]);
+    const dotted = obs("https://app.test/de", [group("e1", 10, "Datum (D.M.YYYY)", ["24", "8", "2026"], { sep: ".", order: "DMY",
+      parts: [{ part: "day", node: 10, value: "24", spin: false }, { part: "month", node: 11, value: "8", spin: false }, { part: "year", node: 12, value: "2026", spin: false }] })]);
+    const d = buildStep(input({ task: "Set the date to 9/1/2026", obs: dotted, spans: extractSpans("Set the date to 9/1/2026") }));
+    expect(valueHeads(d.questions)).toEqual([]);
+    expect(buildValueStep(input({ task: "Set the date to 9/1/2026", obs: dotted, spans: extractSpans("Set the date to 9/1/2026") }), "1")).toBeNull();
+  });
+
+  it("date heads stay when an oversized request drops the other value heads", () => {
+    const label = "Long label ".repeat(11);
+    const fields = Array.from({ length: 40 }, (_, i) => el(`e${i + 10}`, "fill", `${label}${i}`, "textbox", { node: 100 + i, value: "" }));
+    const many = Array.from({ length: 120 }, (_, i) => span(`s${i + 3}`, `value number ${i} `.repeat(7).slice(0, 118)));
+    const b = buildStep(input({ task, obs: obs("https://a.b/", [...usage().actions.filter((a) => a.id !== "wait"), ...fields], "t".repeat(6000)), spans: [...extractSpans(task).slice(0, 2), ...many] }));
+    expect(b.meta.cuts[0]).toBe("over budget: value heads left out; a fill asks for its value in a second request");
+    expect(valueHeads(b.questions)).toEqual([`value_${idxOf(b.questions, "type_text_target", "Date range start")}`, `value_${idxOf(b.questions, "type_text_target", "Date range end")}`]);
+  });
+
+  it("the date rule goes only into requests of pages with a date field or a calendar day, after the rule on required fields", () => {
+    expect(rulesFor("act", usage())).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4)]);
+    // A task that also asks to mention someone gets both rules: the date rule in place, the mention rule at the end.
+    expect(rulesFor("act", usage(), true)).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4).filter((r) => r !== ORDER_RULE), MENTION_RULE]);
+    expect(rulesFor("extract", usage()).at(-1)).toContain("SCROLL_DOWN");
+    expect(rulesFor("act", obs("https://a.b/", [el("e1", "click", "English", "link")]))).toEqual(RULES);
+    const calendar = obs("https://a.b/", [el("e1", "click", "Tuesday, September 1st, 2026", "button", { day: { grid: 1, day: null, multi: false, sel: false } })]);
+    expect(rulesFor("act", calendar)).toContain(DATE_RULE);
+    const rules = (b: ReturnType<typeof buildStep>) => ((b.questions["operation"] as ChoiceQuestion).instructions as { rules: string[] }).rules;
+    expect(rules(ask())).toContain(DATE_RULE);
+    expect(rules(buildStep(input()))).not.toContain(DATE_RULE);
+  });
+
+  it("readStep reads every date head as dateValues: action id -> span id -> probability", () => {
+    const inp = input({ task, obs: usage(), spans: extractSpans(task) });
+    const b = buildStep(inp);
+    const start = idxOf(b.questions, "type_text_target", "Date range start");
+    const end = idxOf(b.questions, "type_text_target", "Date range end");
+    const answers: Answers = {
+      operation: { type: "choice", choice: "CLICK", confidence: 0.8, probabilities: { CLICK: 0.8, TYPE_TEXT: 0.2 } },
+      click_target: { type: "choice", choice: idxOf(b.questions, "click_target", "Update"), confidence: 0.9, probabilities: {} },
+      [`value_${start}`]: { type: "choice", choice: "s1", confidence: 0.99, probabilities: { s1: 0.99, s2: 0.005, none: 0.005 } },
+      [`value_${end}`]: { type: "choice", choice: "s2", confidence: 0.97, probabilities: { s1: 0.01, s2: 0.97, none: 0.02 } },
+    };
+    expect(readStep(answers, b.meta, inp).dateValues).toEqual({ e2: { s1: 0.99, s2: 0.005 }, e3: { s1: 0.01, s2: 0.97 } });
   });
 });

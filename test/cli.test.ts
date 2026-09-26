@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { main, parseArgs, UsageError } from "../src/cli.js";
+import { main, parseArgs, textModelDeps, USAGE, UsageError } from "../src/cli.js";
+import { fakeLogger } from "./fakes.js";
 import { emptyResult } from "../src/io.js";
 import type { RunResult } from "../src/types.js";
 
@@ -42,6 +43,14 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["t", "--var", "novalue"], env)).toThrow(UsageError);
     expect(() => parseArgs(["t", "--bogus"], env)).toThrow(UsageError);
     expect(() => parseArgs(["t", "--url"], env)).toThrow(UsageError);
+  });
+  it("--confirm autonomous: cdp and chromium only; USAGE names it", () => {
+    expect(parseArgs(["t", "--confirm", "autonomous"], env).confirm).toBe("autonomous");
+    expect(parseArgs(["t", "--confirm", "autonomous", "--engine", "chromium"], env).confirm).toBe("autonomous");
+    expect(() => parseArgs(["t", "--confirm", "autonomous", "--engine", "vercel"], env)).toThrow("--confirm autonomous needs --engine cdp or chromium");
+    expect(() => parseArgs(["t", "--confirm", "autonomous"], { ...env, JEV_BROWSER_ENGINE: "vercel" })).toThrow(UsageError);
+    expect(() => parseArgs(["t", "--confirm", "maybe"], env)).toThrow("--confirm must be auto, always, never, or autonomous");
+    expect(USAGE).toContain("--confirm <auto|always|never|autonomous>");
   });
   it("a JEV_BROWSER_MAX_STEPS value that is not a number gives a UsageError", () => {
     for (const v of ["abc", "NaN"]) expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: v })).toThrow(/--max-steps must be between 1 and 100/);
@@ -90,5 +99,15 @@ describe("main", () => {
     const help = io();
     expect(await main(["--help"], help.io)).toBe(0);
     expect(help.stderr).toContain("jev-browser");
+  });
+});
+
+describe("textModelDeps", () => {
+  it("gives the CLI and chat the text model when JEV_TEXT_MODEL and JEV_TEXT_API_KEY are set, with one log line; else nothing", () => {
+    const log = fakeLogger();
+    expect(textModelDeps({}, log)).toEqual({});
+    const d = textModelDeps({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_BASE_URL: "http://127.0.0.1:8790/v1" }, log);
+    expect(typeof d.text?.write).toBe("function");
+    expect(log.lines).toEqual(["INFO text model m at 127.0.0.1:8790 writes new field text"]);
   });
 });

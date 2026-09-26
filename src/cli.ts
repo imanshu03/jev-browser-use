@@ -9,6 +9,7 @@ import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "
 import { FastRunner } from "./fast/loop.js";
 import type { Chrome } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
+import type { Logger, TextSource } from "./io.js";
 import { createHuman, createLogger, exitCode, emptyResult } from "./io.js";
 import { createOracle } from "./jev.js";
 import { Runner } from "./loop.js";
@@ -17,6 +18,7 @@ import { createTransport } from "./transport.js";
 import type { Goal, RunConfig, RunResult } from "./types.js";
 import { redactData } from "./task.js";
 import { LIMITS } from "./types.js";
+import { createTextModel, textModelFromEnv } from "./writer.js";
 
 export { UsageError };
 
@@ -36,7 +38,9 @@ Options:
   --step-timeout <ms>        Per browser command. Default 30000.
   --run-timeout <ms>         Default 600000.
   --pause-timeout <ms>       Default 300000.
-  --confirm <auto|always|never>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+  --confirm <auto|always|never|autonomous>  auto: destructive asks. always: submit asks too. never: destructive -> blocked.
+                             autonomous: no action asks or blocks for a person; each step record of such an action
+                             holds an "unattended" audit. cdp and chromium only.
   --dry-run                  Decide and log; never act.
   --session <name>           Default jev-<8 hex>.
   --model <name>             Default jev-latest.
@@ -107,7 +111,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       case "--pause-timeout": cfg.pauseTimeoutMs = num(next(i, a), a, 1000, 86_400_000); i++; break;
       case "--confirm": {
         const c = next(i, a); i++;
-        if (c !== "auto" && c !== "always" && c !== "never") throw new UsageError("--confirm must be auto, always, or never");
+        if (c !== "auto" && c !== "always" && c !== "never" && c !== "autonomous") throw new UsageError("--confirm must be auto, always, never, or autonomous");
         cfg.confirm = c; break;
       }
       case "--dry-run": cfg.dryRun = true; break;
@@ -125,6 +129,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       default: throw new UsageError(`unknown flag ${a}`);
     }
   }
+  // The vercel engine has no audit of the actions that a run does with no dialog.
+  if (cfg.confirm === "autonomous" && cfg.engine === "vercel") throw new UsageError("--confirm autonomous needs --engine cdp or chromium");
   // An env value such as "abc" gives NaN, which the old range check let through.
   if (!Number.isFinite(cfg.maxSteps) || cfg.maxSteps > 100 || cfg.maxSteps < 1) throw new UsageError("--max-steps must be between 1 and 100");
   cfg.task = positional.join(" ").trim();
@@ -189,7 +195,7 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
     if (chrome) await chrome.close();
   };
   const runner = fast
-    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, cfg.engine === "chromium" ? "chromium" : "chrome")), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL) })
+    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, cfg.engine === "chromium" ? "chromium" : "chrome")), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL), ...textModelDeps(io.env, log) })
     : new Runner({ cfg, browserFor, oracle, human, log });
   let interrupted = false;
   const onSigint = () => {
@@ -231,4 +237,16 @@ if (isMain) {
     process.stderr.write(`fatal: ${(e as Error)?.stack ?? String(e)}\n`);
     process.exitCode = 3;
   });
+}
+
+/**
+ * The text model of the environment (JEV_TEXT_MODEL, JEV_TEXT_API_KEY; src/writer.ts) as the text source of a fast run:
+ * it writes new text for fields that can take it, as the text helper of browser-use/jev-ultrafast does. Off: no text
+ * source, and a field without a value in the task blocks with the hint to pass --var.
+ */
+export function textModelDeps(env: NodeJS.ProcessEnv, log: Logger): { text?: TextSource } {
+  const cfg = textModelFromEnv(env);
+  if (!cfg) return {};
+  log.info(`text model ${cfg.model} at ${new URL(cfg.baseUrl).host} writes new field text`);
+  return { text: createTextModel(cfg, log) };
 }
