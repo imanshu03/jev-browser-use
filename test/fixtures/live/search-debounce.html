@@ -13,10 +13,15 @@
     //   deb     debounce ms (300)
     //   lat     server latency ms of the search request (250)
     //   mode    timeout: clearTimeout + setTimeout; lodash: a debounce that waits again for its rest;
-    //           interval: an RxJS-like setInterval debounce; direct: the request starts in the input event
+    //           interval: an RxJS-like setInterval debounce; direct: the request starts in the input event;
+    //           bound: the handler defers with a bound callback that schedules the debounce as another bound callback;
+    //           bound-same: as bound, and both bound callbacks wait deb/2: the same delay, so only the native-code
+    //           rule tells them apart;
+    //           wrapper: a shared delay helper (as lodash _.delay) defers, then schedules the debounce through it
     //   busy=1  the Note field sets aria-busy on the list for 400 ms, driven by animation frames
     //   poll=1  a poll request every 150 ms from load
-    //   chain   named or arrow: the Note field starts a poll chain
+    //   chain   named, arrow, or copy: the Note field starts a poll chain
+    //   enter=1 Enter in the search box writes how many rows it saw
     // The old rows stay on screen until the new ones arrive, with no loading marker.
     const q = new URLSearchParams(location.search);
     const deb = Number(q.get('deb') ?? 300), lat = Number(q.get('lat') ?? 250), mode = q.get('mode') ?? 'timeout';
@@ -51,7 +56,21 @@
       input.addEventListener('input', () => { clearInterval(iv); iv = setInterval(() => { clearInterval(iv); search(input.value); }, deb); });
     } else if (mode === 'direct') {
       input.addEventListener('input', () => search(input.value));
+    } else if (mode === 'bound') {
+      // Every bound function shows as native code: the debounce is not a copy of the callback that armed it.
+      let t;
+      const later = function () { this.search(input.value); }.bind({ search });
+      input.addEventListener('input', () => setTimeout(function () { clearTimeout(t); t = setTimeout(later, deb); }.bind(null), 0));
+    } else if (mode === 'bound-same') {
+      let t;
+      const later = function () { this.search(input.value); }.bind({ search });
+      input.addEventListener('input', () => setTimeout(function () { clearTimeout(t); t = setTimeout(later, deb / 2); }.bind(null), deb / 2));
+    } else if (mode === 'wrapper') {
+      const delay = (f, w, ...a) => setTimeout(function () { f.apply(undefined, a); }, w);
+      let t;
+      input.addEventListener('input', () => delay(() => { clearTimeout(t); t = delay(search, deb, input.value); }, 1));
     }
+    if (q.get('enter') === '1') input.addEventListener('keydown', (e) => { if (e.key === 'Enter') status.textContent = 'enter saw ' + rows.children.length + ' rows'; });
     const note = document.getElementById('note');
     if (q.get('busy') === '1') {
       note.addEventListener('input', () => {
@@ -69,6 +88,12 @@
       let n = 0;
       function poll() { fetch('/api/wait?ms=20').then((r) => r.text()).then(() => { status.textContent = 'tick ' + (++n); setTimeout(poll, 800); }); }
       note.addEventListener('input', () => { setTimeout(poll, 800); }, { once: true });
+    }
+    if (q.get('chain') === 'copy') {
+      // As Google Flights: each run arms a new closure of the same code with the same delay, two more times.
+      let n = 0;
+      const arm = () => setTimeout(() => { status.textContent = 'idle ' + (++n); if (n < 3) arm(); }, 500);
+      note.addEventListener('input', arm, { once: true });
     }
     if (q.get('chain') === 'arrow') {
       let n = 0;

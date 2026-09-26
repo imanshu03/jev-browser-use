@@ -15,13 +15,16 @@
   <script>
     const CITIES = ['Berlin', 'Bern', 'Boston', 'Paris'];
     const city = document.getElementById('city'), cities = document.getElementById('cities');
-    city.addEventListener('input', () => {
+    // ?slow=<ms>: the options render that many ms after the input.
+    const slow = Number(new URLSearchParams(location.search).get('slow') ?? 0);
+    city.addEventListener('input', () => (slow > 0 ? setTimeout(render, slow) : render()));
+    function render() {
       const hits = CITIES.filter((c) => c.toLowerCase().startsWith(city.value.toLowerCase()));
       cities.innerHTML = hits.map((c, i) => `<li role="option" id="opt-${i}" aria-selected="${i === 0}">${c}</li>`).join('');
       cities.hidden = hits.length === 0;
       city.setAttribute('aria-expanded', String(hits.length > 0));
       if (hits.length > 0) city.setAttribute('aria-activedescendant', 'opt-0'); else city.removeAttribute('aria-activedescendant');
-    });
+    }
     const FOLDERS = ['Inbox', 'Drafts', 'Sent', 'Archive'];
     const filter = document.getElementById('filter'), folders = document.getElementById('folders');
     const show = () => {

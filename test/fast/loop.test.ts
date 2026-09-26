@@ -2,7 +2,7 @@ import type { ChoiceQuestion, Questions } from "@typesafe-ai/sdk";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { FastRunner, actionKey, riskOf } from "../../src/fast/loop.js";
+import { FastRunner, actionKey, riskOf, searchField } from "../../src/fast/loop.js";
 import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
 import type { Action, DateInfo, Observation, Page, Popup, TokenFacts, UnsentText } from "../../src/fast/model.js";
@@ -52,7 +52,7 @@ const byUrl = (map: Record<string, PartialAnswers | ((q: Questions, state: unkno
     return other[name] ?? {};
   };
 
-interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[]; attended?: boolean }
+interface SetupOpts { human?: ReturnType<typeof fakeHuman>; providePage?: boolean; now?: () => number; chromeFails?: Error; warm?: () => Promise<void>; text?: TextSource; signal?: AbortSignal; hints?: RunnerHints; fromAssistant?: boolean; unsent?: UnsentText[]; attended?: boolean; earlyDecisions?: boolean }
 
 function setup(task: string, script: PageScript, oracle: OracleScript, over: Partial<RunConfig> = {}, opts: SetupOpts = {}) {
   const page = fakePage(script);
@@ -69,6 +69,7 @@ function setup(task: string, script: PageScript, oracle: OracleScript, over: Par
     oracle: o, human, log, sleep: async () => undefined, ...(opts.now ? { now: opts.now } : {}), ...(opts.providePage ? { page } : {}), ...(opts.warm ? { warm: opts.warm } : {}),
     ...(opts.text ? { text: opts.text } : {}), ...(opts.signal ? { signal: opts.signal } : {}), ...(opts.hints ? { hints: opts.hints } : {}), ...(opts.fromAssistant ? { fromAssistant: true } : {}),
     ...(opts.unsent ? { unsent: opts.unsent } : {}), ...(opts.attended !== undefined ? { attended: opts.attended } : {}),
+    ...(opts.earlyDecisions !== undefined ? { earlyDecisions: opts.earlyDecisions } : {}),
   };
   const runner = new FastRunner(deps);
   return { runner, page, chrome, oracle: o, log, human, counts: () => ({ launches, opened }) };
@@ -403,7 +404,7 @@ describe("FastRunner hand-off and plan", () => {
     const bad = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" }, DONE, {}, { warm: async () => { throw new Error("warm failed"); } });
     expect((await bad.runner.run()).outcome).toBe("done");
   });
-  it("warm hook: not called when the plan asks Jev; that request opens the connection", async () => {
+  it("warm hook: called once after a plan request, which opened the first connection; the warm opens the second one", async () => {
     let warms = 0;
     const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" },
       byUrl({ [ARTICLE.url]: { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } } }, { plan: { goal: { choice: "act", confidence: 0.9 } } }), {}, { warm: async () => { warms += 1; } });
@@ -411,7 +412,7 @@ describe("FastRunner hand-off and plan", () => {
     const r = await t.runner.run();
     expect(r.outcome).toBe("done");
     expect(t.oracle.requests.map((x) => x.name)).toEqual(["plan", "step"]);
-    expect(warms).toBe(0);
+    expect(warms).toBe(1);
     expect(t.counts().launches).toBe(1);
   });
   it("plan blocks (ambiguous_profile, no_start_url) never launch Chrome", async () => {
@@ -719,7 +720,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
    * A runner whose plan request waits for `gate`. `events` records, in order: warm, chrome (deps.chrome called),
    * navigate, plan:ask (the oracle got the plan request), plan:resolve (the gate opened).
    */
-  function gated(task: string, script: PageScript, over: Partial<RunConfig> = {}, opts: { providePage?: boolean; navigateFails?: Error; unset?: ("goal" | "profile")[]; plan?: PartialAnswers } = {}) {
+  function gated(task: string, script: PageScript, over: Partial<RunConfig> = {}, opts: { providePage?: boolean; navigateFails?: Error; navigateGate?: Promise<void>; unset?: ("goal" | "profile")[]; plan?: PartialAnswers } = {}) {
     const events: string[] = [];
     const gate = deferred();
     const page = fakePage(script);
@@ -736,7 +737,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     const c = cfg(task, over);
     for (const k of opts.unset ?? []) delete c[k];
     const navigate = page.navigate.bind(page);
-    page.navigate = async (url: string, ms: number) => { events.push("navigate"); if (opts.navigateFails) throw opts.navigateFails; await navigate(url, ms); };
+    page.navigate = async (url: string, ms: number) => { events.push("navigate"); if (opts.navigateFails) throw opts.navigateFails; if (opts.navigateGate) await opts.navigateGate; await navigate(url, ms); };
     let launches = 0;
     const deps: FastRunnerDeps = {
       cfg: c, profiles: PROFILES,
@@ -767,9 +768,24 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     expect(t.log.lines).toContain(OVERLAP_LINE);
     expect(t.log.lines.filter((l) => l.startsWith("INFO open https://wikipedia.org"))).toHaveLength(1);
     expect(t.log.lines.filter((l) => l.startsWith("INFO plan profile=none via flag start=https://wikipedia.org via task_url goal=act(0.90) requests=1"))).toHaveLength(1);
+    // The page loaded before the plan resolved: no load is left to hide a warm, and the first step request would wait
+    // behind a warm GET. No warm.
     expect(t.events).not.toContain("warm");
     expect(t.chrome.closes).toBe(1);
     expect(t.launches()).toBe(1);
+  });
+  it("(a2) the page still loads when the plan resolves: the warm after the plan opens the second connection during the load", async () => {
+    const load = deferred();
+    const t = gated("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" }, {}, { unset: ["goal"], navigateGate: load.promise });
+    const run = t.runner.run();
+    await tick();
+    t.gate.resolve();
+    await tick();
+    expect(t.events).toEqual(["chrome", "plan:ask", "navigate", "plan:resolve", "warm"]);
+    load.resolve();
+    const r = await run;
+    expect(r.outcome).toBe("done");
+    expect(t.events.filter((e) => e === "warm")).toHaveLength(1);
   });
   it("(b) task without a URL (Jev picks the site): Chrome launches only after the plan resolved", async () => {
     const t = gated("open gmail or drive and click English", { pages: { home: HOME }, start: "home" }, {}, { unset: ["goal"] });
@@ -790,7 +806,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     s.gate.resolve();
     const r2 = await run2;
     expect(r2.outcome).toBe("done");
-    expect(s.events).toEqual(["plan:ask", "plan:resolve", "chrome", "navigate"]);
+    expect(s.events).toEqual(["plan:ask", "plan:resolve", "warm", "chrome", "navigate"]);
     expect(r2.start).toMatchObject({ url: "https://mail.google.com", how: "catalog_jev" });
     expect(s.oracle.requests.map((x) => x.name)).toEqual(["plan", "step"]);
     expect(s.log.lines).not.toContain(OVERLAP_LINE);
@@ -846,6 +862,7 @@ describe("FastRunner overlap: Chrome launch during the plan request", () => {
     t.gate.resolve();
     const r = await run;
     expect(r.outcome).toBe("done");
+    // No warm on the current page: no page load hides it. The chat and MCP idle warms keep the connections open.
     expect(t.events).toEqual(["plan:ask", "plan:resolve", "chrome"]);
     expect(r.start).toMatchObject({ how: "current_page" });
     expect(t.log.lines).not.toContain(OVERLAP_LINE);
@@ -1052,7 +1069,8 @@ describe("requests without a text source (regression)", () => {
     // started to end a clause: "wikipedia.org" is one clause span, and the pieces of a URL ("https://mail", "example/t/1")
     // and of a quote ("to Ann") are no longer clause spans. Taken again on 2026-09-26, when the date rule went into the
     // requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
-    expect(digest(out)).toBe("2e8ec4dc523b76829eb008b077351637815e7fbafe01cc8f4ccd34f38db9a071");
+    // Taken again on 2026-09-26, when the order rule (ORDER_RULE) went into RULES (the ultrafast comparison).
+    expect(digest(out)).toBe("129d705cc603b5884dbfeaaf7436cd23f72b5de18cddcc9ecbe4360c03c2d31e");
   });
 });
 
@@ -3584,6 +3602,18 @@ describe("fills that keep a field's text, refused fills, and a step that a submi
       expect(criteriaKeys(steps(t)[3]?.questions["operation"])).toContain("DONE");
     });
 
+    it("early decisions: a popup that shows only on the settled page is still the step that the click opened", async () => {
+      const t = setup("edit the notes and save them", { pages: { e: EDIT, p: POPOVER, s: SAVED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e5" ? "s" : undefined), late: (c) => (c.op === "act" && c.id === "e2" ? "p" : undefined) },
+      seq(click("Save"), finish, finish, click("Confirm"), finish), { url: URL }, { earlyDecisions: true });
+      const r = await t.runner.run();
+      expect(t.page.earlies).toContain(true);
+      expect(r.outcome).toBe("done");
+      expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e2", "e5"]);
+      expect(t.log.lines.some((l) => l.includes('step 1 "Save" opened a step with "Confirm"'))).toBe(true);
+      expect(steps(t).some((x) => ((x.state as { retry_reason?: string }).retry_reason ?? "").includes('the click on "Save" opened a step that is still open'))).toBe(true);
+    });
+
     it("a step that stays open blocks after two refused DONE answers, with a clear hint", async () => {
       const t = popover([click("Save"), finish, wait, finish, wait, finish]);
       const r = await t.runner.run();
@@ -4414,5 +4444,420 @@ describe("date fields", () => {
     expect(r.steps[0]).toMatchObject({ operation: "TYPE_TEXT", result: "ok" });
     expect(r.steps[0]?.gate).toContain("date 2026-09-01");
     expect(r.steps[0]?.unattended).toBeUndefined();
+  });
+});
+
+describe("GO_BACK and Enter in a search field (ported behavior of browser-use/jev-ultrafast)", () => {
+  const SEARCH = obs("https://www.wikipedia.org/", [el("e1", "fill", "Search Wikipedia", "searchbox", { value: "Alan Turing", inputType: "search" }), el("e2", "click", "English", "link"), el("e3", "click", "Search", "button")],
+    "Wikipedia", { focus: { node: 1, label: "Search Wikipedia", role: "searchbox", submitLabel: "Search", editable: true, value: "Alan Turing" } });
+  const ops = (q: Questions): string[] => Object.keys((q["operation"] as ChoiceQuestion).criteria);
+  const stop = { operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+
+  it("GO_BACK below its gate runs no back; the re-ask of that step does not offer GO_BACK", async () => {
+    const seen: string[][] = [];
+    const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a" }, (name, _state, q) => {
+      if (name !== "step") return {};
+      seen.push(ops(q));
+      return seen.length === 1 ? { page_kind: "task_page", operation: { choice: "GO_BACK", confidence: 0.33, probabilities: { GO_BACK: 0.33, SCROLL_DOWN: 0.3, WAIT: 0.37 } } } : stop;
+    }, { maxSteps: 1 });
+    await t.runner.run();
+    expect(t.page.calls.some((c) => c.op === "back")).toBe(false);
+    expect(seen[0]).toContain("GO_BACK");
+    expect(seen[1]).not.toContain("GO_BACK");
+    expect((stepStates(t)[1] as unknown as { retry_reason: string }).retry_reason).toContain(`GO_BACK confidence 0.33 below ${GATES.goBack}`);
+  });
+
+  it("GO_BACK at its gate or above runs; a tab with no earlier web page does not offer it", async () => {
+    const t = setup("open https://en.wikipedia.org/wiki/Alan_Turing and go back", { pages: { a: ARTICLE }, start: "a", canGoBack: () => true },
+      byUrl({ [ARTICLE.url]: { page_kind: "task_page", operation: { choice: "GO_BACK", confidence: 0.6, probabilities: { GO_BACK: 0.6, WAIT: 0.4 } } } }), { maxSteps: 1 });
+    await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "back")).toHaveLength(1);
+    let offered: string[] = [];
+    const none = setup("open https://en.wikipedia.org/wiki/Alan_Turing and read", { pages: { a: ARTICLE }, start: "a", canGoBack: () => false },
+      (name, _state, q) => { if (name === "step") offered = ops(q); return name === "step" ? stop : {}; }, { maxSteps: 1 });
+    await none.runner.run();
+    expect(offered).not.toContain("GO_BACK");
+    expect(offered).toContain("WAIT");
+  });
+
+  it("Enter in a search field is navigational: it runs at 0.43, where a submit re-asks", async () => {
+    const enter = { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.43, probabilities: { PRESS_ENTER: 0.43, CLICK: 0.3, TYPE_TEXT: 0.27 } } };
+    const t = setup("open wikipedia.org and search for Alan Turing", { pages: { s: SEARCH, a: ARTICLE }, start: "s", transitions: (c) => (c.op === "press" ? "a" : undefined) },
+      byUrl({ [SEARCH.url]: enter, [ARTICLE.url]: stop }), { maxSteps: 2 });
+    const r = await t.runner.run();
+    expect(t.page.calls.filter((c) => c.op === "press")).toEqual([{ op: "press", key: "Enter" }]);
+    expect(r.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "navigational", result: "ok" });
+    // The same Enter in a message composer, and in a search field whose Enter picks an option, stays a submit and re-asks.
+    const composer = obs("https://chat.example/", [el("e1", "fill", "Search or ask AI anything...", "textbox", { value: "hello", multiline: true })], "chat",
+      { focus: { node: 1, label: "Search or ask AI anything...", role: "textbox", submitLabel: "", editable: true, value: "hello", multiline: true } });
+    const picks = obs("https://www.wikipedia.org/", SEARCH.actions.filter((a) => a.kind !== "wait"), "Wikipedia",
+      { focus: { ...(SEARCH.focus as NonNullable<Observation["focus"]>), enterOption: { node: 9, label: "Alan Turing (mathematician)" } } });
+    for (const page of [composer, picks]) {
+      const u = setup("open https://chat.example/ and search", { pages: { p: page }, start: "p" }, (name) => (name === "step" ? enter : {}), { maxSteps: 1 });
+      const ur = await u.runner.run();
+      expect(u.page.calls.some((c) => c.op === "press")).toBe(false);
+      expect(ur.steps[0]?.risk).toBe("submit");
+    }
+  });
+
+  it("searchField: searchbox, type search, or a search label; a multiline field only as a searchbox or combobox", () => {
+    const f = (focus: Partial<NonNullable<Observation["focus"]>>, action?: Partial<Action>) => searchField(
+      obs("https://x.example/", [], "x", { focus: { node: 1, label: "", role: "textbox", submitLabel: "", ...focus } }),
+      action ? el("e1", "fill", focus.label ?? "", action.role ?? "textbox", action) : undefined);
+    expect(f({ label: "Search Wikipedia", role: "searchbox" })).toBe(true);
+    expect(f({ label: "q" }, { inputType: "search" })).toBe(true);
+    expect(f({ label: "Search docs" })).toBe(true);
+    expect(f({ label: "Search", role: "combobox", multiline: true })).toBe(true);
+    expect(f({ label: "Search or ask AI anything...", multiline: true })).toBe(false);
+    expect(f({ label: "Email" })).toBe(false);
+    expect(f({ label: "Research notes" })).toBe(false);
+  });
+});
+
+describe("early decisions: the step request runs during the rest of the settle", () => {
+  const LIST = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e2", "click", "Home", "link")], "list");
+  const OPEN = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button")], "list\nFilters");
+  const LOADED = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button"), el("e4", "click", "Design", "checkbox")], "list\nFilters\nDesign");
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, CLICK: 0.1 } } };
+  const click = (label: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const texts = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((r) => r.name === "step").map((r) => (r.state as { page: { text: string } }).page.text);
+
+  it("a settled page that is the same keeps the answer: one request per step", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur },
+      byUrl({ [LIST.url]: (q, state) => ((state as { page: { text: string } }).page.text === "list" ? click("Open filters")(q) : done) }), { url: LIST.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(texts(t)).toEqual(["list", "list\nFilters"]);
+    expect(t.page.earlies).toEqual([false, true, false]);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(false);
+    expect(stepStates(t)[1]?.recent_actions).toEqual([{ action: "Open filters", kind: "click", text: null, page_changed: true }]);
+  });
+
+  it("a settled page that changed drops the answer on the early page and asks again: its action never runs", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN, loaded: LOADED }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "loaded" : undefined) },
+      byUrl({ [LIST.url]: (q, state) => { const text = (state as { page: { text: string } }).page.text; return text === "list" ? click("Open filters")(q) : text === "list\nFilters" ? click("Apply")(q) : done; } }), { url: LIST.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(texts(t)).toEqual(["list", "list\nFilters", "list\nFilters\nDesign"]);
+    expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e1"]);
+    expect(t.log.lines.some((l) => /step 2 the page changed after the early observation; the request on it is dropped \(1 in this run\)/.test(l))).toBe(true);
+    expect(r.steps).toHaveLength(2);
+  });
+
+  it("the page change of an action comes from the settled page: three actions whose change shows late are not a stall", async () => {
+    const P = [0, 1, 2, 3].map((n) => obs(`https://app.example/p${n}`, [el("e1", "click", "Next", "button")], `page ${n}`));
+    const pages = Object.fromEntries(P.map((o, n) => [`p${n}`, o]));
+    const t = setup("open https://app.example/p0 and go to page 3", { pages, start: "p0", late: (c, cur) => (c.op === "act" ? `p${Number(cur.slice(1)) + 1}` : undefined) },
+      (name, state, q) => (name !== "step" ? {} : (state as { page: { text: string } }).page.text === "page 3" ? done : click("Next")(q)), { url: P[0]!.url });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(r.steps.map((x) => x.result)).toEqual(["ok", "ok", "ok", "done"]);
+    const last = stepStates(t).at(-1)?.recent_actions ?? [];
+    expect(last.map((a) => a.page_changed)).toEqual([true, true, true]);
+    expect(t.log.lines.filter((l) => /request on it is dropped/.test(l))).toHaveLength(3);
+  });
+
+  it("earlyDecisions false: every observe waits for the whole settle", async () => {
+    const t = setup("open https://app.example/list and open the filters", { pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur },
+      byUrl({ [LIST.url]: (q, state) => ((state as { page: { text: string } }).page.text === "list" ? click("Open filters")(q) : done) }), { url: LIST.url }, { earlyDecisions: false });
+    await t.runner.run();
+    expect(t.page.earlies.every((e) => !e)).toBe(true);
+  });
+});
+
+describe("early decisions: review fixes", () => {
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  const retryReasons = (t: { oracle: { requests: { name: string; state: unknown }[] } }) => t.oracle.requests.filter((x) => x.name === "step").map((x) => (x.state as { retry_reason?: string }).retry_reason ?? "");
+  const fills = (t: { page: { calls: { op: string; kind?: string; id?: string }[] } }) => t.page.calls.filter((c) => c.op === "act" && c.kind === "fill").map((c) => c.id);
+
+  it("a step request that fails while the rest of the settle runs is never unhandled: the run fails and closes Chrome", async () => {
+    const LIST = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e2", "click", "Home", "link")], "list");
+    const OPEN = obs("https://app.example/list", [el("e1", "click", "Open filters", "button"), el("e3", "click", "Apply", "button")], "list\nFilters");
+    const page = fakePage({ pages: { list: LIST, open: OPEN }, start: "list", transitions: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined), late: (_c, cur) => cur });
+    const observe = page.observe.bind(page);
+    // The resumed settle takes 50 ms; the request fails after 5 ms, before the loop reads it.
+    page.observe = async (o) => { const resume = page.pending?.() === true; const r = await observe(o); if (resume) await new Promise((res) => setTimeout(res, 50)); return r; };
+    const base = fakeOracle(byUrl({ [LIST.url]: (q) => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Open filters"), confidence: 0.9 } }) }));
+    let n = 0;
+    const oracle: typeof base = { ...base, ask: async (name, state, qs) => {
+      if (name === "step" && ++n === 2) { await new Promise((r) => setTimeout(r, 5)); throw new Error("HTTP 503 from the API"); }
+      return base.ask(name, state, qs);
+    } };
+    const chrome = fakeChrome();
+    const r = await new FastRunner({ cfg: cfg("open https://app.example/list and open the filters", { url: LIST.url }), profiles: [], chrome: async () => chrome, openPage: async () => page,
+      oracle, human: fakeHuman({ interactive: false }), log: fakeLogger(), sleep: async () => undefined, earlyDecisions: true }).run();
+    expect(page.earlies).toContain(true);
+    expect(r.outcome).toBe("failed");
+    expect(r.error?.message).toContain("HTTP 503");
+    expect(chrome.closes).toBe(1);
+  });
+
+  describe("a chip field whose suggestion popup opens only on the settled page", () => {
+    const URL = "https://mail.example/compose";
+    const tok = (popup: boolean): TokenFacts => ({ items: [[90, "To", 0]], chips: [], ...(popup ? { popup: true as const } : {}) });
+    const page = (to: string, popup: boolean, subject: string, text: string) => obs(URL, [
+      el("e1", "fill", "To", "combobox", { node: 1, value: to, form: 3, inputType: "text", token: tok(popup) }),
+      el("e2", "fill", "Subject", "textbox", { node: 2, value: subject, form: 3, inputType: "text" }),
+      el("e4", "click", "Send", "button", { node: 4, form: 3 }),
+    ], text, { doc: 1, focus: { node: 1, label: "To", role: "combobox", submitLabel: "Send", editable: true, value: to, form: 3, multiline: false } });
+    const FORM = page("", false, "", "Compose");
+    const TYPED = page("bob@example.com", false, "", "Compose");
+    const OPEN = page("bob@example.com", true, "", "Compose\nNo contacts found");
+    const SUBJ = page("bob@example.com", true, "Hello", "Compose\nNo contacts found");
+    const fillA = (label: string, id: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", label), confidence: 0.8 }, type_text_value: { choice: id, confidence: 0.9 } });
+    for (const early of [false, true]) {
+      it(`the chip gate stops the next fill (earlyDecisions ${early})`, async () => {
+        const t = setup("write to bob and set the subject", {
+          pages: { form: FORM, typed: TYPED, open: OPEN, subj: SUBJ }, start: "form",
+          transitions: (c, cur) => (c.op === "act" && c.id === "e1" ? "typed" : c.op === "act" && c.id === "e2" ? "subj" : cur === "typed" ? "open" : undefined),
+          late: (c) => (c.op === "act" && c.id === "e1" ? "open" : undefined),
+        }, (name, state, q) => {
+          if (name !== "step") return {};
+          const text = (state as { page: { text: string } }).page.text;
+          const to = (state as { elements: { label: string; value?: string }[] }).elements.find((e) => e.label === "To")?.value ?? "";
+          if (to === "") return fillA("To", "v_b")(q);
+          if (text.includes("No contacts") || text === "Compose") return (state as { retry_reason?: string }).retry_reason ? stop : fillA("Subject", "v_s")(q);
+          return stop;
+        }, { url: URL, vars: { b: "bob@example.com", s: "Hello" }, maxSteps: 4 }, { earlyDecisions: early });
+        await t.runner.run();
+        expect(fills(t)).toEqual(["e1"]);
+        expect(retryReasons(t).some((x) => /"To" holds "bob@example.com", which is not added yet/.test(x))).toBe(true);
+      });
+    }
+  });
+
+  it("a run that ends right after an early action ends its settle: the audit and the sent texts read the settled page", async () => {
+    const URL = "https://chat.example/c/1";
+    const COMPOSE = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "hello there", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat", { doc: 1, filled: [1], texts: [[1, "hello there"]] });
+    const SENT = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat\nhello there", { doc: 1, filled: [], texts: [] });
+    const t = setup("send the message", { pages: { c: COMPOSE, s: SENT }, start: "c", late: (c) => (c.op === "act" && c.id === "e2" ? "s" : undefined) },
+      byUrl({ [URL]: (q) => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } }) }),
+      { url: URL, maxSteps: 1, confirm: "autonomous" }, { earlyDecisions: true, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.steps[0]?.unattended?.texts[0]?.left).toBe(true);
+    expect(t.runner.sentTexts()).toEqual([{ field: "Message", text: "hello there" }]);
+    expect(t.page.pending?.()).toBe(false);
+    // The deferred record of step 1 goes to the logger before the record of the step cap.
+    expect(t.log.steps.map((x) => x.step)).toEqual([1, 2]);
+  });
+
+  it("the step log of an audited early action waits for the settled page: the MCP view reads where the text went", async () => {
+    const URL = "https://chat.example/c/1";
+    const COMPOSE = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "hello there", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat", { doc: 1, filled: [1], texts: [[1, "hello there"]] });
+    const SENT = obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: "", multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], "Chat\nhello there", { doc: 1, filled: [], texts: [] });
+    const t = setup("send the message", { pages: { c: COMPOSE, s: SENT }, start: "c", late: (c) => (c.op === "act" && c.id === "e2" ? "s" : undefined) },
+      byUrl({ [URL]: (q, state) => ((state as { page: { text: string } }).page.text === "Chat"
+        ? { page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } }
+        : { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.95, probabilities: { DONE: 0.95, CLICK: 0.05 } } }) }),
+      { url: URL, maxSteps: 3, confirm: "autonomous" }, { earlyDecisions: true, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+    const atLog: string[] = [];
+    const step = t.log.step.bind(t.log);
+    t.log.step = (rec) => { atLog.push(JSON.stringify(rec.unattended?.texts.map((x) => x.left) ?? null)); step(rec); };
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.outcome).toBe("done");
+    expect(atLog[0]).toBe("[true]");
+    expect(t.log.lines.findIndex((l) => l.startsWith("STEP 1"))).toBeLessThan(t.log.lines.findIndex((l) => l.startsWith("STEP 2")));
+    expect(t.log.lines.some((l) => /step 1 unattended, after the settle: Message left the page/.test(l))).toBe(true);
+  });
+
+  it("the settled page shows an option that Enter picks: the Enter decided without it is dropped", async () => {
+    const URL = "https://chat.example/c/9";
+    const acts = (v: string, menu: boolean) => [
+      el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }),
+      el("e2", "click", "Send", "button", { node: 2, form: 3 }),
+      ...(menu ? [el("e5", "click", "Ann Lee", "option", { node: 5 })] : []),
+    ];
+    const focus = (v: string, pick: boolean) => ({ node: 1, label: "Message", role: "textbox", submitLabel: "", editable: true, value: v, form: 3, multiline: true, ...(pick ? { enterOption: { node: 5, label: "Ann Lee" } } : {}) });
+    const EMPTY = obs(URL, acts("", false), "Chat", { doc: 1, focus: focus("", false) });
+    const EARLY = obs(URL, acts("@Ann", true), "Chat\nAnn Lee", { doc: 1, focus: focus("@Ann", false) });
+    const SETTLED = obs(URL, acts("@Ann", true), "Chat\nAnn Lee", { doc: 1, focus: focus("@Ann", true) });
+    expect(SETTLED.fingerprint).toBe(EARLY.fingerprint);
+    const t = setup("type @Ann in the message and press enter", {
+      pages: { e: EMPTY, early: EARLY, settled: SETTLED }, start: "e",
+      transitions: (c) => (c.op === "act" && c.id === "e1" ? "early" : undefined),
+      late: (c) => (c.op === "act" && c.id === "e1" ? "settled" : undefined),
+    }, (name, state, q) => {
+      if (name !== "step") return {};
+      const f = (state as { focus: { value?: string; enter_picks?: string } | null }).focus;
+      if ((f?.value ?? "") === "") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "v_m", confidence: 0.9 } };
+      if (f?.enter_picks) return stop;
+      return { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.95, probabilities: { PRESS_ENTER: 0.95, WAIT: 0.05 } } };
+    }, { url: URL, vars: { m: "@Ann" }, maxSteps: 3 }, { earlyDecisions: true });
+    await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(true);
+  });
+
+  it("the focus moved during the rest of the settle: the Enter decided for the search box is dropped", async () => {
+    const url = "https://chat.example/c/general";
+    const acts = (q: string) => [
+      el("e1", "fill", "Search messages", "searchbox", { value: q, inputType: "search" }),
+      el("e2", "fill", "Message #general", "textbox", { value: "Ship it now", multiline: true }),
+    ];
+    const f = (over: Partial<NonNullable<Observation["focus"]>>) => ({ node: 1, label: "Search messages", role: "searchbox", submitLabel: "", editable: true, value: "release", ...over });
+    const START = obs(url, acts(""), "general", { focus: f({ value: "" }) });
+    const TYPED = obs(url, acts("release"), "general", { focus: f({}) });
+    const MOVED = obs(url, acts("release"), "general", { focus: f({ node: 2, label: "Message #general", role: "textbox", value: "Ship it now", multiline: true }) });
+    expect(MOVED.fingerprint).toBe(TYPED.fingerprint);
+    let n = 0;
+    const t = setup(`open ${url} and search messages for "release"`, { pages: { start: START, typed: TYPED, moved: MOVED }, start: "start",
+      transitions: (c) => (c.op === "act" && c.id === "e1" ? "typed" : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "moved" : undefined) }, (name, _state, q) => {
+      if (name !== "step") return {};
+      n += 1;
+      if (n === 1) {
+        const v = valueQ(q, "Search messages");
+        return { page_kind: "task_page", operation: { choice: "TYPE_TEXT", confidence: 0.9, probabilities: { TYPE_TEXT: 0.9, WAIT: 0.1 } }, type_text_target: { choice: idx(q, "type_text_target", "Search messages"), confidence: 0.9 },
+          [`value_${idx(q, "type_text_target", "Search messages")}`]: { choice: Object.keys(v?.criteria ?? {}).find((x) => x !== "none" && x !== "generate") ?? "none", confidence: 0.95 } };
+      }
+      if (n === 2) return { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.6, probabilities: { PRESS_ENTER: 0.6, WAIT: 0.4 } } };
+      return stop;
+    }, { url, maxSteps: 3 }, { earlyDecisions: true });
+    await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(t.page.calls.some((c) => c.op === "press")).toBe(false);
+    expect(t.log.lines.some((l) => /request on it is dropped/.test(l))).toBe(true);
+  });
+});
+
+describe("early decisions: a fill decided again on the settled page", () => {
+  const URL = "https://chat.example/c/2";
+  const page = (v: string, text: string) => obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], text, { doc: 1, filled: v ? [1] : [], texts: v ? [[1, v]] : [] });
+  const EMPTY = page("", "Chat");
+  const SHOWN = page("hello there", "Chat");
+  const CLEARED = page("", "Chat\nDraft discarded");
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  for (const early of [false, true]) {
+    it(`the page cleared the field after the early page showed the text: the entry is pending (earlyDecisions ${early})`, async () => {
+      const t = setup("type the message", { pages: { e: EMPTY, s: SHOWN, c: CLEARED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e1" ? (early ? "s" : "c") : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "c" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "v_m", confidence: 0.95 } };
+        return stop;
+      }, { url: URL, vars: { m: "hello there" }, maxSteps: 3 }, { earlyDecisions: early, fromAssistant: true });
+      await t.runner.run();
+      if (early) expect(t.page.earlies).toContain(true);
+      expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: "hello there", pending: true }]);
+    });
+    it(`a written text that the early page showed and the settled page cleared is not typed (earlyDecisions ${early})`, async () => {
+      const text = fakeText([{ kind: "text", values: { f1: "hello there" } }]);
+      const t = setup("write a short hello to the chat", { pages: { e: EMPTY, s: SHOWN, c: CLEARED }, start: "e",
+        transitions: (c) => (c.op === "act" && c.id === "e1" ? (early ? "s" : "c") : undefined), late: (c) => (c.op === "act" && c.id === "e1" ? "c" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Message"), confidence: 0.9 }, type_text_value: { choice: "generate", confidence: 0.9 } };
+        return stop;
+      }, { url: URL, maxSteps: 3 }, { earlyDecisions: early, text, fromAssistant: true });
+      await t.runner.run();
+      expect(t.page.calls.some((c) => c.op === "act" && c.kind === "fill" && c.text === "hello there")).toBe(true);
+      expect(t.runner.untypedText()).toEqual(["Message"]);
+    });
+  }
+});
+
+describe("early decisions: a send that the settled page reverses", () => {
+  const URL = "https://chat.example/c/3";
+  const page = (v: string, text: string) => obs(URL, [el("e1", "fill", "Message", "textbox", { node: 1, value: v, multiline: true, form: 3 }), el("e2", "click", "Send", "button", { node: 2, form: 3 })], text, { doc: 1, filled: v ? [1] : [], texts: v ? [[1, v]] : [] });
+  const COMPOSE = page("hello there", "Chat");
+  const SENDING = page("", "Chat\nSending...");
+  const FAILED = page("hello there", "Chat\nMessage failed to send");
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  for (const [early, maxSteps] of [[false, 3], [true, 3], [true, 1]] as const) {
+    it(`the composer clears while it sends and the failed send puts the text back: no send (earlyDecisions ${early}, maxSteps ${maxSteps})`, async () => {
+      const t = setup("send the message", { pages: { c: COMPOSE, s: SENDING, f: FAILED }, start: "c",
+        transitions: (c) => (c.op === "act" && c.id === "e2" ? (early ? "s" : "f") : undefined), late: (c) => (c.op === "act" && c.id === "e2" ? "f" : undefined) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text === "Chat") return { page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } };
+        return stop;
+      }, { url: URL, maxSteps, confirm: "autonomous" }, { earlyDecisions: early, unsent: [{ doc: 1, node: 1, label: "Message", text: "hello there", request: null }] });
+      await t.runner.run();
+      if (early) expect(t.page.earlies).toContain(true);
+      expect(t.runner.sentTexts()).toEqual([]);
+      expect(t.runner.unsentText()).toMatchObject([{ node: 1, text: "hello there" }]);
+      // The request on the settled page has no sent texts. A dropped request on the early page can have them.
+      const steps = t.oracle.requests.filter((x) => x.name === "step");
+      const settled = steps.filter((x) => (x.state as { page: { text: string } }).page.text.includes("failed to send"));
+      expect(settled.every((x) => (x.state as { sent_texts?: unknown }).sent_texts === undefined)).toBe(true);
+      if (maxSteps > 1) expect(settled.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+describe("a value head that the oracle dropped", () => {
+  it("gets a value request of its own: a plain search box never blocks as needs_credential", async () => {
+    const inner = fakeOracle((name, _state, q) => {
+      if (name === "value") {
+        const head = Object.keys(q).find((k) => k.startsWith("value_")) ?? "value_1";
+        const opts = Object.keys((q[head] as ChoiceQuestion).criteria ?? {});
+        return { [head]: { choice: opts.find((o) => o !== "none" && o !== "generate") ?? "none", confidence: 0.95 } };
+      }
+      if (name !== "step") return {};
+      if (!q["type_text_target"]) return { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } };
+      return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: idx(q, "type_text_target", "Search Wikipedia"), confidence: 0.9 } };
+    });
+    let asked = 0;
+    const oracle: typeof inner = { ...inner, ask: async (name, state, qs) => {
+      const r = await inner.ask(name, state, qs);
+      if (name !== "step") return r;
+      asked += 1;
+      // As createOracle does with a head that has a bad shape twice: the value head is not in the answers.
+      const answers = Object.fromEntries(Object.entries(r.answers).filter(([k]) => !k.startsWith("value_")));
+      return { ...r, answers };
+    } };
+    const page = fakePage({ pages: { home: HOME, done: { ...HOME, text: "Wikipedia\nAlan Turing" } as Observation }, start: "home", transitions: (c) => (c.op === "act" && c.kind === "fill" ? "done" : undefined) });
+    const r = await new FastRunner({ cfg: cfg("open wikipedia.org and search for Alan Turing", { maxSteps: 3 }), profiles: [], chrome: async () => fakeChrome(), openPage: async () => page,
+      oracle, human: fakeHuman({ interactive: false }), log: fakeLogger(), sleep: async () => undefined }).run();
+    expect(asked).toBeGreaterThan(0);
+    expect(inner.requests.some((x) => x.name === "value")).toBe(true);
+    expect(r.blocked?.kind).not.toBe("needs_credential");
+    expect(page.calls.some((c) => c.op === "act" && c.kind === "fill" && c.text === "Alan Turing")).toBe(true);
+  });
+});
+
+describe("early decisions: the stall rule and the switch", () => {
+  const URL = "https://app.example/board";
+  const BOARD = obs(URL, [el("e1", "click", "Alpha", "button"), el("e2", "click", "Beta", "button"), el("e3", "click", "Gamma", "button"), el("e4", "click", "Delta", "button")], "Board");
+  const MOVED = obs(URL, [el("e1", "click", "Alpha", "button"), el("e5", "click", "Open card", "button")], "Board\nCard");
+  const at = (label: string) => (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", label), confidence: 0.9 } });
+  const done = { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.95, probabilities: { DONE: 0.95, CLICK: 0.05 } } };
+
+  it("three early actions that change nothing, also after their settles, block as a loop", async () => {
+    let n = 0;
+    const order = ["Alpha", "Beta", "Gamma", "Delta"];
+    const t = setup("open the board and find the card", { pages: { b: BOARD }, start: "b", late: (_c, cur) => cur }, (name, _s, q) => (name === "step" ? at(order[n++ % 4] as string)(q) : {}), { url: URL, maxSteps: 8 }, { earlyDecisions: true });
+    const r = await t.runner.run();
+    expect(t.page.earlies).toContain(true);
+    expect(r.blocked?.kind).toBe("loop_detected");
+    expect(t.page.calls.filter((c) => c.op === "act")).toHaveLength(3);
+  });
+
+  it("two actions that change nothing and a third whose change shows only after its settle are no loop", async () => {
+    let n = 0;
+    const t = setup("open the board and find the card", { pages: { b: BOARD, m: MOVED }, start: "b", late: (c, cur) => (c.op === "act" && c.id === "e3" ? "m" : cur) },
+      (name, state, q) => {
+        if (name !== "step") return {};
+        if ((state as { page: { text: string } }).page.text.includes("Card")) return done;
+        return at(["Alpha", "Beta", "Gamma"][n++] as string)(q);
+      }, { url: URL, maxSteps: 8 }, { earlyDecisions: true });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(t.page.calls.filter((c) => c.op === "act").map((c) => c.id)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("JEV_EARLY_DECISIONS=0 turns early decisions off when the deps do not set them", async () => {
+    const was = process.env["JEV_EARLY_DECISIONS"];
+    process.env["JEV_EARLY_DECISIONS"] = "0";
+    try {
+      const t = setup("open the board and find the card", { pages: { b: BOARD, m: MOVED }, start: "b", late: (c, cur) => (c.op === "act" && c.id === "e3" ? "m" : cur) },
+        (name, state, q) => (name !== "step" ? {} : (state as { page: { text: string } }).page.text.includes("Card") ? done : at("Gamma")(q)), { url: URL, maxSteps: 4 });
+      await t.runner.run();
+      expect(t.page.earlies.every((e) => !e)).toBe(true);
+    } finally {
+      if (was === undefined) delete process.env["JEV_EARLY_DECISIONS"]; else process.env["JEV_EARLY_DECISIONS"] = was;
+    }
   });
 });

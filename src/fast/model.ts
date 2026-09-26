@@ -2,7 +2,8 @@
 //
 // The fast engine talks to Chrome over one Chrome DevTools Protocol (CDP) connection,
 // reads the page with one in-page script, checks freshness instead of waiting, and
-// asks Jev one request per step. The shape follows browser-use/jev-ultrafast (MIT).
+// asks Jev one request per step. The shape follows browser-use/jev-ultrafast (jev_ultrafast/agent.py and
+// jev_ultrafast/browser.py; MIT License, Copyright (c) 2026 Browser Use).
 
 import type { Logger } from "../io.js";
 
@@ -318,8 +319,14 @@ export interface Page {
    * Read the page with one in-page evaluation. Waits first for any pending post-input settle. After a fill, a click, or
    * a key, the settle waits for the timers and requests that the input started, at most `LIMITS.causalCapMs`; after
    * other input, 2 animation frames or 50 ms. Retries while the document is navigating, up to `settleTimeoutMs`.
+   * `early`: after a fill, a click, or a key, wait only for the first frames of the settle (an editable combobox also
+   * for its options, up to 200 ms) and one check of the tracker, and read the page then. The rest of the settle goes on
+   * in the page and runs at the start of the next observe (`pending`). The loop decides on the early page while the
+   * rest runs, and uses that decision only when the settled page is the same.
    */
-  observe(): Promise<Observation>;
+  observe(opts?: { early?: boolean }): Promise<Observation>;
+  /** An early observe left the rest of an input's settle for the next observe. An adapter without it never leaves one. */
+  pending?(): boolean;
   /** True when the page still matches `obs`. With a click, fill, or select action, compares the page key and that node's guard only. With a scroll action, the page key only. Without an action, the whole marker. */
   fresh(obs: Observation, action?: Action): Promise<boolean>;
   /**
@@ -354,8 +361,13 @@ export interface Page {
   commit(action: Action, obs: Observation): Promise<{ prevented: boolean } | { skipped: "gone" | "focus" }>;
   /** Navigate the tab and wait for document.readyState === "complete", polling every 20 ms, up to `timeoutMs`. */
   navigate(url: string, timeoutMs: number): Promise<void>;
-  /** History back, then the same readiness wait. */
+  /** History back, then the same readiness wait. Nothing happens when the previous entry is not a web page (`canGoBack`). */
   back(timeoutMs: number): Promise<void>;
+  /**
+   * The tab's history has an earlier entry that is a web page. Every tab starts on about:blank, so the entry before the
+   * start page is not one. An adapter without it offers GO_BACK on every step.
+   */
+  canGoBack?(): Promise<boolean>;
   url(): Promise<string>;
   /** Save a JPEG screenshot. */
   screenshot(path: string): Promise<void>;

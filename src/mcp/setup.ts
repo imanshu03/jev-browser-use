@@ -167,7 +167,8 @@ export function checkAutonomy(input: BrowseInput, env: NodeJS.ProcessEnv): strin
 }
 
 /** The Jev connection. client() reads the key until it finds one, else throws NoKeyError. Nothing connects before that. */
-export interface JevLink { client(): TypeSafeClient; warm(): Promise<void>; key(): string | null; close(): Promise<void> }
+/** `warm({ keep: true })`: an idle ping, which also sends when the sockets are open (see Transport.warm). */
+export interface JevLink { client(): TypeSafeClient; warm(opts?: { keep?: boolean }): Promise<void>; key(): string | null; close(): Promise<void> }
 
 /**
  * `packageEnv`: the server can read the package .env, because it runs from the repository. When it runs from a
@@ -192,8 +193,8 @@ export function createJevLink(env: NodeJS.ProcessEnv, log: Logger, transport?: T
       log.info(`jev key from ${loaded.source}`);
       return client;
     },
-    async warm() {
-      try { await tr().warm(link.client().baseURL); } catch { /* no key yet, or the warm failed; the first request connects */ }
+    async warm(opts) {
+      try { await tr().warm(link.client().baseURL, opts); } catch { /* no key yet, or the warm failed; the first request connects */ }
     },
     key() { return key; },
     async close() { if (t) await t.close().catch(() => undefined); },

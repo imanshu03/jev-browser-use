@@ -84,7 +84,7 @@ The result goes to stdout as one JSON document. The trace goes to stderr. The ex
 
 ## Direct engines: `cdp` and `chromium`
 
-The `cdp` engine is the default. The `cdp` and `chromium` options share one direct implementation. It follows the design of `browser-use/jev-ultrafast`.
+The `cdp` engine is the default. The `cdp` and `chromium` options share one direct implementation. It follows the design of `browser-use/jev-ultrafast`, and parts of it are ported from that project under the MIT License. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists those parts and the license text.
 
 How it runs:
 
@@ -93,6 +93,9 @@ How it runs:
 3. It normally sends one STEP request per step. Retries and stale observations can require more requests in that step. The request carries the page, the last actions, and the questions for the operation, the target, and the answer.
 4. Before an action it checks that the page still matches the observation. When the page changed, it observes again. Readiness checks and waits have limits.
 5. When code alone knows the profile (a flag, a profile named in the task, the workspace default, or none) and the start URL (a flag, a URL in the task, or one site of the catalog), it launches the selected browser and loads the first page while the plan request runs. Jev then only decides the goal. When Jev must pick the profile or the site, the plan request runs first.
+6. After an input it waits for the work that the input started (timers and requests), at most 3 s. The next STEP request goes out early, on the page after the first frames, while that wait runs. The engine uses the answer only when the page after the wait is the same page; otherwise it asks again. Set `JEV_EARLY_DECISIONS=0` to wait first.
+
+Text for fields: the engine types values from the task and from `--var`. For a field that needs new text (a message, a reply, a description), the CLI and chat can ask a small language model, as `browser-use/jev-ultrafast` does. Set `JEV_TEXT_MODEL` and `JEV_TEXT_API_KEY`, and optionally `JEV_TEXT_BASE_URL` (an OpenAI-compatible endpoint; default `https://openrouter.ai/api/v1`) and `JEV_TEXT_REASONING` (`none` or `low`). The model writes text only for fields that can take new text, never for a password, code, search, or other exact-value field. Before a click or Enter sends its text, the terminal prompt shows the text and asks. The request sends the redacted task, the page URL and title, the labels and current values of the fields (up to 2,000 characters of text already in the field), the recent actions with their typed text, the texts sent in this run, and up to 6,000 characters of page text to that endpoint. Without these variables, such a field blocks with the hint to pass `--var`. The plugin does not use them: there your assistant writes the text.
 
 Where the browser runs:
 
@@ -112,7 +115,7 @@ Rules for both direct engines:
 - A copied profile has one owner at a time. A second launch or refresh fails while that profile is in use. The owner holds `<copy>.jev-lock` until the browser exits. After a forced stop, a lock can remain. Check that no browser process uses the copy before you remove the lock. Existing Chrome singleton locks are preserved.
 - Enter is offered only when observed focus can use it. An empty focused editor must be filled first. The snapshot reads native fields and rich-text editors, including their current values. Enter uses the submit confirmation rules. If the focused control or its form has a destructive label, Enter uses the destructive confirmation rules. A change to focus or form state cancels the pending key press.
 - When the focused field shows a suggestion list with a highlighted option (a combobox, a command menu, a mention list), Enter picks that option. Jev sees the option as `enter_picks`. The Enter label and the confirmation dialog name it, for example `press Enter on "Q3 Roadmap | Send message | picks Ask AI: …"`, and a destructive word in the option makes Enter destructive. When Jev splits between Enter and a click on that same option, the engine adds the two probabilities, as for the submit button. The engine never changes Enter into a click on another option. A change of the list cancels the pending key press.
-- After a fill, a click, or Enter, the engine waits for the work that the input started before it observes the page: the page timers shorter than 1 s that the input set (a debounce), the requests that started after the input, and a new `aria-busy` marker or progress bar (alone, at most 0.5 s). The wait is at most 3 s per input. So a debounced search shows its results, and a saved form shows its saved state, before Jev decides. An input that starts no work waits about four frames. The engine reads the requests over CDP; it does not change `fetch` in the page.
+- After a fill, a click, or Enter, the engine waits for the work that the input started before it observes the page: the page timers shorter than 1 s that the input set (a debounce), the requests that started after the input, and a new `aria-busy` marker or progress bar (alone, at most 0.5 s). The wait is at most 3 s per input. So a debounced search shows its results, and a saved form shows its saved state, before the next action runs: the next request can go out on the page after the first frames (item 6), but the engine acts on its answer only when the page after the wait is the same. An input that starts no work waits about four frames. The engine reads the requests over CDP; it does not change `fetch` in the page.
 - Before DONE or BLOCKED ends the run, the engine checks that the page did not change during the Jev request. When it changed (late results, a finished save), Jev decides again on the new page, one time per step.
 - WAIT observes the page until it changed and holds still, at most 1.5 s. A spinner alone does not end the wait.
 - Scroll actions can target a panel inside the page. The engine prefers a scrollable panel with focus, then the largest visible panel.
@@ -120,7 +123,7 @@ Rules for both direct engines:
 - The profile copy is complete only when `<copy>/jev-copy.json` exists. The engine copies into a staging directory first and renames it at the end. A copy that ended early is copied again on the next run.
 - With `--cdp` the engine opens its tab in the background and keeps the viewport of your window.
 
-The Jev client keeps one HTTP connection warm for the whole run. When the plan needs no Jev request, the engine opens the connection while the browser starts. Chat mode pings the API every 45 s while it waits for input, so the first request of the next task also finds a warm connection.
+The Jev client keeps up to two HTTP connections warm. The engine opens them while the browser starts, or while the page loads after a plan request. Chat mode pings the API every 45 s while it waits for input, so the first request of the next task also finds a warm connection.
 
 Use `--engine vercel` to run the task with `agent-browser`. All three engines produce the same output JSON and the same exit codes.
 
@@ -456,7 +459,7 @@ When a form needs new text, such as a reply, Jev can choose `generate` for the f
 - Enter requires submit checks. Labels such as Send can require human confirmation under the current risk rules. A required prompt without an interactive terminal blocks the action. With `--confirm autonomous`, no action asks.
 - Repeated actions without a page change can return `loop_detected`. Sign-in walls, confirmation requirements, and run limits also produce blocked results with a reason.
 - `ambiguous` with "typed value not added" means that a chip field still holds a typed value that it did not add as a chip. The form was not sent. Add the value in that field (press Enter or click its suggestion), then submit. `ambiguous` with "Enter in ... added ..., not ..." means that Enter added an option instead of the typed value. Check the chips of that field before you submit.
-- In plugin runs, `needs_text` means that the run did not get usable new text: the assistant declined, no text came in 300 s, the text failed its checks, or the run used its 3 text requests. The CLI and chat never return `needs_text`.
+- In plugin runs, `needs_text` means that the run did not get usable new text: the assistant declined, no text came in 300 s, the text failed its checks, or the run used its 3 text requests. Without the text model the CLI and chat never return `needs_text`; with it, a decline, a timeout, or text that fails its checks blocks `needs_text`.
 
 Use `--log-level debug` to inspect the request state and decisions. Restart chat after a source update so the process loads the changed code. A successful local editor test does not establish that every site's editor works.
 

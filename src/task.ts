@@ -4,7 +4,7 @@ import type { DateFact, Span } from "./types.js";
 import { LIMITS, SECRET_KEY } from "./types.js";
 
 export const VALUE_VERBS = ["search for", "search", "look up", "type", "enter", "fill in", "fill", "write", "put",
-  "find", "named", "called", "titled", "with", "as", "to", "for", "into", "query"] as const;
+  "find", "named", "called", "titled", "with", "as", "to", "for", "into", "query", "about"] as const;
 
 /** A sentence dot ends a clause; a dot inside a word does not ("report.pdf", "v2.1"). A dot before a dot does ("hello...and"). */
 export const CLAUSE_BREAK = /,|;|\.(?=[\s.]|$)|\bthen\b|\band then\b|\bin the\b|\bon the\b|\binto\b|\busing\b/i;
@@ -295,6 +295,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   const ex = new Set(exclude.map((s) => s.trim().toLowerCase()).filter(Boolean));
   const out: Span[] = [];
   const seen = new Map<string, string>();
+  /** The task position at which each span was first claimed. */
+  const startOf = new Map<string, number>();
   /** The id of the span with this text (new or already added), or null when the text is not a span. */
   const add = (text: string, source: Span["source"], at: number, verb?: string, parent?: string | null, longCut = false): string | null => {
     let t = text.trim().replace(/\s+/g, " ");
@@ -316,13 +318,29 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
     if (t.length < 1 || t.length > LIMITS.spanChars) return null;
     const k = t.toLowerCase();
     const known = seen.get(k);
-    if (known !== undefined) return known;
+    if (known !== undefined) {
+      // A topic after "about" that the task also gives as a value ("type Rust") or a name ("Alan Turing") takes that
+      // source: the topic rule hides a topic from fields that take new text, and the task states this text word for word.
+      // A name that is the topic itself (the same position) stays a topic for multiline fields (`Span.topic`).
+      const prev = out.find((x) => x.id === known);
+      if (prev && prev.source === "after_verb" && prev.verb === "about" && ((source === "after_verb" && verb !== "about") || source === "proper_noun")) {
+        const itself = source === "proper_noun" && startOf.get(known) === at;
+        prev.source = source;
+        if (source === "after_verb" && verb) prev.verb = verb; else delete prev.verb;
+        if (parent && parent !== known) prev.parent = parent; else delete prev.parent;
+        if (longCut && !itself) prev.longCut = true; else delete prev.longCut;
+        if (itself) prev.topic = true; else delete prev.topic;
+        if (isSecretAt(task, at)) prev.secret = true;
+      }
+      return known;
+    }
     if (ex.has(k) || out.length >= LIMITS.spans) return null;
     const span: Span = { id: `s${out.length + 1}`, text: t, source, secret: isSecretAt(task, at) };
     if (verb) span.verb = verb;
     if (parent) span.parent = parent;
     if (longCut) span.longCut = true;
     seen.set(k, span.id);
+    startOf.set(span.id, at);
     out.push(span);
     return span.id;
   };
@@ -352,6 +370,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
     const start = (m.index ?? 0) + m[0].length;
     const rest = task.slice(start);
     const verb = (m[1] ?? "").toLowerCase().replace(/\s+/g, " ");
+    // "About" in capitals is a page or link name ("Click About"), and "about 10 minutes" is an approximation: no topic.
+    if (verb === "about" && (m[1] !== "about" || /^\d/.test(rest))) continue;
     const brkAt = rest.search(CLAUSE_BREAK);
     const own = brkAt >= 0 ? rest.slice(0, brkAt) : rest;
     // A sentence after "with" or "as" is a message: a subject pronoun starts it, or one with a helping verb comes before
@@ -416,7 +436,8 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
   }
   // R4 proper nouns. A proper noun that starts an after_verb span and cuts a value short is a cut of it ("My Quarterly
   // Report Draft" of "My Quarterly Report Draft 2026"). A name that the span only goes on after is not.
-  for (const m of task.matchAll(/(?:^|[^.!?]\s+)((?:[A-Z][\w'-]*)(?:\s+[A-Z][\w'-]*){0,5})/g)) {
+  // Letters of any script: "Gödel’s" is one word, not "G". A curly apostrophe belongs to the word as a straight one does.
+  for (const m of task.matchAll(/(?:^|[^.!?]\s+)((?:\p{Lu}[\p{L}\p{N}_'’-]*)(?:\s+\p{Lu}[\p{L}\p{N}_'’-]*){0,5})/gu)) {
     const at = (m.index ?? 0) + m[0].length - (m[1] ?? "").length;
     const noun = stripTrailing(m[1] ?? "");
     const from = starts.get(at);

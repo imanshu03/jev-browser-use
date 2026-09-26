@@ -314,6 +314,48 @@ describe("openPage causal settle", () => {
     expect(methods(t.c)).toContain("Network.disable");
   });
 
+  it("an early observe reads the page after the first check and leaves the rest of the settle for the next observe", async () => {
+    const t = tracked([{ pending: 1, follow: 0, busy: false }, { pending: 1, follow: 0, busy: false }, idle]);
+    const page = await openPage(t.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const obs = await page.observe();
+    await page.act(fill, obs, "roadmap");
+    const before = methods(t.c).length;
+    await page.observe({ early: true });
+    expect(t.checks()).toBe(1);
+    expect(page.pending?.()).toBe(true);
+    expect(methods(t.c).slice(before)).not.toContain("Network.disable");
+    await page.observe();
+    expect(page.pending?.()).toBe(false);
+    expect(t.checks()).toBe(3);
+    // One settle: only the first check closes the input window.
+    expect(t.exprs.filter((e) => e.startsWith("((close,extend)")).map((e) => e.match(/\((true|false),(true|false)\)$/)?.[0])).toEqual(["(true,false)", "(false,false)", "(false,false)"]);
+    expect(methods(t.c).slice(before).filter((m) => m !== "eval")).toEqual(["state", "state", "state", "Network.disable", "end"]);
+  });
+
+  it("an early observe on work that ended at the first check leaves nothing pending; a new input first ends a pending settle", async () => {
+    const quiet = tracked([idle]);
+    const p1 = await openPage(quiet.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const o1 = await p1.observe();
+    await p1.act(fill, o1, "roadmap");
+    await p1.observe({ early: true });
+    expect(p1.pending?.()).toBe(false);
+    expect(methods(quiet.c)).toContain("Network.disable");
+    const busy = tracked([{ pending: 1, follow: 0, busy: false }, idle]);
+    const p2 = await openPage(busy.c.chrome, { settleTimeoutMs: 500, log: fakeLogger() });
+    const o2 = await p2.observe();
+    await p2.act(fill, o2, "roadmap");
+    const early = await p2.observe({ early: true });
+    expect(p2.pending?.()).toBe(true);
+    const before = methods(busy.c).length;
+    await p2.act(fill, early, "roadmap 2");
+    const order = methods(busy.c).slice(before);
+    // The rest of the first settle (its last check, Network off, end) runs before the second arm and its mouse events.
+    expect(order.indexOf("end")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("end")).toBeLessThan(order.indexOf("arm"));
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("Input.dispatchMouseEvent"));
+    expect(p2.pending?.()).toBe(false);
+  });
+
   it("work that never ends stops at the cap", async () => {
     const t = tracked([{ pending: 1, follow: 0, busy: true }]);
     const log = fakeLogger();
@@ -325,7 +367,7 @@ describe("openPage causal settle", () => {
     expect(Date.now() - t0).toBeGreaterThanOrEqual(LIMITS.causalCapMs);
     expect(Date.now() - t0).toBeLessThan(LIMITS.causalCapMs + 500);
     expect(after.ms).toBeGreaterThanOrEqual(LIMITS.causalCapMs);
-    expect(log.lines.some((l) => l.includes(`settle stopped at the ${LIMITS.causalCapMs} ms cap: 1 timers, 0 requests, busy`))).toBe(true);
+    expect(log.lines.some((l) => l.includes(`end: the ${LIMITS.causalCapMs} ms cap with 1 timers and 0 requests open`) && l.includes("busy marker"))).toBe(true);
   });
 
   it("a busy marker alone holds the settle for causalBusyMs, not until the cap", async () => {

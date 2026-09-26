@@ -13,7 +13,7 @@ export function startIdleTimers(d: TimerDeps): () => void {
   const ping = d.setInterval(() => {
     const ended = d.runs.lastRunEndedAt();
     if (ended === null || d.now() - ended >= MCP.pingWindowMs || d.runs.active() !== null || d.jev.key() === null) return;
-    void d.jev.warm().catch(() => undefined);
+    void d.jev.warm({ keep: true }).catch(() => undefined);
   }, MCP.idlePingMs);
   // Idle close: no run is active and no run ended in idleCloseMs.
   const idle = d.setInterval(() => {

@@ -2,6 +2,7 @@
 import type { Engine, Goal, RunResult, StepRecord } from "./types.js";
 import { redactData } from "./task.js";
 import { LIMITS } from "./types.js";
+import { flatText, sanitizeText } from "./fast/generate.js";
 
 export interface Logger {
   info(msg: string): void;
@@ -93,7 +94,7 @@ export interface TextSource { write(req: TextRequest, opts: TextWriteOptions): P
 export interface SentField { label: string; text: string; mentions: string[] }
 
 /**
- * What a confirmation is about. A front end that shows a dialog uses it; the CLI and chat ignore it. `sends`: for a send,
+ * What a confirmation is about. The MCP dialog and the terminal prompt (`confirmTexts`) show it. `sends`: for a send,
  * a submit, or Enter, the message fields of the form with the text that goes out, also when no assistant wrote it.
  */
 export type ConfirmDetail =
@@ -172,13 +173,35 @@ export function createHuman(opts: { stdin: NodeJS.ReadStream; stderr: NodeJS.Wri
       }
       return keyResult ?? "timeout";
     },
-    async confirm(message, timeoutMs) {
+    async confirm(message, timeoutMs, detail) {
       if (!interactive) return false;
-      opts.stderr.write(message);
+      // The message names a page label: no control character of the page reaches the terminal.
+      opts.stderr.write(confirmTexts(detail) + sanitizeText(message));
       const line = await readLine(timeoutMs);
       return line !== null && /^y(es)?$/i.test(line);
     },
   };
+}
+
+/**
+ * The lines that a terminal prompt shows before "Type y to allow": each text that the action can send, with its field.
+ * Without them a person allowed a send and did not see that the field held only the second line of the message. Empty
+ * when the action sends no text. Each text shows in full up to LIMITS.confirmTextChars: the loop blocks a send whose
+ * unsent text is longer, and it cuts a longer sent field text with an ellipsis. Control characters are removed, as in the MCP dialog: a page text must not hide or rewrite
+ * part of the prompt with terminal escape sequences.
+ */
+export function confirmTexts(detail?: ConfirmDetail): string {
+  if (detail?.kind !== "action") return "";
+  const shown = (raw: string): string => {
+    const t = sanitizeText(raw);
+    const cut = t.length > LIMITS.confirmTextChars ? `${t.slice(0, LIMITS.confirmTextChars)}\u2026` : t;
+    return cut.split("\n").map((l, i) => (i === 0 ? l : `      ${l}`)).join("\n");
+  };
+  const lines = [
+    ...detail.typed.map((t) => `  ${flatText(t.label)}: ${shown(t.text)}`),
+    ...(detail.sends ?? []).map((f) => `  ${flatText(f.label)}: ${shown(f.text)}${f.mentions.length > 0 ? ` (mentions: ${f.mentions.map((m) => `@${flatText(m)}`).join(", ")})` : ""}`),
+  ];
+  return lines.length > 0 ? `Text that this action sends:\n${lines.join("\n")}\n` : "";
 }
 
 function sleep(ms: number): Promise<void> {

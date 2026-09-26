@@ -176,6 +176,8 @@ describe("bundle", () => {
     const outfile = path.join(tmp, "jev-mcp.mjs");
     await build({ ...options, outfile });
     expect(readFileSync(outfile, "utf8")).toContain("Includes code adapted from browser-use/jev-ultrafast");
+    // The MIT License asks for its permission notice in every copy of the ported code.
+    expect(readFileSync(outfile, "utf8")).toContain("// Permission is hereby granted, free of charge, to any person obtaining a copy");
     for (const args of [[], ["--version"]]) {
       const r = await runNode(outfile, args, tmp);
       expect(r, `${args.join(" ")}\n${r.stderr}`).toMatchObject({ code: 0, stdout: "", timedOut: false });

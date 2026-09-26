@@ -575,8 +575,11 @@ export function settleScript(action: Action | null): string {
  * input started when it is created during the input, in a tracked callback, or in the follow window (`causalFollowMs`)
  * after one. The follow window gets past the React scheduler, which runs the effect of a debounced state change in a message
  * task, not a timer. Poll chains stop: a timer more than `causalGenerations` deep does not count, nor a callback that
- * schedules itself again with no shorter delay (a debounce that waits again for its rest counts). An interval counts
- * until its first run. Requests are not wrapped: the page layer counts them over CDP, which the page cannot see.
+ * schedules itself again with no shorter delay (a debounce that waits again for its rest counts). A callback that
+ * schedules a new closure of its own code with the same delay counts as the same callback: on Google Flights a 500 ms
+ * timer armed a copy of itself two times after each input, and each settle took 1.0-1.4 s. A bound function shows as
+ * native code, so it is never such a copy. An interval counts until its
+ * first run. Requests are not wrapped: the page layer counts them over CDP, which the page cannot see.
  * `node` is the field of a fill. The script keeps the option texts of each popup, so the end can tell which popups the
  * fill changed. Returns true when armed.
  */
@@ -593,14 +596,19 @@ export function causalArmScript(node: number | null): string {
       if (!tracking() || typeof cb!=='function' || delay>=s.max) return Reflect.apply(fn,self,args);
       const gen=(s.depth>0 ? s.cur : s.last)+1, prior=s.seen.get(cb);
       if (gen>s.gens || (prior!==undefined && delay>=prior)) return Reflect.apply(fn,self,args);
+      // A callback that arms a new copy of itself (a new closure with the same code) with the same delay is a poll too.
+      // Never for native code: every bound function shows the same text, and a bound callback that schedules another
+      // one (a debounced search) is new work.
+      if (s.depth>0 && s.run && delay===s.run.delay && String(cb)===s.run.src() && !/\[native code\]\s*\}$/.test(s.run.src())) return Reflect.apply(fn,self,args);
       s.seen.set(cb,delay);
-      let id, first=true;
+      let id, first=true, src;
       const run=function(...rest){
         if (!first) return cb.apply(this,rest);
         first=false; s.timers.delete(id); s.depth++;
-        const cur=s.cur; s.cur=gen;
+        const cur=s.cur, outer=s.run; s.cur=gen;
+        s.run={delay,src:()=>src??=String(cb)};
         try { return cb.apply(this,rest); }
-        finally { s.depth--; s.cur=cur; s.last=Math.max(s.last,gen); if (s.armed) s.until=Math.max(s.until,performance.now()+s.follow); }
+        finally { s.depth--; s.cur=cur; s.run=outer; s.last=Math.max(s.last,gen); if (s.armed) s.until=Math.max(s.until,performance.now()+s.follow); }
       };
       id=Reflect.apply(fn,self,[run,...args.slice(1)]);
       s.timers.set(id,gen);
@@ -807,6 +815,11 @@ export interface EditStep {
   spaceBefore?: boolean;
   /** "check" only: false for an input without a selection API (email, number). Code then checks focus only. */
   selectable?: boolean;
+  /**
+   * The click on the field moved focus to the text input of a popover that the field opened, and the step read that
+   * input: tag, id or class, and aria-label. Absent when the step read the field itself.
+   */
+  moved?: string;
 }
 
 /**
@@ -817,6 +830,8 @@ export interface EditStep {
  *   number) checks focus only.
  * - "blank": after a new line, the caret is in an empty block inside the field, and the field still holds each line of
  *   `keep`.
+ * The field of every step is the text input of a popover when the field opens popups and the click moved focus there
+ * (`EditStep.moved`).
  */
 export function editScript(node: number, step: "read" | "check" | "blank", mode: "replace" | "append" = "replace", keep: string[] = []): string {
   const arg = JSON.stringify({ node: Math.trunc(node), step, mode, keep, send: SEND_CONTROL });
@@ -825,8 +840,19 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   if (!host?.isConnected) return {ok:false,why:'the field is gone',text:'',kind:'input',blank:true};
   // A role=textbox wrapper that is not editable itself: the text control inside it that the click focused is the field.
   const inner=document.activeElement;
-  const e=!host.isContentEditable && !['INPUT','TEXTAREA'].includes(host.tagName) && inner && inner!==host && host.contains(inner) &&
+  let e=!host.isContentEditable && !['INPUT','TEXTAREA'].includes(host.tagName) && inner && inner!==host && host.contains(inner) &&
     (['INPUT','TEXTAREA'].includes(inner.tagName) || inner.isContentEditable) ? inner : host;
+  // A combobox whose click opens a popover with its own text input, which takes focus (Google Flights: "Where from?"
+  // opens "Where else?"). A person types into that input, so the fill does too. Only a visible, editable one-line text
+  // input or textarea of a combobox, searchbox, autocomplete, or popup, next to a field that opens a popup.
+  const opener=host.getAttribute('role')==='combobox' || !['','false'].includes(host.getAttribute('aria-haspopup')??'') ||
+    host.hasAttribute('aria-expanded') || (host.tagName==='INPUT' && host.hasAttribute('list'));
+  const moved=!!inner && inner!==e && !e.contains(inner) && opener &&
+    ((inner.tagName==='INPUT' && ['text','search'].includes(inner.type)) || inner.tagName==='TEXTAREA') &&
+    !inner.readOnly && !inner.disabled && inner.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) &&
+    (['combobox','searchbox'].includes(inner.getAttribute('role')??'') || inner.hasAttribute('aria-autocomplete') ||
+      !!inner.closest('dialog,[role="dialog"],[role="listbox"],[role="menu"],[aria-modal="true"]'));
+  if (moved) e=inner;
   const norm=t=>String(t||'').replace(/[\u200B\uFEFF]/g,'').replace(/\s+/g,' ').trim();
   const kind=e.tagName==='TEXTAREA' ? 'textarea' : e.tagName==='INPUT' ? 'input' : 'editable';
   const text=kind==='editable' ? e.innerText : String(e.value??'');
@@ -842,11 +868,11 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   };
   const range=(sc,so,ec,eo)=>{const x=document.createRange();x.setStart(sc,so);x.setEnd(ec,eo);return x;};
   const all=()=>{const x=document.createRange();x.selectNodeContents(e);return x;};
-  const out=(ok,why,more)=>({ok,why:ok?'':why,text,kind,blank:norm(kind==='editable' ? textIn(all()) : text)==='',...more});
-  const act=document.activeElement;
   const where=n=>!n || n===document.body || n===document.documentElement ? 'nothing' :
     (n.tagName.toLowerCase()+(n.id ? '#'+n.id : n.classList?.length ? '.'+n.classList[0] : '')+
       (n.getAttribute('aria-label') ? ' "'+n.getAttribute('aria-label').slice(0,40)+'"' : ''));
+  const out=(ok,why,more)=>({ok,why:ok?'':why,text,kind,blank:norm(kind==='editable' ? textIn(all()) : text)==='',...(moved ? {moved:where(e)} : {}),...more});
+  const act=document.activeElement;
   if (!act || (act!==e && !e.contains(act))) return out(false,'focus is on '+where(act)+', not on the field');
   if (!e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return out(false,'the field is hidden');
   const inline=x=>/^inline/.test(getComputedStyle(x).display);

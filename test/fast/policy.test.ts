@@ -6,7 +6,7 @@ import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
 import type { Span } from "../../src/types.js";
 import { LIMITS } from "../../src/types.js";
-import { BLOCKED_VALUE_GEN, DATE_NONE, DATE_RULE, DATE_VALUE_Q, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MENTION_RULE, MODES, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, mentionMatches, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
+import { BLOCKED_VALUE_GEN, DATE_NONE, DATE_RULE, DATE_VALUE_Q, DONE_SENT, DONE_TEXT, ENTER_PICKS, GENERATE, MENTION_RULE, MODES, ORDER_RULE, MODE_Q, NONE_VALUE, RULES, TARGET_RULES, TYPE_TEXT_GEN, TYPE_TEXT_HELD, TYPE_TEXT_HELD_GEN, VALUE_Q, VALUE_Q_GEN, VALUE_Q_NEW, VALUE_Q_NEW_GEN, actionKey, actionSpace, answerLines, buildStep, buildValueStep, canWriteInto, cutText, fieldLines, mentionMatches, readEdit, readStep, readValue, rulesFor, tokenEvidence } from "../../src/fast/policy.js";
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Action, DateInfo, Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
@@ -32,6 +32,7 @@ function input(over: Partial<StepInput> = {}): StepInput {
 describe("RULES", () => {
   it("keeps the proto rules and adds the jev-ultrafast lines", () => {
     const all = RULES.join("\n");
+    expect(all).toContain("Do the steps of the goal in the order that the goal gives them.");
     expect(all).toContain("detailed view");
     expect(all).toContain("autocomplete suggestion");
     expect(all).not.toContain("date picker");
@@ -319,7 +320,48 @@ describe("requests without a text source (regression)", () => {
     // Taken again on 2026-09-23, when one value head per field replaced the shared type_text_value head and a field that
     // can take new text stopped offering the whole task and clauses. Taken again on 2026-09-26, when the date rule went into
     // the requests of pages with a date field or a calendar day only; with that rule in every request, the old digest holds.
-    expect(digest(out)).toBe("0d5e564b574e9efc6e8d2e7b4ea9d24e9e4ee96b4fabe2e4247339aee8b6683b");
+    // Taken again on 2026-09-26, when the order rule (ORDER_RULE) went into RULES (the ultrafast comparison).
+    expect(digest(out)).toBe("b58b416ba298d3e549bf6eebee98eadf8a7d991ae2c5fe4a7ab809dc2c938dc7");
+  });
+});
+
+describe("a topic after \"about\" is a query, never a message", () => {
+  it("a search box offers it; a field that can take new text does not, with or without a text source", () => {
+    const task = "Find and open the Wikipedia article about Gödel’s incompleteness theorems.";
+    const page = obs("https://en.wikipedia.org/", [el("e1", "fill", "Search Wikipedia", "searchbox", { value: "" }), el("e2", "fill", "Note", "textbox", { value: "", multiline: true })]);
+    const spans = extractSpans(task);
+    const topic = spans.find((x) => x.source === "after_verb" && x.verb === "about");
+    expect(topic?.text).toBe("Gödel’s incompleteness theorems");
+    for (const canGenerate of [false, true]) {
+      const b = buildStep(input({ task, obs: page, spans, canGenerate }));
+      const keys = (k: string) => Object.keys((b.questions[k] as ChoiceQuestion).criteria);
+      expect(keys("value_1")).toContain(topic?.id);
+      expect(keys("value_2")).not.toContain(topic?.id);
+    }
+  });
+  it("a text that the task also gives as a value or a name is not hidden: an earlier \"about\" does not take it", () => {
+    const head = (task: string, label: string, canGenerate: boolean): string[] => {
+      const page = obs("https://a.b/", [el("e1", "fill", label, "textbox", { value: "" })]);
+      const spans = extractSpans(task);
+      const q = buildStep(input({ task, obs: page, spans, canGenerate })).questions["value_1"] as ChoiceQuestion | undefined;
+      return Object.keys(q?.criteria ?? {}).map((k) => spans.find((s) => s.id === k)?.text ?? k);
+    };
+    for (const g of [false, true]) {
+      expect(head("Search for articles about Rust, then type Rust in the Tag field", "Tag", g)).toContain("Rust");
+      expect(head("Find the issue about Checkout and set the label to Checkout", "Label", g)).toContain("Checkout");
+    }
+    expect(head("Create a GitHub issue about Login Timeout", "Title", false)).toContain("Login Timeout");
+    // A topic that is only a topic stays hidden from a field that takes new text.
+    expect(head("Write a note about the launch and save it", "Note", false)).not.toContain("the launch");
+    // A name that is the whole topic: a single-line field (a title, a subject) offers it; a multiline field does not.
+    const multiline = (task: string, label: string, canGenerate: boolean): string[] => {
+      const page = obs("https://a.b/", [el("e1", "fill", label, "textbox", { value: "", multiline: true })]);
+      const spans = extractSpans(task);
+      const q = buildStep(input({ task, obs: page, spans, canGenerate })).questions["value_1"] as ChoiceQuestion | undefined;
+      return Object.keys(q?.criteria ?? {}).map((k) => spans.find((s) => s.id === k)?.text ?? k);
+    };
+    for (const g of [false, true]) expect(multiline("Write a note about Project Phoenix and save it", "Note", g)).not.toContain("Project Phoenix");
+    expect(head("Email Bob about Project Phoenix", "Subject", false)).toContain("Project Phoenix");
   });
 });
 
@@ -358,6 +400,8 @@ describe("value heads: one per TYPE_TEXT field", () => {
     expect(instr(off.questions["value_2"])).toEqual({ question: VALUE_Q, field: "[2] Reply", role: "textbox" });
     const filled = ask({ spans: taskSpans, obs: obs("https://a.b/", [el("e1", "fill", "Name", "textbox", { value: "Old Name" })]) });
     expect(instr(filled.questions["value_1"])).toEqual({ question: VALUE_Q, field: "[1] Name", role: "textbox", current_value: "Old Name" });
+    // The goal stays in the state for an act goal too (see assemble).
+    expect(off.state).toHaveProperty("goal", "reply to Ann that Tuesday at 10:00 works");
     expect(off.meta.values).toEqual({ "1": { spans: { s1: "s1", s2: "s2", s3: "s3", s4: "s4", s5: "s5", v_token: "v_token" }, generate: false }, "2": { spans: { s1: "s1", s3: "s3", v_token: "v_token" }, generate: false } });
     expect(valueHeads(ask({ spans: [] }).questions)).toEqual([]);
     expect(Object.keys(ask({}).questions)).not.toContain("type_text_value");
@@ -785,7 +829,8 @@ describe("mention facts", () => {
     const rule = JSON.stringify(MENTION_RULE).slice(1, -1);
     expect(JSON.stringify(rulesOf(b.questions["operation"]))).toContain(rule);
     expect(JSON.stringify(rulesOf(b.questions["click_target"]))).toContain(rule);
-    expect(rulesFor("act", undefined, true)).toEqual([...RULES, MENTION_RULE]);
+    // ORDER_RULE goes: "Post the update and mention Ann" names the send first, and the mention rule sends after the chip.
+    expect(rulesFor("act", undefined, true)).toEqual([...RULES.filter((r) => r !== ORDER_RULE), MENTION_RULE]);
 
     const plain = 'Send "Hi team" in the chat';
     const q = buildStep(input({ task: plain, obs: page, spans: extractSpans(plain) }));
@@ -926,7 +971,7 @@ describe("date fields", () => {
   it("the date rule goes only into requests of pages with a date field or a calendar day, after the rule on required fields", () => {
     expect(rulesFor("act", usage())).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4)]);
     // A task that also asks to mention someone gets both rules: the date rule in place, the mention rule at the end.
-    expect(rulesFor("act", usage(), true)).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4), MENTION_RULE]);
+    expect(rulesFor("act", usage(), true)).toEqual([...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4).filter((r) => r !== ORDER_RULE), MENTION_RULE]);
     expect(rulesFor("extract", usage()).at(-1)).toContain("SCROLL_DOWN");
     expect(rulesFor("act", obs("https://a.b/", [el("e1", "click", "English", "link")]))).toEqual(RULES);
     const calendar = obs("https://a.b/", [el("e1", "click", "Tuesday, September 1st, 2026", "button", { day: { grid: 1, day: null, multi: false, sel: false } })]);

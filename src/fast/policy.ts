@@ -17,6 +17,13 @@ import { CREDENTIAL_NAME, EXACT_AUTOCOMPLETE, EXACT_VALUE_NAME, LIMITS } from ".
 import { hasDateWidget, wantOf } from "./dates.js";
 import type { Action, EditMode, FastHistoryEntry, Observation } from "./model.js";
 
+/**
+ * On the travel fixture of browser-use/jev-ultrafast ("use the destination search and filters to find Design stays in
+ * Lisbon with Free cancellation, then open Casa Flora"), the first step opened Casa Flora with no search or filter in 9 of
+ * 9 runs (CLICK 0.53-0.57, TYPE_TEXT 0.16-0.21). With this rule, TYPE_TEXT led (0.43-0.47 against 0.31-0.37; 3 asks each).
+ */
+export const ORDER_RULE = "Do the steps of the goal in the order that the goal gives them. Open a result only after the requested search and every requested filter are applied.";
+
 /** Rules from scripts/proto.ts merged with jev-ultrafast NEXT_ACTION. Shared by the operation head and every target head. */
 export const RULES: string[] = [
   "Advance the user's entire goal from the CURRENT page with one operation.",
@@ -24,6 +31,7 @@ export const RULES: string[] = [
   "Do not repeat a step that is already satisfied. Do not toggle a checkbox, switch, radio, or select control that is already in the requested state.",
   "Fill required fields before submitting. A typed query still needs its matching autocomplete suggestion selected or Enter pressed.",
   "Set every requested filter or control; a matching result alone does not prove a requested filter was set.",
+  ORDER_RULE,
   "Submit populated search fields before opening a result; a populated field alone is not an applied search. If Search or Submit is visible and the required fields are ready, CLICK it immediately.",
   "Prefer a visible useful control over WAIT. Recent WAIT actions are not evidence of loading. WAIT only when the needed control is absent or disabled, or submitted results are still loading.",
   "PRESS_ENTER submits the focused field. GO_BACK returns to the previous page.",
@@ -57,12 +65,14 @@ export const DATE_RULE = "For a date field, TYPE_TEXT the requested date into it
 
 /**
  * The rules for one goal kind. With `obs`, a page with a date field or a calendar day also gets the date rule, after the
- * rule about required fields. `mention`: the task asks to mention someone.
+ * rule about required fields. `mention`: the task asks to mention someone. That task gets the mention rule instead of
+ * ORDER_RULE: "Post the update and mention Ann" names the send first, and the mention rule sends only after the chip
+ * (the mention rule was measured without ORDER_RULE).
  */
 export function rulesFor(goal: Goal, obs?: Observation, mention = false): string[] {
   const page = obs !== undefined && hasDateWidget(obs) ? [...RULES.slice(0, 4), DATE_RULE, ...RULES.slice(4)] : RULES;
   const rules = goal === "extract" ? [...page, EXTRACT_RULE] : page;
-  return mention ? [...rules, MENTION_RULE] : rules;
+  return mention ? [...rules.filter((r) => r !== ORDER_RULE), MENTION_RULE] : rules;
 }
 
 /** The task asks to mention someone: a span has the source `mention`. */
@@ -237,6 +247,8 @@ export interface StepInput {
   heldText?: ReadonlySet<number>;
   /** Texts that a send of this run took out of the page: `sent_texts` in the state, and the DONE_SENT text. */
   sentTexts?: { field: string; text: string }[];
+  /** False: the tab has no earlier web page, or a GO_BACK of this step fell below its gate. GO_BACK is not offered then. */
+  canGoBack?: boolean;
 }
 
 /** Enter cannot submit an observed empty editor. Missing focus is tolerated by older adapters. */
@@ -350,8 +362,17 @@ export const DATE_NONE = "No requested date belongs in this field";
  * exact value, such as a search box, keeps every span in its head.
  */
 function hiddenWhileGenerate(s: Span): boolean {
-  if (s.source === "clause" || s.source === "whole_task" || describesText(s)) return true;
+  if (s.source === "clause" || s.source === "whole_task" || describesText(s) || topicOf(s)) return true;
   return s.source === "after_verb" && s.text.split(/\s+/).filter(Boolean).length > LIMITS.genSpanWords;
+}
+
+/**
+ * The topic after "about" ("the Wikipedia article about Gödel’s incompleteness theorems"). It is a query for a search box
+ * or another exact-value field, never the text of a message: a field that can take new text does not offer it, so "a
+ * note about the launch" never types "the launch" as the note.
+ */
+function topicOf(s: Span): boolean {
+  return s.source === "after_verb" && s.verb === "about";
 }
 
 /** Verbs whose object is the value itself: "named QA Regression Suite Nightly Run", "type hello team". */
@@ -377,7 +398,7 @@ function describesText(s: Span): boolean {
  * or "called" stays.
  */
 function hiddenWithoutGenerate(s: Span): boolean {
-  if (s.source === "clause" || s.source === "whole_task" || describesText(s)) return true;
+  if (s.source === "clause" || s.source === "whole_task" || describesText(s) || topicOf(s)) return true;
   return s.source === "after_verb" && s.text.split(/\s+/).filter(Boolean).length > LIMITS.genSpanWords && !VALUE_OBJECT_VERBS.has(s.verb ?? "");
 }
 
@@ -520,7 +541,8 @@ function offeredSpans(a: Action, obs: Observation, spans: Span[], canGenerate: b
   const repeats = new Set(written.map((s) => same(s.text)));
   const repeat = (s: Span): boolean => gen && repeats.has(same(s.text));
   const hidden = !writable ? null : withCuts(gen ? hiddenWhileGenerate : hiddenWithoutGenerate, spans, repeat);
-  const named = (s: Span): boolean => s.source === "mention" && a.multiline === true;
+  // A name to mention, and a name that is the whole topic after "about", are never the text of a multiline field.
+  const named = (s: Span): boolean => (s.source === "mention" || s.topic === true) && a.multiline === true;
   const others = spans.filter((s) => s.source !== "generated" && !hidden?.(s) && !repeat(s) && !named(s));
   return [...written, ...others];
 }
@@ -623,7 +645,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
   ops["WAIT"] = "Wait for the page to finish loading.";
   // The option label stays in the state (focus.enter_picks), out of the options of the operation question.
   if (canPressEnter(obs)) ops["PRESS_ENTER"] = obs.focus?.enterOption ? ENTER_PICKS : "Press Enter to submit the focused field.";
-  ops["GO_BACK"] = "Go back to the previous page.";
+  if (input.canGoBack !== false) ops["GO_BACK"] = "Go back to the previous page.";
   const sent = input.sentTexts ?? [];
   if (!doneBanned) ops["DONE"] = sent.length > 0 ? DONE_SENT : DONE_TEXT;
   ops["BLOCKED"] = "No supported operation can make progress.";
@@ -700,6 +722,10 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
   const late = input.canGenerate === true && input.textTyped === true;
   const listed = (s: Span): boolean => !late || s.source === "generated" || (s.source !== "whole_task" && s.source !== "clause");
   const typedValues = heads.TYPE_TEXT && spans.length > 0 ? [...spans.filter((s) => s.source === "generated"), ...spans.filter((s) => s.source !== "generated" && listed(s))].slice(0, MAX_GROUP) : [];
+  // The goal stays in the state, also for an act goal. Without it the travel fixture of browser-use/jev-ultrafast typed
+  // the search first (TYPE_TEXT 0.62-0.71 against 0.24), but the bench lost the command bar (Enter picked "Ask AI" in
+  // 5 of 6 runs) and the invite form (Role clicked at 0.28 before the email, 2 of 3 runs); with it, 6 of 6 passed. The
+  // order rule (RULES) fixes the travel fixture instead.
   const state: Record<string, JsonValue> = {
     goal: task,
     page: { url: cutText(obs.url, LIMITS.urlChars), title: cutText(obs.title, LIMITS.titleChars), text: obs.text.slice(0, trim.textChars) },

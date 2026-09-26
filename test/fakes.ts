@@ -175,11 +175,11 @@ export function fakeText(steps: TextStep[] = []): TextSource & { requests: TextR
 }
 
 /** A Transport that never opens a socket. `fetch` throws unless the test passes one. */
-export function fakeTransport(fetch?: Fetch): Transport & { warms: string[]; closes: number } {
+export function fakeTransport(fetch?: Fetch): Transport & { warms: string[]; keeps: boolean[]; closes: number } {
   const t = {
-    warms: [] as string[], closes: 0, stats: { connections: 0 },
+    warms: [] as string[], keeps: [] as boolean[], closes: 0, stats: { connections: 0 },
     fetch: fetch ?? (async (input: string): Promise<Response> => { throw new Error(`fake transport: no network for ${input}`); }),
-    async warm(baseURL: string) { t.warms.push(baseURL); },
+    async warm(baseURL: string, opts?: { keep?: boolean }) { t.warms.push(baseURL); t.keeps.push(opts?.keep === true); },
     async close() { t.closes += 1; },
   };
   return t;

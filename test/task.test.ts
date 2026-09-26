@@ -169,8 +169,26 @@ describe("extractSpans", () => {
     const s = extractSpans("go to Hacker News, then read the top story");
     expect(s.some((x) => (x.source === "proper_noun" || x.source === "after_verb") && x.text === "Hacker News")).toBe(true);
     expect(extractSpans("Open Wikipedia and read Alan Turing").some((x) => x.source === "proper_noun" && x.text === "Alan Turing")).toBe(true);
+    // Letters of any script: the old rule cut "Gödel’s" to "G" (a Wikipedia search task of the ultrafast comparison).
+    const nouns = (t: string) => extractSpans(t).filter((x) => x.source === "proper_noun").map((x) => x.text);
+    expect(nouns("Find and open the Wikipedia article about Gödel’s incompleteness theorems.")).toEqual(["Wikipedia", "Gödel’s"]);
+    expect(nouns("Send a message to Zoë Ångström about the Café Noir launch")).toEqual(["Zoë Ångström", "Café Noir"]);
     expect(s.some((x) => x.source === "clause")).toBe(true);
     expect(s[s.length - 1]?.source).toBe("whole_task");
+  });
+  it("a topic after \"about\": a later value or name takes the span; \"About\" in capitals and \"about 10 minutes\" are no topic", () => {
+    const one = (task: string, text: string) => extractSpans(task).find((x) => x.text === text);
+    expect(one("Search for articles about Rust, then type Rust in the Tag field", "Rust")).toMatchObject({ source: "after_verb", verb: "type" });
+    // A name that is the whole topic stays a proper noun with the topic mark, and it is not a cut of itself.
+    expect(one("Create a GitHub issue about Login Timeout", "Login Timeout")).toMatchObject({ source: "proper_noun", topic: true });
+    expect(one("Create a GitHub issue about Login Timeout", "Login Timeout")?.verb).toBeUndefined();
+    expect(one("Create a GitHub issue about Login Timeout", "Login Timeout")?.parent).toBeUndefined();
+    expect(one("Search for articles about Rust, then type Rust in the Tag field", "Rust")?.topic).toBeUndefined();
+    expect(one("write a note about the launch and save it", "the launch")).toMatchObject({ source: "after_verb", verb: "about" });
+    const texts = (task: string) => extractSpans(task).map((x) => x.text);
+    expect(texts("Click About and copy the phone number")).not.toContain("and copy the phone number");
+    expect(texts("Open the About page and read the mission")).not.toContain("page and read the mission");
+    expect(texts("Find a hotel in Lisbon about 10 minutes from Alfama")).not.toContain("10 minutes from Alfama");
   });
   it("dedupes case-insensitively and caps at 40", () => {
     const long = Array.from({ length: 60 }, (_, i) => `"item ${i}"`).join(" and ");

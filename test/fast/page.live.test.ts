@@ -176,11 +176,15 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome)", () =
     expect(await page.url()).toBe(after.url);
   });
 
-  it("goes back to the form", async () => {
+  it("goes back to the form; from the form, the only earlier entry is about:blank, so a back does nothing", async () => {
+    expect(await page.canGoBack?.()).toBe(true);
     await page.back(NAV_MS);
     const obs = await observeUntil(page, (o) => o.url.endsWith("form.html"));
     expect(obs.url.endsWith("form.html")).toBe(true);
     expect(obs.title).toBe("Form fixture");
+    expect(await page.canGoBack?.()).toBe(false);
+    await page.back(NAV_MS);
+    expect(await page.url()).toBe(obs.url);
   });
 
   it("fills Search and presses Enter to submit", async () => {
@@ -446,6 +450,92 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     expect(ms).toBeLessThan(LIMITS.causalCapMs);
   });
 
+  it("early decisions: a decision on the old rows of a debounced search is dropped; the run acts only on the settled rows", async () => {
+    const url = `${base}/search-debounce.html`;
+    const target = (q: Questions, head: string, label: string): string => {
+      const hit = Object.entries((q[head] as ChoiceQuestion | undefined)?.criteria ?? {}).find(([, v]) => String((v as { element?: string }).element ?? "").includes(label));
+      if (!hit) throw new Error(`no ${head} option for ${label}`);
+      return hit[0];
+    };
+    const oracle = fakeOracle((name, state, q) => {
+      if (name !== "step") return {};
+      const s = state as { page: { text: string }; elements: { label: string; value?: string }[] };
+      if (!s.elements.find((e) => e.label === "Search workflows")?.value) {
+        return { page_kind: "task_page", operation: "TYPE_TEXT", type_text_target: { choice: target(q, "type_text_target", "Search workflows"), confidence: 0.9 }, type_text_value: { choice: "v_q", confidence: 0.95 } };
+      }
+      // On the old rows a decision would open a row that the search removes. It must never run.
+      if (s.page.text.includes("Open Weekly metrics digest")) return { page_kind: "task_page", operation: "CLICK", click_target: { choice: target(q, "click_target", "Open Weekly metrics digest"), confidence: 0.9 } };
+      return { page_kind: "task_page", operation: { choice: "DONE", confidence: 0.9, probabilities: { DONE: 0.9, WAIT: 0.1 } } };
+    });
+    const cfg: RunConfig = {
+      task: "search the workflows for the value q", url, headed: false, maxSteps: 4, stepTimeoutMs: 5000, runTimeoutMs: 60_000, pauseTimeoutMs: 1000, confirm: "auto", dryRun: false,
+      session: "jev-live", model: "m", logLevel: "info", logJson: false, keepOpen: true, agentBrowserBin: "ab", vars: { q: "roadmap" }, profile: "none", goal: "act", engine: "cdp", refreshProfile: false,
+    };
+    const runLog = fakeLogger();
+    const runner = new FastRunner({ cfg, profiles: [], chrome: async () => chrome, page, openPage: async () => page, oracle, human: fakeHuman({ interactive: false }), log: runLog, earlyDecisions: true });
+    const r = await runner.run();
+    expect(r.outcome, runLog.lines.join("\n")).toBe("done");
+    expect(r.steps.map((x) => `${x.action}:${x.result}`)).toEqual(["fill:ok", "none:done"]);
+    expect(runLog.lines.some((l) => /step 2 the page changed after the early observation; the request on it is dropped/.test(l))).toBe(true);
+    expect((await page.observe()).text).toContain("Open Q3 roadmap review");
+  });
+
+  it("a combobox whose click moves focus to its popover input: the fill types there; a plain field that moves focus refuses", async () => {
+    await page.navigate(`${base}/popover.html`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Where from?"), before, "Zur");
+    const after = await page.observe();
+    expect(find(after, "fill", "Where else?").value).toBe("Zur");
+    expect(after.text).toContain("Zurich");
+    expect(after.text).not.toContain("Zagreb");
+    expect(log.lines.some((l) => /moved focus to input#else "Where else\?"/.test(l))).toBe(true);
+    await expect(page.act(find(after, "fill", "Grab"), after, "x")).rejects.toThrow(/focus is on input#note/);
+    expect(find(await page.observe(), "fill", "Note").value ?? "").toBe("");
+  });
+
+  it("a plain field whose click moves focus to a combobox in a dialog is no popover opener: the fill refuses", async () => {
+    await page.navigate(`${base}/popover.html`, NAV_MS);
+    const before = await page.observe();
+    await expect(page.act(find(before, "fill", "Plain"), before, "Zur")).rejects.toThrow(/focus is on input#else2/);
+    const after = await page.observe();
+    expect(find(after, "fill", "Pick a city").value ?? "").toBe("");
+    expect(find(after, "fill", "Plain").value ?? "").toBe("");
+  });
+
+  it("a key press after an early observe ends the rest of the fill's settle first: Enter sees the new rows", async () => {
+    await page.navigate(`${base}/search-debounce.html?enter=1`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Search workflows"), before, "roadmap");
+    const early = await page.observe({ early: true });
+    expect(page.pending?.()).toBe(true);
+    expect(early.text).toContain("Open Sales call notes");
+    await page.press("Enter", early);
+    const after = await page.observe();
+    expect(after.text).toContain("enter saw 1 rows");
+  });
+
+  it("an early observe after a combobox fill waits for its options (at most 200 ms)", async () => {
+    await page.navigate(`${base}/combobox.html?slow=120`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "City"), before, "Be");
+    const early = await page.observe({ early: true });
+    expect(early.text).toContain("Berlin");
+    await page.observe();
+  });
+
+  it("a launched headless Chrome sends its user agent without HeadlessChrome, with its client hints", async () => {
+    await page.navigate(`${base}/combobox.html`, NAV_MS);
+    expect(String(await evaluate("navigator.userAgent"))).not.toContain("HeadlessChrome");
+    expect(String(await evaluate("navigator.userAgent"))).toContain("Chrome/");
+    expect(Number(await evaluate("navigator.userAgentData?.brands?.length ?? 0"))).toBeGreaterThan(0);
+    expect(String(await evaluate("navigator.userAgentData?.platform ?? ''"))).not.toBe("");
+    // The high-entropy hints are Chrome's own: the OS version and the form factor.
+    const high = await chrome.client.send("Runtime.evaluate", { expression: "navigator.userAgentData.getHighEntropyValues(['platformVersion', 'formFactors'])", returnByValue: true, awaitPromise: true }, page.sessionId);
+    const he = ((high["result"] as { value?: unknown })?.value ?? {}) as { platformVersion?: string; formFactors?: string[] };
+    if (process.platform === "darwin" || process.platform === "linux") expect(he.platformVersion ?? "").toMatch(/^\d+\.\d+\.\d+$/);
+    expect(he.formFactors).toEqual(["Desktop"]);
+  });
+
   it("a slow search (debounce 500 ms, request 800 ms) shows its rows before the cap", async () => {
     const { after, ms } = await fillAndObserve("search-debounce.html?deb=500&lat=800", "Search workflows", "roadmap");
     expect(after.text).toContain("Open Q3 roadmap review");
@@ -457,6 +547,9 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     ["lodash", "a debounce that waits again for its rest", 650],
     ["interval", "an RxJS-like interval debounce", 550],
     ["direct", "a request that starts in the input event (counted over CDP only)", 600],
+    ["bound", "a bound callback that schedules a bound debounce: native code, never a copy of itself", 550],
+    ["bound-same", "two bound callbacks with the same delay: only the native-code rule tells them apart", 550],
+    ["wrapper", "a shared delay helper with another delay: not a copy of the callback that armed it", 550],
   ])("mode %s (%s) shows the new rows", async (mode, _what, min) => {
     const { after } = await fillAndObserve(`search-debounce.html?mode=${mode}&lat=${mode === "direct" ? 600 : 250}`, "Search workflows", "notes");
     expect(after.text).toContain("Open Release notes writer");
@@ -493,6 +586,14 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     const { after, ms } = await fillAndObserve(`search-debounce.html?chain=${chain}`, "Note", "hello");
     expect(after.text).toMatch(/tick \d/);
     expect(ms).toBeLessThan(2000);
+  });
+
+  it("a callback that arms a new closure of its own code with the same delay is a poll: the settle ends after the first run", async () => {
+    const { after, ms } = await fillAndObserve("search-debounce.html?chain=copy", "Note", "hello");
+    expect(after.text).toContain("idle 1");
+    expect(after.text).not.toContain("idle 2");
+    expect(ms).toBeGreaterThanOrEqual(480);
+    expect(ms).toBeLessThan(900);
   });
 
   it("an Enter that navigates does not hang, and the observation shows the new page", async () => {
@@ -724,7 +825,8 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): chip 
         session: "jev-live", model: "m", logLevel: "info", logJson: false, keepOpen: true, agentBrowserBin: "ab", vars, profile: "none", goal: "act", engine: "cdp", refreshProfile: false,
       };
       const runLog = fakeLogger();
-      const runner = new FastRunner({ cfg, profiles: [], chrome: async () => chrome, page, openPage: async () => page, oracle, human: fakeHuman({ interactive: false }), log: runLog });
+      // The script answers by request number: a step request that an early decision drops would take the next answer.
+      const runner = new FastRunner({ cfg, profiles: [], chrome: async () => chrome, page, openPage: async () => page, oracle, human: fakeHuman({ interactive: false }), log: runLog, earlyDecisions: false });
       return { result: await runner.run(), log: runLog };
     }
 

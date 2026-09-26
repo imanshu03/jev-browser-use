@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { main, parseArgs, USAGE, UsageError } from "../src/cli.js";
+import { main, parseArgs, textModelDeps, USAGE, UsageError } from "../src/cli.js";
+import { fakeLogger } from "./fakes.js";
 import { emptyResult } from "../src/io.js";
 import type { RunResult } from "../src/types.js";
 
@@ -98,5 +99,15 @@ describe("main", () => {
     const help = io();
     expect(await main(["--help"], help.io)).toBe(0);
     expect(help.stderr).toContain("jev-browser");
+  });
+});
+
+describe("textModelDeps", () => {
+  it("gives the CLI and chat the text model when JEV_TEXT_MODEL and JEV_TEXT_API_KEY are set, with one log line; else nothing", () => {
+    const log = fakeLogger();
+    expect(textModelDeps({}, log)).toEqual({});
+    const d = textModelDeps({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_BASE_URL: "http://127.0.0.1:8790/v1" }, log);
+    expect(typeof d.text?.write).toBe("function");
+    expect(log.lines).toEqual(["INFO text model m at 127.0.0.1:8790 writes new field text"]);
   });
 });

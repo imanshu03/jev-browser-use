@@ -93,7 +93,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
    * The requests of the causal settle. The Network domain is on only from the arm to the end of the settle, and only
    * the requests that start in that time count. `ended`: a counted request ended since the last check.
    */
-  const net = { on: false, armed: false, requests: new Set<string>(), ended: false };
+  const net = { on: false, armed: false, requests: new Set<string>(), ended: false, urls: new Map<string, string>(), done: [] as { url: string; at: number }[], armedAt: 0 };
   let closed = false;
   /** Identity of a document that stayed below readyState "complete" until the cap. The next observe on it does not wait again. */
   let acceptedDoc: { id: unknown } | null = null;
@@ -112,10 +112,18 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   const offRequest = client.on("Network.requestWillBeSent", (params, sid) => {
     if (sid !== sessionId || !net.armed) return;
     const type = String(params["type"] ?? "");
-    if (COUNTED_REQUESTS.has(type) || (type === "Document" && params["frameId"] === targetId)) net.requests.add(String(params["requestId"]));
+    if (COUNTED_REQUESTS.has(type) || (type === "Document" && params["frameId"] === targetId)) {
+      const id = String(params["requestId"]);
+      net.requests.add(id);
+      const request = params["request"] as { url?: unknown } | undefined;
+      net.urls.set(id, String(request?.url ?? "").slice(0, 160));
+    }
   });
   const ended = (params: Record<string, unknown>, sid?: string): void => {
-    if (sid === sessionId && net.requests.delete(String(params["requestId"]))) net.ended = true;
+    const id = String(params["requestId"]);
+    if (sid !== sessionId || !net.requests.delete(id)) return;
+    net.ended = true;
+    net.done.push({ url: net.urls.get(id) ?? "", at: Date.now() - net.armedAt });
   };
   const offFinished = client.on("Network.loadingFinished", ended);
   const offFailed = client.on("Network.loadingFailed", ended);
@@ -182,6 +190,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
    * the field of a fill. When the page does not arm (a document that is going away), the frame settle runs instead.
    */
   async function arm(node: number | null): Promise<void> {
+    // The rest of an early settle ends before a new input: its work belongs to the input before.
+    if (early !== null) await causalSettle();
     if (!net.on) {
       try {
         // The settle reads request events only. Chrome keeps no bodies for them.
@@ -193,12 +203,22 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
     }
     net.requests.clear();
+    net.urls.clear();
+    net.done = [];
     net.ended = false;
     net.armed = true;
+    net.armedAt = Date.now();
     const r = await evaluate(causalArmScript(node));
     causalPending = !r.exception && r.value === true;
     if (!causalPending) net.armed = false;
   }
+
+  /**
+   * A causal settle that an early observe began and did not finish: its start, the busy clock, and the counts for the
+   * debug line. The next observe goes on with it (`causalSettle`).
+   */
+  type SettleRun = { start: number; busySince: number | null; first: boolean; seen: { polls: number; timers: number; timersUntil: number; busy: boolean; end: string } };
+  let early: SettleRun | null = null;
 
   /**
    * The causal settle: two frames, then a check every `causalPollMs` until the timers that the input started ran, the
@@ -206,39 +226,60 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
    * alone holds the settle for at most `causalBusyMs`: a long job (a draft, a streamed reply) keeps its marker. Then two
    * frames for the last render. At most `causalCapMs`. A document without the armed tracker (a navigation) ends the
    * wait: the readiness poll of `observe` takes over.
+   * `stop`: an early observe. The first frames wait for the options of an editable combobox too (`settleScript(action)`),
+   * and after the first check the settle stops with the work still open: it returns "pending", and the next call goes
+   * on from there. A settle that ends at the first check returns "done", as always.
    */
-  async function causalSettle(): Promise<void> {
-    const start = Date.now();
-    let busySince: number | null = null;
+  async function causalSettle(action: Action | null = null, stop = false): Promise<"done" | "pending"> {
+    const run: SettleRun = early ?? { start: Date.now(), busySince: null, first: true, seen: { polls: 0, timers: 0, timersUntil: 0, busy: false, end: "quiet" } };
+    early = null;
+    const { start, seen } = run;
+    let paused = false;
     try {
-      await evaluate(settleScript(null), true);
-      for (let close = true; ; close = false) {
+      if (run.first) await evaluate(settleScript(stop ? action : null), true);
+      for (;;) {
+        const close = run.first;
+        run.first = false;
         const extend = net.ended;
         net.ended = false;
         const r = await evaluate(causalStateScript(close, extend));
         const s = r.value as { pending: number; follow: number; busy: boolean } | null;
-        if (r.exception || s === null || typeof s !== "object") break;
+        seen.polls += 1;
+        if (r.exception || s === null || typeof s !== "object") { seen.end = "document gone"; break; }
+        if (s.pending > 0) { seen.timers = Math.max(seen.timers, s.pending); seen.timersUntil = Date.now() - start; }
+        seen.busy ||= s.busy;
         const working = s.pending > 0 || s.follow > 0 || net.requests.size > 0 || net.ended;
         if (!working && !s.busy) break;
-        busySince = working ? null : busySince ?? Date.now();
-        if (busySince !== null && Date.now() - busySince >= LIMITS.causalBusyMs) break;
+        run.busySince = working ? null : run.busySince ?? Date.now();
+        if (run.busySince !== null && Date.now() - run.busySince >= LIMITS.causalBusyMs) { seen.end = "busy marker cap"; break; }
         if (Date.now() - start >= LIMITS.causalCapMs) {
-          opts.log.debug(`settle stopped at the ${LIMITS.causalCapMs} ms cap: ${s.pending} timers, ${net.requests.size} requests${s.busy ? ", busy" : ""}`);
+          seen.end = `the ${LIMITS.causalCapMs} ms cap with ${s.pending} timers and ${net.requests.size} requests open`;
           break;
+        }
+        if (stop) {
+          paused = true;
+          early = run;
+          return "pending";
         }
         await settleSleep(LIMITS.causalPollMs);
       }
     } finally {
-      net.armed = false;
-      net.requests.clear();
-      net.ended = false;
-      if (net.on) {
-        net.on = false;
-        await call("Network.disable").catch((e: Error) => { if (client.closed) throw e; });
+      if (!paused) {
+        const last = net.done.at(-1);
+        const open = [...net.requests].map((id) => net.urls.get(id) ?? "").slice(0, 3);
+        opts.log.debug(`settle ${Date.now() - start} ms, ${seen.polls} checks, end: ${seen.end}; timers: up to ${seen.timers}, until ${seen.timersUntil} ms; requests: ${net.done.length} ended${last ? `, last at ${last.at} ms (${last.url})` : ""}${open.length > 0 ? `, open: ${open.join(" ")}` : ""}${seen.busy ? "; busy marker" : ""}`);
+        net.armed = false;
+        net.requests.clear();
+        net.ended = false;
+        if (net.on) {
+          net.on = false;
+          await call("Network.disable").catch((e: Error) => { if (client.closed) throw e; });
+        }
+        await evaluate(CAUSAL_END_SCRIPT);
       }
-      await evaluate(CAUSAL_END_SCRIPT);
     }
     await evaluate(settleScript(null), true);
+    return "done";
   }
 
   /** The settle of an input now, not at the next observe: the causal settle when the arm held, else the frame settle. */
@@ -247,6 +288,18 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       causalPending = false;
       await causalSettle();
     } else await evaluate(settleScript(null), true);
+  }
+
+  /**
+   * The history entry before the current one, when it is a web page (http, https, or file). The tab opened on
+   * about:blank, so a back from the start page would leave the site for a blank page.
+   */
+  async function previousEntry(): Promise<{ id: number } | null> {
+    const history = await call("Page.getNavigationHistory");
+    const index = typeof history["currentIndex"] === "number" ? history["currentIndex"] : 0;
+    const entries = Array.isArray(history["entries"]) ? (history["entries"] as { id: number; url?: string }[]) : [];
+    const previous = index > 0 ? entries[index - 1] : undefined;
+    return previous && /^(?:https?|file):/i.test(previous.url ?? "") ? previous : null;
   }
 
   /** Wait for the editor between two steps of a fill (EDIT_SETTLE_SCRIPT). */
@@ -286,6 +339,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await settleEdit();
     const read = await editStep(node, "read", plan.mode, [], false);
     if (!read.ok) throw new EditRefused(`the fill did not start: ${read.why}`);
+    if (read.moved) opts.log.info(`fill: the click moved focus to ${read.moved}, the text input of the popover that the field opened; the text goes there`);
     const shape = read.shape ?? (read.kind === "editable" ? "composer" : read.kind);
     // A field whose mention chips must stay is never replaced: a chip with no text reads as blank.
     const mode: EditMode = read.blank && plan.keepChips !== true ? "replace" : plan.mode;
@@ -336,14 +390,15 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       await waitReady(timeoutMs);
     },
 
-    async observe() {
+    async observe(o) {
       const start = Date.now();
+      if (early !== null) await causalSettle();
       if (pendingSettle !== undefined) {
         const action = pendingSettle;
         const causal = causalPending;
         pendingSettle = undefined;
         causalPending = false;
-        if (causal) await causalSettle();
+        if (causal) await causalSettle(action, o?.early === true);
         else await evaluate(settleScript(action), true);
       }
       const deadline = start + opts.settleTimeoutMs;
@@ -372,6 +427,10 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
     },
 
+    pending() {
+      return early !== null;
+    },
+
     async fresh(obs, action) {
       // A click, fill, or select compares the page key and the target's guard. The guard carries the
       // node's value, state, and the text of its form, dialog, or row. Live text elsewhere (a clock,
@@ -390,6 +449,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     },
 
     async act(action, obs, text, edit) {
+      // The rest of an early settle ends before a new input: its work belongs to the input before.
+      if (early !== null) await causalSettle();
       // A wait has no target and changes nothing. A page that keeps updating must not turn it into stale retries.
       if (action.kind === "wait") {
         await settleSleep(100);
@@ -526,14 +587,14 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     },
 
     async back(timeoutMs) {
-      const history = await call("Page.getNavigationHistory");
-      const index = typeof history["currentIndex"] === "number" ? history["currentIndex"] : 0;
-      const entries = Array.isArray(history["entries"]) ? (history["entries"] as { id: number }[]) : [];
-      if (index <= 0) return;
-      const previous = entries[index - 1];
+      const previous = await previousEntry();
       if (!previous) return;
       await call("Page.navigateToHistoryEntry", { entryId: previous.id });
       await waitReady(timeoutMs);
+    },
+
+    async canGoBack() {
+      return (await previousEntry()) !== null;
     },
 
     async url() {

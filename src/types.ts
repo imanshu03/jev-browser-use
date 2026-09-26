@@ -92,6 +92,11 @@ export interface Span {
   pair?: string;
   /** A cut of an after_verb value of more than 10 words, which is not a span. A field that can take new text leaves it out. */
   longCut?: true;
+  /**
+   * A name that is the whole topic after "about" ("an issue about Login Timeout"). It stays a proper noun, so a title or
+   * a subject field offers it, but a multiline field (a message, a note, a body) does not: the topic is not the text.
+   */
+  topic?: true;
   secret: boolean;                // always false for "generated"
   field?: SpanField;              // only for "generated"
   /** The date that the whole text names. Only a date field takes a span with a date. */
@@ -246,6 +251,7 @@ export const GATES = {
   valueFromPage: 0.60, fillsCredential: 0.50,
   dismissTarget: 0.60, isDismissible: 0.50,
   key: 0.60, openUrl: 0.70, wall: 0.50,
+  goBack: 0.50,                       // fast engine: GO_BACK leaves the page, and its text; every GO_BACK seen below it was wrong (0.16-0.44)
   profileJev: 0.80, profileHuman: 0.50, profileMentioned: 0.50,
   site: 0.70, wantsSearch: 0.60, searchQuery: 0.50, goal: 0.50,
   extractWinner: 0.20, extractFinal: 0.60, pageSpanCapture: 0.70, evidenceLine: 0.30,

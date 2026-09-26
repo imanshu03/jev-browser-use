@@ -9,6 +9,7 @@ import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "
 import { FastRunner } from "./fast/loop.js";
 import type { Chrome } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
+import type { Logger, TextSource } from "./io.js";
 import { createHuman, createLogger, exitCode, emptyResult } from "./io.js";
 import { createOracle } from "./jev.js";
 import { Runner } from "./loop.js";
@@ -17,6 +18,7 @@ import { createTransport } from "./transport.js";
 import type { Goal, RunConfig, RunResult } from "./types.js";
 import { redactData } from "./task.js";
 import { LIMITS } from "./types.js";
+import { createTextModel, textModelFromEnv } from "./writer.js";
 
 export { UsageError };
 
@@ -193,7 +195,7 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
     if (chrome) await chrome.close();
   };
   const runner = fast
-    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, cfg.engine === "chromium" ? "chromium" : "chrome")), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL) })
+    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, cfg.engine === "chromium" ? "chromium" : "chrome")), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL), ...textModelDeps(io.env, log) })
     : new Runner({ cfg, browserFor, oracle, human, log });
   let interrupted = false;
   const onSigint = () => {
@@ -235,4 +237,16 @@ if (isMain) {
     process.stderr.write(`fatal: ${(e as Error)?.stack ?? String(e)}\n`);
     process.exitCode = 3;
   });
+}
+
+/**
+ * The text model of the environment (JEV_TEXT_MODEL, JEV_TEXT_API_KEY; src/writer.ts) as the text source of a fast run:
+ * it writes new text for fields that can take it, as the text helper of browser-use/jev-ultrafast does. Off: no text
+ * source, and a field without a value in the task blocks with the hint to pass --var.
+ */
+export function textModelDeps(env: NodeJS.ProcessEnv, log: Logger): { text?: TextSource } {
+  const cfg = textModelFromEnv(env);
+  if (!cfg) return {};
+  log.info(`text model ${cfg.model} at ${new URL(cfg.baseUrl).host} writes new field text`);
+  return { text: createTextModel(cfg, log) };
 }
