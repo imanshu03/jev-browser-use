@@ -9,7 +9,7 @@ import { redactData } from "../task.js";
 import { TypeSafeError, choice } from "@typesafe-ai/sdk";
 import path from "node:path";
 import type { ProfileEntry } from "../browser.js";
-import type { Human, Logger, RunnerHints, TextSource } from "../io.js";
+import type { Human, Logger, RunnerHints, SentField, TextSource } from "../io.js";
 import { emptyResult } from "../io.js";
 import type { Oracle } from "../jev.js";
 import { BudgetError, choiceOf } from "../jev.js";
@@ -22,7 +22,7 @@ import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observatio
 import { EditRefused, StalePage } from "./model.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
 import type { Decision, StepInput, StepMeta, Target, TargetOp, ValueAsk, ValueHead } from "./policy.js";
-import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, fieldLines, readEdit, readStep, readValue, tokenEvidence, top3 } from "./policy.js";
+import { actionKey, buildStep, buildValueStep, canPressEnter, canWriteInto, cutLines, cutText, fieldLines, mentionIntent, mentionMatches, readEdit, readStep, readValue, tokenEvidence, top3 } from "./policy.js";
 
 export { actionKey };
 
@@ -234,6 +234,12 @@ const OPTION_ROLES: ReadonlySet<string> = new Set(["option", "menuitem", "menuit
  */
 interface OpenStep { doc: number | undefined; click: string; buttons: { node: number; label: string }[]; holds: number }
 
+/** The button of a picker that adds its checked items: "Done", "Done (2)", "Add", "Apply", "Insert", "Select", "OK", "Confirm". */
+const COMMIT_BUTTON = /^(?:done|add|apply|insert|select|ok|confirm)\b|\(\d+\)\s*$/i;
+
+/** An open picker with checked options that no field holds as mention chips yet. `popup` holds the options and `commit`. */
+interface StagedPicker { popup: number; names: string[]; commit: Action }
+
 const ACTION_OF: Record<string, ActionKind> = {
   CLICK: "click", TYPE_TEXT: "fill", SELECT: "select", SCROLL_DOWN: "scroll_down", SCROLL_UP: "scroll_up",
   WAIT: "wait", PRESS_ENTER: "press_key", GO_BACK: "go_back", DONE: "none", BLOCKED: "none",
@@ -393,6 +399,16 @@ export class FastRunner {
    * an entry, as it ends a `typedInto` entry: a draft that the page cleared on blur is lost, not added.
    */
   private readonly typedToken = new Map<string, TypedToken>();
+  /**
+   * `<doc>` -> names of the mention chips that this run added: a chip that a field shows right after an action and did
+   * not show before it, or a chip that the first observation of the document did not show (a chip that rendered late).
+   * Chips of a draft that was there before the run are not in it.
+   */
+  private readonly addedChips = new Map<string, Set<string>>();
+  /** `<doc>` -> names of the mention chips that the first observation of the document showed. */
+  private readonly chipBase = new Map<string, Set<string>>();
+  /** Staged pickers that got their one warning for a click that does not send. Keyed by document, popup, and names. */
+  private readonly stagedWarned = new Set<string>();
 
   constructor(deps: FastRunnerDeps) {
     this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => redact(s, this.spans)) };
@@ -569,6 +585,12 @@ export class FastRunner {
     }
     // A before pair holds only while every observation shows its control with the same value.
     this.unsent = this.unsent.map((u) => this.ageBefore(obs, u));
+    // The chips of the first observation of a document are its draft. A chip that shows later came from this run.
+    const doc0 = String(obs.doc);
+    const chips = obs.actions.flatMap((a) => (a.kind === "fill" ? (a.mentions ?? []).map((m) => [m, a.label] as const) : []));
+    const base = this.chipBase.get(doc0);
+    if (!base) this.chipBase.set(doc0, new Set(chips.map(([m]) => m)));
+    else for (const [m, label] of chips) if (!base.has(m)) this.addChip(doc0, m, label);
     this.checkSent(obs);
     return obs;
   }
@@ -666,15 +688,16 @@ export class FastRunner {
 
   /**
    * The multiline fields of `obs` that hold text that this run did not type. A field whose text is all this run's own (a
-   * text that a fill typed there, the record of a written text, or an unsent entry on it) is not one: a new text
-   * replaces it, as before, with no mode head.
+   * text that a fill typed there, the record of a written text, an unsent entry on it, or a mention chip that this run
+   * added) is not one: a new text replaces it, as before, with no mode head. `chipPlan` then keeps the chips.
    */
   private heldText(obs: Observation): Set<number> {
     const out = new Set<number>();
     for (const a of obs.actions) {
       if (a.kind !== "fill" || a.multiline !== true || a.node === null || loose(a.value ?? "") === "") continue;
       const key = `${obs.doc}|${a.node}`;
-      const own = [this.typedInto.get(key), this.typedText.get(key)?.text, ...this.unsent.filter((u) => u.doc === obs.doc && u.node === a.node).map((u) => u.text)]
+      const own = [this.typedInto.get(key), this.typedText.get(key)?.text, ...this.unsent.filter((u) => u.doc === obs.doc && u.node === a.node).map((u) => u.text),
+        ...(a.mentions ?? []).filter((m) => this.added(obs, m))]
         .map((t) => loose(t ?? "")).filter((t) => t !== "");
       const rest = own.reduce((v, t) => v.split(t).join(" "), loose(a.value ?? ""));
       if (ALNUM.test(rest)) out.add(a.node);
@@ -924,7 +947,7 @@ export class FastRunner {
     if (!button || button.kind !== "click" || button.role !== "button" || button.node === focus.node) return null;
     if (riskOf("CLICK", c.label) === "navigational") return null;
     // The snapshot gives the focus form. An older adapter gives none: then the form of the focused element's action.
-    const focusForm = focus.form !== undefined ? focus.form : obs.actions.find((a) => a.node === focus.node)?.form ?? null;
+    const focusForm = this.focusForm(obs);
     if (focusForm === null || (button.form ?? null) !== focusForm) return null;
     const submits = focus.submitLabel.split(" | ").map((n) => n.trim()).filter(Boolean);
     const multiline = focus.multiline ?? obs.actions.find((a) => a.kind === "fill" && a.node === focus.node)?.multiline === true;
@@ -1064,7 +1087,7 @@ export class FastRunner {
       }
       const focusNode = obs.focus?.node ?? null;
       const focused = focusNode === null ? undefined : obs.actions.find((a) => a.kind === "fill" && a.node === focusNode);
-      const focusForm = obs.focus?.form !== undefined ? obs.focus.form : obs.actions.find((a) => a.node === focusNode)?.form ?? null;
+      const focusForm = this.focusForm(obs);
       // Enter in a field with a highlighted option picks that option. The label, the risk, and the dialog name it.
       const pick = obs.focus?.enterOption;
       // Enter in a chip field with strong evidence: a script Enter first (enterToken). An Enter that picks an option
@@ -1072,6 +1095,19 @@ export class FastRunner {
       if (!pick && focused && tokenEvidence(focused) === "strong" && (focused.value ?? "").trim() !== "") {
         const added = await this.enterToken(d, focused, obs, ctx);
         if (added) return added;
+      }
+      // Enter outside a picker with checked items closes it, and the items are lost. Enter in the picker's own field adds
+      // them. The mention gates come before the chip gate: that gate can focus another field, and focus outside the
+      // picker closes it too.
+      const staged = this.stagedPicker(obs);
+      if (staged && !(obs.focus?.popup ?? []).includes(staged.popup)) {
+        ctx.gate = this.stagedGate(staged);
+        return { kind: "reask" };
+      }
+      const stray = this.strayChip(obs, focusForm, focusNode);
+      if (stray !== null) {
+        ctx.gate = stray;
+        return { kind: "reask" };
       }
       // Enter in another field can send the form: a value typed into a chip field of that form and not added yet asks first.
       const tokenGated = await this.tokenGate(true, this.pendingTokens(obs, focusForm, focusNode), obs, ctx, () => undefined);
@@ -1097,7 +1133,7 @@ export class FastRunner {
       ctx.gate = `ok ${d.operationConf.toFixed(2)} (${risk})`;
       const undo = this.unsentUndo();
       const gated = this.pruneUnsent(obs);
-      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, gated, { obs, form: focusForm });
+      const denied = await this.confirmAction(risk, `press Enter on "${label || "the focused element"}"`, ctx, opTop, obs.url, gated, { obs, form: focusForm }, this.sentFields(obs, focusForm, focusNode));
       if (denied) return rec(denied);
       const r = await this.execute("PRESS_ENTER", null, null, null, obs, ctx);
       if (r.kind === "stale") undo();
@@ -1193,6 +1229,28 @@ export class FastRunner {
       bans.add(key);
       return { kind: "reask" };
     }
+    const sends = op === "CLICK" && (risk === "submit" || risk === "destructive");
+    // An action outside a picker with checked items closes it, and the items are lost. A send re-asks each time; another
+    // action re-asks one time and then runs. The mention gates come before the chip gate: that gate can focus a field,
+    // and focus outside the picker closes it too.
+    const staged = this.stagedPicker(obs);
+    if (staged && !(action.popup ?? []).includes(staged.popup)) {
+      const warned = `${obs.doc}|${staged.popup}|${staged.names.join("|")}`;
+      if (sends || !this.stagedWarned.has(warned)) {
+        this.stagedWarned.add(warned);
+        ctx.gate = this.stagedGate(staged);
+        if (sends) this.stepBans.add(key);
+        return { kind: "reask" };
+      }
+    }
+    if (sends) {
+      const stray = this.strayChip(obs, action.form ?? null, null);
+      if (stray !== null) {
+        ctx.gate = stray;
+        this.stepBans.add(key);
+        return { kind: "reask" };
+      }
+    }
     // A value typed into a chip field that is not added yet: a fill of another field or a submit asks first (tokenGate).
     // A click that picks that value does not wait for it: an option or a control outside the form of the field whose
     // label holds the value ('Create "bug"', or the option that Enter picks). A control of that form still waits.
@@ -1225,7 +1283,15 @@ export class FastRunner {
         plan = { mode: e.mode };
         this.log.info(`step ${this.stepNo} edit ${name} for [${action.id}]`);
       }
-      this.editPlan = plan;
+      // A field with mention chips that this run added: the fill keeps them, or asks again before any text request.
+      const mode = plan;
+      const early = this.chipPlan(action, obs, mode);
+      if (early !== null && "gate" in early) {
+        ctx.gate = early.gate;
+        this.stepBans.add(key);
+        return { kind: "reask" };
+      }
+      this.editPlan = early ?? mode;
       let typed: Typed;
       try { typed = await this.typedValue(d, t, action, obs, ctx, risk); } finally { this.editPlan = undefined; }
       if (typed.kind === "applied") return typed.applied;
@@ -1236,6 +1302,17 @@ export class FastRunner {
       if (mine && !holdsText(used.text, mine.text)) {
         const gated = await this.tokenGate(false, this.pendingTokens(at, null).filter((p) => p.e === mine && p.state === "draft"), at, ctx, () => this.stepBans.add(key));
         if (gated) return gated;
+      }
+      // After a text request the field can be another node: the chips of the field that the text goes into decide.
+      const late = this.chipPlan(target, at, mode);
+      if (late !== null && "gate" in late) {
+        ctx.gate = late.gate;
+        this.stepBans.add(key);
+        return { kind: "reask" };
+      }
+      if (late !== null) {
+        plan = late;
+        gate += " append (keeps the mentions)";
       }
       // An assistant wrote the task and the vars of an MCP run. Its text loses hidden characters, as generated text
       // does, so the page gets the text that the dialog shows. A secret value is typed exactly.
@@ -1263,7 +1340,7 @@ export class FastRunner {
     // While a field holds unsent assistant text, every click needs a dialog: icon buttons and "Comment" are not risk words.
     const undo = this.unsentUndo();
     const gated = op === "CLICK" ? this.pruneUnsent(obs) : [];
-    const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated, { obs: at, form: action.form });
+    const denied = await this.confirmAction(risk, desc, ctx, top3(t.probs), at.url, gated, { obs: at, form: action.form }, sends ? this.sentFields(at, action.form ?? null, null) : []);
     if (denied) return { kind: "record", rec: denied };
     // An autonomous fill that replaces text that the run did not type is in the audit: nobody saw the old text go.
     if (op === "TYPE_TEXT" && text !== null && this.cfg.confirm === "autonomous" && !this.cfg.dryRun) {
@@ -1962,9 +2039,11 @@ export class FastRunner {
 
   /**
    * `gated`: the unsent entries that hold text now. A non-empty list makes the action need a dialog, and the dialog shows
-   * them. `at`: the observation of the action and the form of its target, for the fields of an audit entry.
+   * them. `at`: the observation of the action and the form of its target, for the fields of an audit entry. `sends`: the
+   * message fields that a send, a submit, or Enter sends. The dialog shows each one that holds mention chips or a text
+   * that `gated` does not show, so the user sees what goes out also when no assistant wrote it.
    */
-  private async confirmAction(risk: RiskClass, desc: string, ctx: StepCtx, top: Top, url: string, gated: Unsent[] = [], at?: { obs: Observation; form: number | null | undefined }): Promise<StepRecord | null> {
+  private async confirmAction(risk: RiskClass, desc: string, ctx: StepCtx, top: Top, url: string, gated: Unsent[] = [], at?: { obs: Observation; form: number | null | undefined }, sends: SentField[] = []): Promise<StepRecord | null> {
     const autonomous = this.cfg.confirm === "autonomous";
     // An autonomous run audits every submit too: nobody saw it go.
     const needsConfirm = risk === "destructive" || (risk === "submit" && (this.cfg.confirm === "always" || autonomous)) || gated.length > 0;
@@ -1993,7 +2072,9 @@ export class FastRunner {
     const chars = gated.reduce((n, u) => n + u.text.length, 0);
     if (chars > LIMITS.confirmTextChars) return this.blocked(ctx, "needs_confirmation", `the unsent text is too long to show in one dialog (${chars} characters)`, top, url);
     // The dialog shows every unsent text in full. The CLI and chat have no unsent text, so `typed` is empty there.
-    const detail = redactData({ kind: "action" as const, action: desc, host: hostOf(url), typed: gated.map((u) => ({ label: u.label, text: u.text })) }, this.log.redactor);
+    const shown = new Set(gated.map((u) => squash(u.text)));
+    const extra = sends.filter((s) => s.mentions.length > 0 || !shown.has(squash(s.text))).map((s) => ({ ...s, text: s.text.slice(0, LIMITS.confirmTextChars) }));
+    const detail = redactData({ kind: "action" as const, action: desc, host: hostOf(url), typed: gated.map((u) => ({ label: u.label, text: u.text })), ...(extra.length > 0 ? { sends: extra } : {}) }, this.log.redactor);
     const ok = await this.deps.human.confirm(this.log.redactor(`About to ${desc} on ${url}. Type y to allow: `), LIMITS.confirmPromptMs, detail);
     if (this.cancelled) return this.cancel(ctx, url);
     if (!ok) return this.blocked(ctx, "needs_confirmation", `the user did not allow ${desc}`, top, url);
@@ -2138,6 +2219,7 @@ export class FastRunner {
     }
     entry.page_changed = next.fingerprint !== obs.fingerprint;
     entry.url = next.url;
+    this.noteChips(obs, next);
     this.held = next;
     // An append that lost text of the field, or whose text the field does not show, must not be saved or sent.
     const lost = appended && edited ? appendLost(text as string, edited) : null;
@@ -2146,6 +2228,118 @@ export class FastRunner {
       return { kind: "record", rec: this.blocked(ctx, "ambiguous", `the fill of "${cutText(control?.label ?? "", 60)}" did not go as planned: ${lost}. Check the field before any save or send`, [], next.url), ran: true, appended: true };
     }
     return { kind: "record", rec: this.record(ctx, "ok", null), ...(appended ? { appended: true as const } : {}) };
+  }
+
+  /**
+   * Record the mention chips that an action added: the chips of a field in `after` that the same field did not have in
+   * `before`. All chips of a field that `before` does not show count (a composer that the page replaced). A new document
+   * adds nothing: its chips come from a draft. This also finds a chip of the draft that the run removed and added again.
+   */
+  private noteChips(before: Observation, after: Observation): void {
+    if (after.doc !== before.doc) return;
+    for (const a of after.actions) {
+      if (a.kind !== "fill" || !a.mentions || a.mentions.length === 0) continue;
+      const left = [...(before.actions.find((b) => b.kind === "fill" && b.node === a.node)?.mentions ?? [])];
+      for (const m of a.mentions) {
+        const i = left.indexOf(m);
+        if (i >= 0) left.splice(i, 1);
+        else this.addChip(String(after.doc), m, a.label);
+      }
+    }
+  }
+
+  private addChip(doc: string, name: string, field: string): void {
+    const set = this.addedChips.get(doc) ?? new Set<string>();
+    if (set.has(name)) return;
+    set.add(name);
+    this.addedChips.set(doc, set);
+    this.log.info(`step ${this.stepNo} mention @${cutText(name, LIMITS.nameChars)} added to "${cutText(field, LIMITS.nameChars)}"`);
+  }
+
+  /** A task name asks for this chip. */
+  private asked(chip: string): boolean {
+    return this.spans.some((s) => s.source === "mention" && mentionMatches(chip, s.text));
+  }
+
+  /** An action of this run added a chip with this name in the document of `obs`. */
+  private added(obs: Observation, chip: string): boolean {
+    return this.addedChips.get(String(obs.doc))?.has(chip) ?? false;
+  }
+
+  /**
+   * An open picker with checked options that no field holds as mention chips yet, and its commit button ("Done (1)").
+   * Only in a task that asks to mention someone: a click outside a multi-select picker closes it and drops the checked
+   * items, so Jev sent the message with no chip at 0.73-0.87. `popup` is the innermost popup that holds every checked
+   * option and the button. Null when there is none, or when the picker has no commit button.
+   */
+  private stagedPicker(obs: Observation): StagedPicker | null {
+    if (!mentionIntent(this.spans)) return null;
+    const chips = obs.actions.flatMap((a) => (a.kind === "fill" ? a.mentions ?? [] : []));
+    const checked = obs.actions.filter((a) => a.role === "option" && a.checked === "true" && (a.popup ?? []).length > 0 && !chips.some((c) => mentionMatches(a.label, c)));
+    if (checked.length === 0) return null;
+    for (const commit of obs.actions) {
+      if (commit.kind !== "click" || commit.role !== "button" || !COMMIT_BUTTON.test(commit.label.trim()) || hit(commit.label, DESTRUCTIVE_WORDS)) continue;
+      const popup = (commit.popup ?? []).find((p) => checked.every((o) => (o.popup ?? []).includes(p)));
+      if (popup !== undefined) return { popup, names: checked.map((o) => cutText(o.label, LIMITS.nameChars)), commit };
+    }
+    return null;
+  }
+
+  private stagedGate(s: StagedPicker): string {
+    const n = s.names.length;
+    return `the open picker holds ${n} checked item${n === 1 ? "" : "s"} that ${n === 1 ? "is" : "are"} not added yet (${s.names.join(", ")}); click "${cutText(s.commit.label, LIMITS.nameChars)}" first`;
+  }
+
+  /** The form of the focused element: the focus `form`, or the form of the focused element's action from an older adapter. */
+  private focusForm(obs: Observation): number | null {
+    const focus = obs.focus;
+    if (!focus) return null;
+    return focus.form !== undefined ? focus.form : obs.actions.find((a) => a.node === focus.node)?.form ?? null;
+  }
+
+  /**
+   * The gate text when a field that a send, a submit, or Enter sends holds a mention chip that this run added and that no
+   * task name asks for: that chip notifies a person that the user did not name. The fields are the focused field and the
+   * fields of `form`. Null when there is none.
+   */
+  private strayChip(obs: Observation, form: number | null, focus: number | null): string | null {
+    for (const a of obs.actions) {
+      if (a.kind !== "fill" || !a.mentions || (a.node !== focus && (a.form ?? null) !== form)) continue;
+      const chip = a.mentions.find((m) => this.added(obs, m) && !this.asked(m));
+      if (chip !== undefined) return `"${cutText(a.label, LIMITS.nameChars)}" holds the mention @${cutText(chip, LIMITS.nameChars)}, which the task does not ask for; this run added it, and it notifies that person. Do not send it; type the message again to replace it`;
+    }
+    return null;
+  }
+
+  /**
+   * The edit plan of a fill into field `a` whose chips are all mentions that this run added and that the task asks for.
+   * `plan` is the plan of the step (the mode head of a field with text that this run did not type).
+   * - With no other text in the field, the fill adds its text at the end with no select-all (append, keepChips), so the
+   *   chips stay. No mode head asks: `heldText` does not count the chips.
+   * - With other text, an append keeps the chips too. A replace would remove them: a gate text, and the loop asks again.
+   * Null for any other field: a field without chips, with other atoms, or with a chip that this run did not add or the
+   * task does not ask for. The plan of the step then stands, and a replace removes the chips, as before.
+   */
+  private chipPlan(a: Action, obs: Observation, plan: EditPlan | undefined): EditPlan | { gate: string } | null {
+    const chips = a.mentions ?? [];
+    if (chips.length === 0 || (a.otherAtoms ?? 0) > 0 || !chips.every((m) => this.added(obs, m) && this.asked(m))) return null;
+    if ((a.bareText ?? "").trim() === "" || plan?.mode === "append") return { mode: "append", keepChips: true };
+    return { gate: `a fill would remove the mention ${chips.map((m) => `@${cutText(m, LIMITS.nameChars)}`).join(", ")} from "${cutText(a.label, LIMITS.nameChars)}", which already holds text` };
+  }
+
+  /**
+   * The message fields that a send, a submit, or Enter sends: the focused field and the multiline fields of `form` that
+   * hold text or mention chips. Their labels are cut as a text request cuts them.
+   */
+  private sentFields(obs: Observation, form: number | null, focus: number | null): SentField[] {
+    const out: SentField[] = [];
+    for (const a of obs.actions) {
+      if (a.kind !== "fill" || (a.node !== focus && (a.multiline !== true || form === null || (a.form ?? null) !== form))) continue;
+      const mentions = a.mentions ?? [];
+      if ((a.value ?? "").trim() === "" && mentions.length === 0) continue;
+      out.push({ label: cutText(flatText(this.log.redactor(a.label)), LIMITS.nameChars), text: a.value ?? "", mentions });
+    }
+    return out;
   }
 
   private async finish(d: Decision, obs: Observation, ctx: StepCtx): Promise<StepRecord> {

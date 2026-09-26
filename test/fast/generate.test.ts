@@ -20,6 +20,7 @@ describe("canWriteInto", () => {
     ["a text input", box("Subject", { inputType: "text", maxLength: 120 })],
     ["a field labelled Reply to Ann", box("Reply to Ann", { multiline: true })],
     ["autocomplete off", box("Notes", { inputType: "text", autocomplete: "off" })],
+    ["a multiline composer whose placeholder offers search too", box("Search or ask AI anything...", { multiline: true })],
   ])("accepts %s", (_name, a) => {
     expect(canWriteInto(a)).toBe(true);
   });
@@ -33,6 +34,8 @@ describe("canWriteInto", () => {
     ["inputType url", box("Link", { inputType: "url" })],
     ["autocomplete email", box("Your details", { autocomplete: "email" })],
     ...["To", "Cc", "Bcc", "Amount", "Card number", "API key", "Search mail", "Password", "  to  "].map((l) => [`the label ${JSON.stringify(l)}`, box(l)] as [string, Action]),
+    ["a single-line search field", box("Search or ask AI anything...", { inputType: "text" })],
+    ["a multiline field with another exact-value word", box("Search by email address", { multiline: true })],
   ])("rejects %s", (_name, a) => {
     expect(canWriteInto(a)).toBe(false);
   });

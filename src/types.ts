@@ -67,7 +67,8 @@ export interface Span {
   id: string;                     // "s<n>" task, "v_<key>" var, "g<n>" generated
   text: string;
   source: "quoted" | "email" | "url" | "number" | "date" | "after_verb" | "proper_noun"
-        | "clause" | "whole_task" | "var" | "page_line" | "generated";
+        | "clause" | "whole_task" | "var" | "page_line" | "generated"
+        | "mention";                // a name to mention: after mention, tag, ping, @-mention, or at-mention, or an @handle
   verb?: string;
   /** The id of the after_verb span this span was cut from: its first words, before a preposition or as a proper noun. */
   parent?: string;

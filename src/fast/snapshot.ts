@@ -11,6 +11,8 @@
 // `enterOption`, the option that Enter picks. The snapshot also returns `busy`. The settle after a fill, a key, or a
 // click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP. A
 // single-line text input also carries its chip facts, `token` (see TokenFacts in model.ts); they never reach Jev either.
+// An editor carries its mention chips, `mentions`, and the facts `bareText` and `otherAtoms`. Each action and the focus
+// carry `popup`, the popups around them.
 import { COMPOSER_SEND_WORDS, LIMITS } from "../types.js";
 import type { Action } from "./model.js";
 
@@ -28,6 +30,12 @@ const POPUP_SIG = `p=>[...p.querySelectorAll(${JSON.stringify(OPTION)})].map(o=>
 const NEAR_POPUP = `${POPUP},[role="dialog"],[data-radix-popper-content-wrapper]`;
 /** The names of a send or submit control, which ends the box of a chip field: COMPOSER_SEND_WORDS and "submit". */
 const BOX_SEND = String.raw`\b(?:${[...COMPOSER_SEND_WORDS, "submit"].join("|")})\b`;
+/** The popups around an element (`Action.popup`): NEAR_POPUP, alert dialogs, and <dialog>. */
+const POPUP_CHAIN = `${NEAR_POPUP},[role="alertdialog"],dialog`;
+/** Mention chips in an editor: TipTap, CKEditor, quill-mention, Slack, and the MentionInput of the platform. */
+const MENTION_SELECTOR = '[data-mention],[data-mention-id],[data-mention-display],[data-type="mention"],.mention,ts-mention';
+/** Atomic inline elements of an editor: mention chips, and void or decorator nodes (images, embeds, variables). */
+const ATOM_SELECTOR = `${MENTION_SELECTOR},[contenteditable="false"],[data-slate-void],[data-lexical-decorator]`;
 
 /**
  * Read visible content and controls in one evaluation. Node identity lives in `window.__jevFast`:
@@ -55,12 +63,15 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
+    // A textbox never takes its name from its content: its text is its value. Only an input button is named by its value
+    // (a Radix checkbox is a <button value="on">).
+    const field=seen.size===1 && ['textbox','searchbox'].includes(role(e));
     const referenced=(e.getAttribute('aria-labelledby')||'').split(/\s+/)
       .map(id=>name(document.getElementById(id),seen)).filter(Boolean).join(' ');
     return referenced || e.getAttribute('aria-label') ||
       [...(e.labels||[])].map(l=>name(l,seen)).filter(Boolean).join(' ') ||
-      (['button','submit','reset'].includes(e.type) ? e.value : '') || e.getAttribute('alt') ||
-      (e.tagName==='INPUT' ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
+      (e.tagName==='INPUT' && ['button','submit','reset'].includes(e.type) ? e.value : '') || e.getAttribute('alt') ||
+      (e.tagName==='INPUT' || field ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
         n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
       e.getAttribute('title') || e.getAttribute('aria-placeholder') || e.getAttribute('placeholder') || e.getAttribute('data-placeholder') || e.querySelector('[data-placeholder]')?.getAttribute('data-placeholder') || '';
   };
@@ -84,6 +95,30 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     }
     return null;
   };
+  // The popups around an element, innermost first. Ids come from the form counter, so a dialog has the same id as the
+  // form of the controls in it.
+  const CHAIN=${JSON.stringify(POPUP_CHAIN)}, MENTION=${JSON.stringify(MENTION_SELECTOR)}, ATOM=${JSON.stringify(ATOM_SELECTOR)};
+  const popupChain = e => {
+    const out=[];
+    for (let p=e.closest(CHAIN);p;p=p.parentElement?.closest(CHAIN)) out.push(formId(p));
+    return out;
+  };
+  // The top-level atoms of an editor. A mention chip has a mention attribute, class, or tag, or text that starts with
+  // "@". Other atoms (images, embeds, variables) are only counted. The bare text is the text outside every atom.
+  const atomsOf = e => {
+    if (!e.isContentEditable) return null;
+    const top=[...e.querySelectorAll(ATOM)].filter(a=>{const p=a.parentElement?.closest(ATOM);return !p || !e.contains(p) || p===e;});
+    if (!top.length) return null;
+    const chip=a=>a.matches(MENTION) || Boolean(a.querySelector(MENTION)) || /^@\S/.test((a.textContent||'').trim());
+    const label=a=>{const m=a.matches(MENTION) ? a : a.querySelector(MENTION) || a;
+      return (m.getAttribute('data-mention-display')||m.getAttribute('data-label')||m.getAttribute('data-value')||m.textContent||'')
+        .replace(/\s+/g,' ').trim().replace(/^@/,'').trim().slice(0,80);};
+    const mentions=top.filter(chip).map(label).filter(Boolean);
+    let bare='', n;
+    const walker=document.createTreeWalker(e,NodeFilter.SHOW_TEXT);
+    while ((n=walker.nextNode())) if (!top.some(a=>a.contains(n))) bare+=n.textContent;
+    return {mentions,bareText:bare.replace(/\s+/g,' ').trim(),otherAtoms:top.filter(a=>!chip(a)).length};
+  };
   cache.focus=()=>{
     const e=document.activeElement;
     if (!e || e===document.body || e===document.documentElement) return null;
@@ -93,12 +128,13 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const submits=controls.filter(b=>!b.matches(':disabled'));
     const editable=safe(e) && (e.isContentEditable || ['TEXTAREA','INPUT'].includes(e.tagName) && ['textbox','searchbox','spinbutton','combobox'].includes(role(e)));
     const owner=e.form || e.closest('form,[role="form"],dialog,[role="dialog"]');
-    const pick=editable ? cache.pick(e) : null;
+    const pick=editable ? cache.pick(e) : null, atoms=editable ? atomsOf(e) : null, popup=popupChain(e);
     return {node:identity(e),label:name(e),role:role(e),submitLabel:submits.map(b=>name(b)).join(' | '),
       editable,value:editable ? ('value' in e ? String(e.value) : e.innerText) : '',
       form:owner ? formId(owner) : null,submitDefault:controls[0] && !controls[0].matches(':disabled') ? name(controls[0]) : '',
       multiline:e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true',
-      ...(pick?.option ? {enterOption:{node:identity(pick.option),label:name(pick.option)}} : {})};
+      ...(pick?.option ? {enterOption:{node:identity(pick.option),label:name(pick.option)}} : {}),
+      ...(atoms?.mentions.length ? {mentions:atoms.mentions} : {}),...(popup.length ? {popup} : {})};
   };
   // The option that Enter in the focused field picks, and the popups that Enter acts on. In this order: the active
   // descendant of the field or its combobox; the highlighted option of a popup that the field controls; the highlighted
@@ -264,21 +300,32 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   const actions=[], popups=[...document.querySelectorAll(NEAR)].filter(visible);
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
+    // A control inside an option that takes no pointer events (the checkbox of a multi-select option) is part of the option.
+    if (e.parentElement?.closest('[role="option"]') && getComputedStyle(e).pointerEvents==='none') continue;
     const r=e.getBoundingClientRect(), clip=clippedRect(e), x=clip.x+clip.w/2, y=clip.y+clip.h/2, rname=role(e);
     if (!rname || clip.w<=0 || clip.h<=0 || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
+    const popup=popupChain(e);
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height},
       form:(f=>f?formId(f):null)(e.form||e.closest('form,[role="form"],dialog,[role="dialog"]')),
       multiline:e.tagName==='TEXTAREA'||e.isContentEditable||e.getAttribute('aria-multiline')==='true',
       ...(e.tagName==='INPUT'?{inputType:String(e.type).toLowerCase()}:{}),
       ...(e.getAttribute('autocomplete')?{autocomplete:e.getAttribute('autocomplete').toLowerCase()}:{}),
-      ...(e.maxLength>0?{maxLength:e.maxLength}:{})};
+      ...(e.maxLength>0?{maxLength:e.maxLength}:{}),
+      ...(popup.length?{popup}:{})};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
     }
     if (['checkbox','radio'].includes(e.type)) base.checked=String(e.checked);
+    if (rname==='option' && base.checked===undefined) {
+      // A multi-select option shows its state with a checkbox inside it; a Radix item with data-state.
+      const box=e.querySelector('[role="checkbox"],input[type="checkbox"]');
+      const state=box ? box.getAttribute('aria-checked') ?? (box.tagName==='INPUT' ? String(box.checked) : null) : null;
+      if (state!==null) base.checked=state;
+      else if (e.getAttribute('data-state')==='checked') base.checked='true';
+    }
     if (e.tagName==='SELECT') {
       for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
         actions.push({...base,kind:'select',value:o.value,
@@ -289,8 +336,10 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
           (rname==='combobox' && ['INPUT','TEXTAREA'].includes(e.tagName)));
       const value='value' in e ? String(e.value) :
         e.isContentEditable || rname==='combobox' ? e.innerText.trim() : '';
-      const token=editable ? tokenFacts(e,popups) : null;
-      actions.push({...base,kind:editable?'fill':'click',value,...(token?{token}:{})});
+      const token=editable ? tokenFacts(e,popups) : null, atoms=editable ? atomsOf(e) : null;
+      actions.push({...base,kind:editable?'fill':'click',value,...(token?{token}:{}),
+        ...(atoms?.mentions.length ? {mentions:atoms.mentions,bareText:atoms.bareText} : {}),
+        ...(atoms?.otherAtoms ? {otherAtoms:atoms.otherAtoms} : {})});
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
@@ -458,9 +507,12 @@ export const CAUSAL_END_SCRIPT: string = `(() => {
  * sibling content over their centre (a row wrapper with the text laid on top), so this script tries
  * the centre, a 3x3 grid, and four inset corners, and returns the first point that lands inside the
  * element. Null means every point is covered, out of view, hidden, or disabled.
+ * A fill takes a point that is not on a mention chip or another atom of the editor: a click on a chip can open its
+ * card. When every point is on an atom, a plain fill takes the first one, and a fill that keeps the chips
+ * (`EditPlan.keepChips`) gets null.
  */
-export function actScript(action: Action): string {
-  const arg = JSON.stringify({ kind: action.kind, node: action.node, value: action.value ?? null, delta: action.delta ?? 0 });
+export function actScript(action: Action, keepChips = false): string {
+  const arg = JSON.stringify({ kind: action.kind, node: action.node, value: action.value ?? null, delta: action.delta ?? 0, keepChips });
   return `(action => {
   const e=window.__jevFast?.nodes.get(action.node);
   if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
@@ -472,12 +524,16 @@ export function actScript(action: Action): string {
   const pts=[[0.5,0.5],[0.25,0.25],[0.75,0.25],[0.25,0.75],[0.75,0.75],[0.5,0.25],[0.5,0.75],[0.1,0.5],[0.9,0.5]]
     .map(([fx,fy])=>[r.x+r.width*fx,r.y+r.height*fy]);
   pts.push([r.x+inset,r.y+inset],[r.x+r.width-inset,r.y+inset],[r.x+inset,r.y+r.height-inset],[r.x+r.width-inset,r.y+r.height-inset]);
-  let x=null,y=null;
+  const onAtom=h=>{const a=h.closest(${JSON.stringify(ATOM_SELECTOR)});return Boolean(a) && a!==e && e.contains(a);};
+  let x=null,y=null,atom=null;
   for (const [px,py] of pts) {
     if (px<0 || py<0 || px>=innerWidth || py>=innerHeight) continue;
     const h=document.elementFromPoint(px,py);
-    if (h && e.contains(h)) { x=px; y=py; break; }
+    if (!h || !e.contains(h)) continue;
+    if (action.kind==='fill' && onAtom(h)) { atom=atom || [px,py]; continue; }
+    x=px; y=py; break;
   }
+  if (x===null && atom && !action.keepChips) [x,y]=atom;
   if (x===null) return null;
   if (action.kind==='scroll') e.scrollBy({top:action.delta,behavior:'instant'});
   if (action.kind==='select') {

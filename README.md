@@ -294,7 +294,7 @@ A `blocked` result with the kind `needs_confirmation` has these causes:
 
 The server asks the user through an MCP form dialog (elicitation). The assistant cannot answer it, and no tool argument allows one action. Only [autonomous mode](#autonomous-mode), which the user turns on in their own words, turns off the dialogs of a run. A dialog asks:
 
-- To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. Select **Allow** to let Jev continue.
+- To allow a click or Enter while assistant text is in a field, a destructive action, or a submit with `confirm: "always"`. The dialog shows the action, the host, and each unsent text in full with its length. For a send, a submit, or Enter, it also shows what the action sends: the text of each message field and each mention in it, also text that the assistant did not write. Select **Allow** to let Jev continue.
 - To use a Chrome profile when Jev is not sure which profile the task names. If the user does not allow it, the run uses the workspace default.
 
 The server shows dialogs only when all of these conditions are true:
@@ -418,11 +418,24 @@ Text values come from task spans or user variables. The `vercel` engine can also
 - A field that only looks like a chip field (chips with remove buttons that this run did not add) gets the hint one time and no more.
 - Before its first chip, a field without ARIA looks like a plain field. The first value then depends on Jev's Enter. An unnamed field shows as "textbox" after its first chip.
 
+### Mentions
+
+A task can ask Jev to mention or tag a person, for example "mention Ann Lee and ask her for the report status", "Tag @ann.lee and Bob Roy in the chat", or "ask @Research Agent to summarise the Q3 notes". The names after mention, tag, ping, @-mention, or at-mention count, and so does every @handle. Jev then adds each person with the message field's own mention picker: it clicks the Mention or @ button, the name, and the picker's Done or Add button. It sends only when the field shows the mention. Typed text such as "@Ann Lee" is not a mention, so a message field never takes a name to mention as its text.
+
+Code also checks these things:
+
+- A send, a submit, or Enter while an open picker holds a checked name that is not added asks Jev again, and the reason names the picker's Done button. When Jev chooses a send again, the run blocks.
+- A send of a mention that the run added and that the task does not name asks Jev again. Jev can type the message again, which removes the mention. Otherwise the run blocks, and nothing is sent.
+- A fill of the message after the run's mention adds the text at the end and keeps the mention.
+- In plugin runs, the send dialog shows the message text and each mention.
+
+Jev cannot type "@" at the cursor, so a field without a Mention or @ button cannot get a mention. In plugin runs, when the text goes in before the mention, each click in the picker needs a dialog.
+
 ### Assistant-written text (plugin runs only)
 
 When a form needs new text, such as a reply, Jev can choose `generate` for the field instead of an offered value. The run then gets the status `needs_text`, and the assistant writes the text. Jev still chooses the field and every action.
 
-- **Writable fields.** Only a textarea, a rich-text editor, or an `<input type="text">` with the role `textbox` can take assistant text. Search boxes, comboboxes, number fields, and email, phone, and URL inputs cannot. Fields with an exact-value `autocomplete` token (for example `email`, `tel`, `username`, `cc-number`, or an address token) cannot. Fields with labels such as To, Cc, Bcc, From, recipient, phone, amount, price, card number, IBAN, account number, street, postal code, user name, URL, website, search, API key, token, or a credential label cannot. A chip field that the run learned, or a combobox with a multiselect list, cannot. For such a field, the run blocks with `needs_credential` and a hint to ask the user for the exact text.
+- **Writable fields.** Only a textarea, a rich-text editor, or an `<input type="text">` with the role `textbox` can take assistant text. Search boxes, comboboxes, number fields, and email, phone, and URL inputs cannot. Fields with an exact-value `autocomplete` token (for example `email`, `tel`, `username`, `cc-number`, or an address token) cannot. Fields with labels such as To, Cc, Bcc, From, recipient, phone, amount, price, card number, IBAN, account number, street, postal code, user name, URL, website, search, API key, token, or a credential label cannot. A chip field that the run learned, or a combobox with a multiselect list, cannot. For such a field, the run blocks with `needs_credential` and a hint to ask the user for the exact text. The word "search" does not stop a multiline field: a composer such as "Search or ask AI anything..." can take assistant text.
 - **One request.** A request holds the field that Jev chose (`f1`, required) and up to 3 other empty writable fields of the same form, in page order. It also holds the task, the page URL and title, the last 5 actions, and up to 6,000 characters of page text.
 - **Text at the end of a field.** When Jev adds the text at the end of a field that holds other text, the field in the request has `mode: "append"`, and its `current_value` shows up to 2,000 characters of the field. The assistant writes only the new text. When Jev replaces that text, the field has no `mode`, and `current_value` is also long.
 - **Checks.** Each text must fit the field's `max_chars`, and all texts of one request together must fit 4,000 characters. A text must not hold a secret `--var` value of 4 or more characters, the API key, or text that looks like a key or token. The run removes control and invisible characters. In a single-line field, a line break becomes a space. An error names the field and the rule, never the text.

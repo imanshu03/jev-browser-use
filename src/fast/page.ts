@@ -287,7 +287,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     const read = await editStep(node, "read", plan.mode, [], false);
     if (!read.ok) throw new EditRefused(`the fill did not start: ${read.why}`);
     const shape = read.shape ?? (read.kind === "editable" ? "composer" : read.kind);
-    const mode: EditMode = read.blank ? "replace" : plan.mode;
+    // A field whose mention chips must stay is never replaced: a chip with no text reads as blank.
+    const mode: EditMode = read.blank && plan.keepChips !== true ? "replace" : plan.mode;
     // A line break can send in a composer. Refuse before any change.
     if (mode === "append" && shape === "composer" && /\n/.test(text)) throw new EditRefused("the text has line breaks, and a new line can send the message in this field");
     await command(mode === "replace" ? "selectAll" : "moveToEndOfDocument");
@@ -407,7 +408,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       }
       if (typeof action.node !== "number") throw new StalePage("Invalid observed node");
       if (action.kind === "fill" && typeof text !== "string") throw new Error("a fill needs text");
-      const r = await evaluate(actScript(action));
+      // A fill that keeps the field's mention chips never clicks a chip: the click can open its card and move focus.
+      const r = await evaluate(actScript(action, action.kind === "fill" && edit?.keepChips === true));
       if (r.exception) {
         if (action.kind === "select") throw new Error("Dropdown execution was interrupted; observe before retrying.");
         throw new StalePage("Document changed during evaluation");

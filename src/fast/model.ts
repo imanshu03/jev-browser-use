@@ -62,7 +62,12 @@ export type ActionKind = "click" | "fill" | "select" | "scroll" | "wait";
  * caret with key-less editing commands and checks the result.
  */
 export type EditMode = "replace" | "append";
-export interface EditPlan { mode: EditMode }
+/**
+ * `keepChips`: the field holds mention chips that this run added and the task asks for (`chipPlan` in loop.ts). The mode
+ * is `append`, also when the field reads as blank: a select-all would remove the chips. The click of the fill never
+ * lands on a chip or another atom of the editor.
+ */
+export interface EditPlan { mode: EditMode; keepChips?: true }
 
 /**
  * The shape of a field, read at the fill. It chooses the separator of an append:
@@ -87,9 +92,11 @@ export interface Action {
   label: string;                      // accessible name, or "<name> → <option>" for a select option
   value?: string;                     // current field value or the option value for a select action
   current_value?: string;             // selected option labels for a select action
-  checked?: string;
+  checked?: string;                   // aria-checked, a native checkbox, or for an option its checkbox or data-state="checked"
   selected?: string;
   expanded?: string;
+  /** Names of the mention chips in an editor, in order. Absent when it has none. Jev sees them on the field row. */
+  mentions?: string[];
   delta?: number;                     // scroll pixels
   rect?: { x: number; y: number; w: number; h: number };
   // Field facts for assistant-written text. Set by the snapshot; never sent to Jev.
@@ -99,6 +106,15 @@ export interface Action {
   inputType?: string;                 // INPUT type, lowercased; absent for other tags
   autocomplete?: string;              // autocomplete attribute, lowercased, when set
   token?: TokenFacts;                 // chip facts of a single-line text input; fill actions only
+  /**
+   * The popups around the element, innermost first: listbox, menu, grid, tree, dialog, and alertdialog roles, cmdk lists,
+   * <dialog>, and Radix popper wrappers (POPUP_CHAIN in snapshot.ts). Absent outside a popup.
+   */
+  popup?: number[];
+  /** The text of an editor with mention chips outside its chips (textContent, whitespace squashed). Set only with `mentions`. */
+  bareText?: string;
+  /** Atomic inline elements of an editor that are not mention chips (images, embeds, variables). Absent when 0. */
+  otherAtoms?: number;
 }
 
 /**
@@ -162,6 +178,10 @@ export interface Observation {
      * sees only the label, as `enter_picks`. Absent when Enter picks no option.
      */
     enterOption?: { node: number; label: string };
+    /** The mention chips of the focused editor. Absent when it has none. */
+    mentions?: string[];
+    /** The popups around the focused element, as `Action.popup`. Never sent to Jev. */
+    popup?: number[];
   } | null;
   /** Semantic marker of the whole page. Opaque. Used by `Page.fresh`. */
   marker: unknown;
@@ -258,7 +278,8 @@ export interface Page {
    * Execute one observed action. Rechecks freshness, visibility, geometry, and occlusion right before input. Throws
    * StalePage when anything changed; nothing is executed then. `text` is required for a fill. A fill uses `edit`
    * (default: replace), sends no key that a page can read, types only while the field has focus, and returns what it
-   * did. It throws EditRefused when the field refuses the edit.
+   * did. It throws EditRefused when the field refuses the edit. A fill clicks a point that is not on a mention chip or
+   * another atom of an editor when the field has one; with `edit.keepChips` it never clicks an atom.
    */
   act(action: Action, obs: Observation, text?: string, edit?: EditPlan): Promise<EditResult | void>;
   /** Press one key on the focused element (for example "Enter", "Escape"). With `obs`, throws StalePage when the page key no longer matches the observation; nothing is pressed then. */

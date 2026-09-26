@@ -45,6 +45,7 @@ If `result.blocked.hint` starts with `typed value not added`, the form was not s
 - `text_request.sent_texts` lists the texts that this run already sent. Do not write one of them again. If the task does not ask for text in the requested field, call `continue` with `decline`.
 - A run writes and sends one text per field. When a run blocks after a send because the task needs another text, call `browse` again for that next step only.
 - Do not invent names, email addresses, phone numbers, recipients, prices, or dates. Use only facts from the task, the conversation, or the page.
+- When the task asks to mention or tag a person, do not write "@Name" for that person in the text. Jev adds the mention with the page's mention picker, and typed "@Name" text is not a mention.
 - Keep each value at or below `max_chars`, and all values together at or below 4000 characters. Use line breaks only where `multiline` is true.
 - If a field has `mode: "append"`, the field keeps its text, and your text goes at its end. Write only the new text. Do not repeat the text in `current_value`.
 - If you cannot write good text, ask the user. To stop, call `continue` with `run`, `request`, and `decline` (a short reason). If the user rejects your `continue` call, call `cancel`.

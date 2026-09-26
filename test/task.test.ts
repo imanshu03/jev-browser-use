@@ -188,6 +188,35 @@ describe("extractSpans", () => {
   });
 });
 
+describe("mention spans", () => {
+  const mentions = (t: string) => extractSpans(t).filter((s) => s.source === "mention").map((s) => s.text);
+  it("keeps the name after a mention verb, and each @handle with its @", () => {
+    expect(mentions("mention Ann Lee and ask her for the report status")).toEqual(["Ann Lee"]);
+    expect(mentions("Tag @ann.lee and Bob Roy in the chat and say the build is green")).toEqual(["@ann.lee", "Bob Roy"]);
+    expect(mentions("ask @Research Agent to summarise the Q3 notes")).toEqual(["@Research Agent"]);
+    expect(mentions("ping Ann about the deploy")).toEqual(["Ann"]);
+    expect(mentions("@-mention Ann in the chat")).toEqual(["Ann"]);
+    expect(mentions("Mention O'Brien, Mary-Jane and McKay Smith in the thread")).toEqual(["O'Brien", "Mary-Jane", "McKay Smith"]);
+    expect(mentions('email bob@example.com and mention "Ann Lee"')).toEqual(["Ann Lee"]);
+  });
+  it("finds none after a lower-case word, in an email address, in a URL, or for a non-name", () => {
+    expect(mentions('Send "Deploy is done, please verify on staging" in the chat')).toEqual([]);
+    expect(mentions("mention the delay to Ann")).toEqual([]);
+    expect(mentions("Open the post and tag it with urgent and assign it to Ann")).toEqual([]);
+    expect(mentions("Tag the Q3 Report as Finance")).toEqual([]);
+    expect(mentions("mention Q3 results in the chat")).toEqual([]);
+    expect(mentions("click the Mention button and pick Ann Lee")).toEqual([]);
+    expect(mentions("email bob@example.com the notes")).toEqual([]);
+    expect(mentions("see https://x.com/@ann")).toEqual([]);
+  });
+  it("comes first, so a name that is also a proper noun or a quoted value keeps the source mention", () => {
+    const s = extractSpans("mention Ann Lee and ask her for the report status");
+    expect(s[0]).toMatchObject({ id: "s1", text: "Ann Lee", source: "mention", secret: false });
+    expect(s.filter((x) => x.text === "Ann Lee")).toHaveLength(1);
+    expect(extractSpans('mention "Ann Lee" in the chat')[0]).toMatchObject({ text: "Ann Lee", source: "mention" });
+  });
+});
+
 describe("varSpans", () => {
   it("uses v_<key> ids and secret keys", () => {
     const s = varSpans({ email: "a@b.c", password: "x" });

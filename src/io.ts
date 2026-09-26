@@ -89,9 +89,15 @@ export interface TextWriteOptions {
 /** The harness model writes field text. It is never the human. */
 export interface TextSource { write(req: TextRequest, opts: TextWriteOptions): Promise<TextReply> }
 
-/** What a confirmation is about. A front end that shows a dialog uses it; the CLI and chat ignore it. */
+/** A message field that a send, a submit, or Enter sends: its label, its text now, and the names of its mention chips. */
+export interface SentField { label: string; text: string; mentions: string[] }
+
+/**
+ * What a confirmation is about. A front end that shows a dialog uses it; the CLI and chat ignore it. `sends`: for a send,
+ * a submit, or Enter, the message fields of the form with the text that goes out, also when no assistant wrote it.
+ */
 export type ConfirmDetail =
-  | { kind: "action"; action: string; host: string; typed: { label: string; text: string }[] }
+  | { kind: "action"; action: string; host: string; typed: { label: string; text: string }[]; sends?: SentField[] }
   | { kind: "profile"; name: string; directory: string };
 
 export type PauseKind = "sign_in" | "captcha";
