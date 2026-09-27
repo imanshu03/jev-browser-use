@@ -1,9 +1,9 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { main, parseArgs, textModelDeps, USAGE, UsageError } from "../src/cli.js";
+import { main, parseArgs, parseGeo, textModelDeps, USAGE, UsageError } from "../src/cli.js";
 import { fakeLogger } from "./fakes.js";
 import { emptyResult } from "../src/io.js";
-import type { RunResult } from "../src/types.js";
+import type { RunConfig, RunResult } from "../src/types.js";
 
 const env = { TYPESAFE_API_KEY: "k" } as NodeJS.ProcessEnv;
 
@@ -52,6 +52,24 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["t", "--confirm", "maybe"], env)).toThrow("--confirm must be auto, always, never, or autonomous");
     expect(USAGE).toContain("--confirm <auto|always|never|autonomous>");
   });
+  it("--geo lat,lon[,accuracy] sets cfg.geo; USAGE names it; without it there is no geo", () => {
+    expect(parseArgs(["t", "--geo", "12.9352,77.6245"], env).geo).toEqual({ latitude: 12.9352, longitude: 77.6245 });
+    expect(parseArgs(["t", "--geo", "12.9352, 77.6245, 25"], env).geo).toEqual({ latitude: 12.9352, longitude: 77.6245, accuracy: 25 });
+    expect(parseArgs(["t", "--geo", "-33.86,151.21"], env).geo).toEqual({ latitude: -33.86, longitude: 151.21 });
+    expect(parseArgs(["t", "--geo", "90,-180,0"], env).geo).toEqual({ latitude: 90, longitude: -180, accuracy: 0 });
+    expect(parseArgs(["t"], env).geo).toBeUndefined();
+    expect(parseArgs(["t", "--geo", "1,2", "--engine", "chromium"], env).geo).toEqual({ latitude: 1, longitude: 2 });
+    expect(USAGE).toContain("--geo <lat,lon[,accuracy]>");
+  });
+  it("a bad --geo value is a UsageError", () => {
+    for (const v of ["91,0", "-90.5,0", "0,181", "0,-180.01", "1,2,-1", "1,2,100001", "abc,1", "1", "1,2,3,4", "1,", ",2", "1e2,3", "0x10,2", "1;2", "NaN,1", "Infinity,1"]) {
+      expect(() => parseArgs(["t", "--geo", v], env), v).toThrow(UsageError);
+    }
+    expect(() => parseArgs(["t", "--geo"], env)).toThrow("--geo needs a value");
+    expect(() => parseArgs(["t", "--geo", "91,0"], env)).toThrow("--geo: latitude must be between -90 and 90");
+    expect(() => parseArgs(["t", "--geo", "1,2", "--engine", "vercel"], env)).toThrow("--geo needs --engine cdp or chromium");
+    expect(() => parseGeo("a,b", "--x")).toThrow("--x needs lat,lon or lat,lon,accuracy");
+  });
   it("a JEV_BROWSER_MAX_STEPS value that is not a number gives a UsageError", () => {
     for (const v of ["abc", "NaN"]) expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: v })).toThrow(/--max-steps must be between 1 and 100/);
     expect(() => parseArgs(["t"], { ...env, JEV_BROWSER_MAX_STEPS: "abc" })).toThrow(UsageError);
@@ -99,6 +117,18 @@ describe("main", () => {
     const help = io();
     expect(await main(["--help"], help.io)).toBe(0);
     expect(help.stderr).toContain("jev-browser");
+  });
+  it("--geo reaches the runner as cfg.geo; a bad --geo exits 4 with the usage text", async () => {
+    const ok = io();
+    let seen: RunConfig | null = null;
+    expect(await main(["task", "--geo", "12.9352,77.6245,30"], ok.io, { runner: async (cfg) => { seen = cfg; return { ...emptyResult("task", "act"), outcome: "done" }; } })).toBe(0);
+    expect((seen as RunConfig | null)?.geo).toEqual({ latitude: 12.9352, longitude: 77.6245, accuracy: 30 });
+    for (const v of ["200,1", "north,east"]) {
+      const bad = io();
+      expect(await main(["task", "--geo", v], bad.io, { runner: async () => emptyResult("", "act") })).toBe(4);
+      expect(bad.stderr).toContain("error: --geo");
+      expect(bad.stderr).toContain("Options:");
+    }
   });
 });
 

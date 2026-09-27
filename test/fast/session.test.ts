@@ -132,6 +132,31 @@ describe("BrowserSession launch and reuse", () => {
     await expect(s.chromeFor(cfg({ engine: "chromium" }))("Profile 14")).rejects.toThrow(/needs profile Profile 14 \(chromium, headed\)/);
     expect(l.calls).toHaveLength(1);
   });
+
+  it("passes cfg.geo to the launch as geolocation; without geo the launch gets none", async () => {
+    const l = fakeLaunch();
+    const { s } = session(l.launch);
+    const geo = { latitude: 12.9352, longitude: 77.6245 };
+    await s.chromeFor(cfg({ geo }))("Profile 14");
+    expect(l.calls[0]?.geolocation).toEqual(geo);
+    const plain = fakeLaunch();
+    await session(plain.launch).s.chromeFor(cfg())("Profile 14");
+    expect(plain.calls[0]).not.toHaveProperty("geolocation");
+  });
+
+  it("chromeFor reuses a Chrome with the same geo and refuses one with another geo, as for another profile", async () => {
+    const l = fakeLaunch();
+    const { s } = session(l.launch);
+    const open = await s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2 } }))("Profile 14");
+    // The same point; accuracy 50 is the default.
+    expect(await s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 50 } }))("Profile 14")).toBe(open);
+    await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 3 } }))("Profile 14")).rejects.toBeInstanceOf(ProfileMismatchError);
+    await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 5 } }))("Profile 14")).rejects.toBeInstanceOf(ProfileMismatchError);
+    await expect(s.chromeFor(cfg())("Profile 14")).rejects.toThrow(/open with profile Profile 14 \(cdp, headed, geo 1,2\); the task needs profile Profile 14 \(cdp, headed\)/);
+    await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 5 } }))("Profile 14")).rejects.toThrow(/needs profile Profile 14 \(cdp, headed, geo 1,2 accuracy 5 m\)/);
+    expect(l.calls).toHaveLength(1);
+    expect(s.chrome).toBe(open);
+  });
 });
 
 describe("BrowserSession prepare", () => {
@@ -158,6 +183,25 @@ describe("BrowserSession prepare", () => {
     await s.chromeFor(cfg())("Profile 14");
     await s.prepare({ ...KEY, ...over });
     expect(l.chromes[0]!.closes).toBe(1);
+    expect(s.chrome).toBeNull();
+  });
+
+  it("closes Chrome when the geo differs; absent and null geo are the same key", async () => {
+    const l = fakeLaunch();
+    const { s } = session(l.launch);
+    const c = await s.chromeFor(cfg())("Profile 14");
+    await s.prepare({ ...KEY, geo: null });
+    await s.prepare({ ...KEY });
+    expect(s.chrome).toBe(c);
+    await s.prepare({ ...KEY, geo: { latitude: 1, longitude: 2 } });
+    expect(l.chromes[0]!.closes).toBe(1);
+    expect(s.chrome).toBeNull();
+    // A Chrome with a geo is kept for the same point, and closed for a run without one.
+    const g = await s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2 } }))("Profile 14");
+    await s.prepare({ ...KEY, geo: { latitude: 1, longitude: 2, accuracy: 50 } });
+    expect(s.chrome).toBe(g);
+    await s.prepare({ ...KEY, geo: null });
+    expect(l.chromes[1]!.closes).toBe(1);
     expect(s.chrome).toBeNull();
   });
 

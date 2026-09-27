@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scrape shop fixture</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  .suggestions { border: 1px solid #ccc; max-width: 320px; }
+  .suggestions:empty { display: none; }
+  .suggest { padding: 6px; cursor: pointer; }
+  .grid, .list { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+  .card, .tile { border: 1px solid #ddd; padding: 8px; width: 180px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #ccc; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<!--
+  A small shop for the scrape live test. No network. The query string picks a version:
+  v=1 (default): a search box, suggestion rows (plain divs with a click handler and a pointer cursor: rule B), a
+       "Search" button, and result cards (plain div cards: badge, name, pack, price, struck MRP, ADD button), and a
+       price table with the header "Price".
+  v=2: the same page with other class names and the table header "Price (Rs)".
+  v=3: the search button is "Find".
+  v=4: a new layout: the results are one table and no cards.
+-->
+<h1>Scrape shop</h1>
+<div id="bar">
+  <input id="q" type="search" aria-label="Search products" placeholder="Search products" autocomplete="off">
+  <button id="go" type="button"></button>
+  <div id="sug" class="suggestions"></div>
+</div>
+<div id="out"></div>
+<script>
+const v = Number(new URLSearchParams(location.search).get("v") || "1");
+const PRODUCTS = [
+  { name: "Brown Eggs", pack: "6 pcs", price: 90, mrp: 100, stock: true },
+  { name: "White Eggs Tray", pack: "30 pcs", price: 210, mrp: null, stock: true },
+  { name: "Country Eggs", pack: "12 pcs", price: 160, mrp: 180, stock: false },
+  { name: "Toned Milk", pack: "1 l", price: 72, mrp: null, stock: true },
+  { name: "Paneer Block", pack: "200 g", price: 95, mrp: 110, stock: true },
+  { name: "Whole Wheat Bread", pack: "400 g", price: 45, mrp: null, stock: true },
+];
+const C = v === 2
+  ? { grid: "list", card: "tile", badge: "off", name: "ttl", pack: "qty", prices: "amts", price: "amt", mrp: "was", add: "cta", priceHeader: "Price (Rs)" }
+  : { grid: "grid", card: "card", badge: "badge", name: "name", pack: "pack", prices: "prices", price: "price", mrp: "mrp", add: "add", priceHeader: "Price" };
+const input = document.getElementById("q");
+const go = document.getElementById("go");
+const sug = document.getElementById("sug");
+const out = document.getElementById("out");
+go.textContent = v === 3 ? "Find" : "Search";
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function cards(query) {
+  const grid = el("div", C.grid);
+  for (const p of PRODUCTS) {
+    const card = el("div", C.card);
+    if (p.mrp) card.append(el("div", C.badge, `${Math.round((1 - p.price / p.mrp) * 100)}% OFF`));
+    card.append(el("div", C.name, p.name), el("div", C.pack, p.pack));
+    const prices = el("div", C.prices);
+    prices.append(el("div", C.price, `₹${p.price}`));
+    if (p.mrp) { const m = el("div", C.mrp); m.append(el("s", "", `₹${p.mrp}`)); prices.append(m); }
+    card.append(prices);
+    const b = el("button", C.add, p.stock ? "ADD" : "Out of stock");
+    if (!p.stock) b.disabled = true;
+    card.append(b);
+    grid.append(card);
+  }
+  return grid;
+}
+
+function table(headers, rows) {
+  const t = el("table");
+  const head = el("tr");
+  for (const h of headers) head.append(el("th", "", h));
+  const thead = el("thead");
+  thead.append(head);
+  const body = el("tbody");
+  for (const r of rows) { const tr = el("tr"); for (const c of r) tr.append(el("td", "", c)); body.append(tr); }
+  t.append(thead, body);
+  return t;
+}
+
+function search(query) {
+  sug.textContent = "";
+  input.value = query;
+  location.hash = `q=${encodeURIComponent(query)}`;
+  out.textContent = "Loading...";
+  setTimeout(() => {
+    out.textContent = "";
+    out.append(el("h2", "", `Results for ${query}`));
+    if (v === 4) {
+      out.append(table(["Product", "Size", "Price", "MRP", "Stock"], PRODUCTS.map((p) => [p.name, p.pack, `₹${p.price}`, p.mrp ? `₹${p.mrp}` : "-", p.stock ? "In stock" : "Out of stock"])));
+      return;
+    }
+    out.append(cards(query));
+    out.append(el("h2", "", "Price list"));
+    out.append(table(["Item", C.priceHeader, "Unit"], PRODUCTS.map((p) => [p.name, String(p.price), p.pack])));
+  }, 80);
+}
+
+// Suggestion rows: plain divs with a click handler (rule B of the snapshot). The parent has no pointer cursor.
+input.addEventListener("input", () => {
+  sug.textContent = "";
+  const q = input.value.trim().toLowerCase();
+  if (!q) return;
+  for (const s of [`${input.value.trim()} (all)`, `${input.value.trim()} in Dairy`]) {
+    const row = el("div", "suggest", s);
+    row.onclick = () => search(input.value.trim());
+    sug.append(row);
+  }
+});
+go.addEventListener("click", () => { if (input.value.trim()) search(input.value.trim()); });
+</script>
+</body>
+</html>

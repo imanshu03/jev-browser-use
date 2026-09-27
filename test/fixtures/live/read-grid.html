@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<!-- Synthetic fixture for the page reader (test/fast/read.live.test.ts): an ARIA grid, a table with rowspan and colspan
+     headers, a table in an open shadow root, a nested layout table, a long table, a table with no th, form values, plain-div
+     offer cards, and a button that adds a table after a 300 ms timer. No network. -->
+<head>
+<meta charset="utf-8">
+<title>Grid fixture</title>
+<style>
+  body { margin: 8px; font: 13px/1.35 sans-serif; }
+  [role="row"] { display: flex; gap: 12px; }
+  [role="row"] > span { display: block; width: 90px; }
+  table { border-collapse: collapse; margin: 6px 0; }
+  td, th { border: 1px solid #ccc; padding: 2px 6px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .gone { visibility: hidden; }
+</style>
+</head>
+<body>
+<h1>Tables fixture</h1>
+<p>Intro text before the tables.<span class="sr-only">Skip to the tables</span><span class="gone">Invisible words</span></p>
+<form id="filters" onsubmit="return false">
+  <label>Find <input type="search" name="q" value="bolts"></label>
+  <label>Size <select name="size"><option value="s">Small</option><option value="m" selected>Medium</option></select></label>
+  <label><input type="checkbox" name="stock" value="yes" checked> In stock only</label>
+  <label>Password <input type="password" name="pw" value="hunter22"></label>
+  <label>OTP <input type="text" name="otp" value="123456"></label>
+  <input type="hidden" name="token" value="abc">
+  <!-- Private fields that a user typed: an OTP by its placeholder, a card and a CVV by their labels, a transaction PIN by
+       its placeholder, an account number by its title, and short digit boxes. None of them is a form value. -->
+  <input type="text" id="f1" placeholder="Enter OTP" value="482913">
+  <input type="text" name="cardno" aria-label="Card number" value="4111111111111111">
+  <input type="text" name="cvv" aria-label="CVV" value="731">
+  <input type="text" name="tpin" placeholder="Transaction PIN" value="774411">
+  <input type="text" name="acct" title="Account number" value="000123456789">
+  <input type="text" name="box1" inputmode="numeric" maxlength="6" value="909090">
+  <input type="text" name="box2" pattern="[0-9]*" maxlength="4" value="4321">
+</form>
+
+<h2>Team roster</h2>
+<div role="grid" aria-label="Roster">
+  <div role="row"><span role="columnheader">Name</span><span role="columnheader">Team</span><span role="columnheader">Score</span></div>
+  <div role="rowgroup">
+    <div role="row"><span role="gridcell">Ada</span><span role="gridcell">Red</span><span role="gridcell">12</span></div>
+    <div role="row"><span role="gridcell">Grace</span><span role="gridcell">Blue</span><span role="gridcell">15</span></div>
+    <div role="row"><span role="gridcell">Linus</span><span role="gridcell">Red</span><span role="gridcell">9</span></div>
+    <div role="row" style="display: none"><span role="gridcell">Hidden</span><span role="gridcell">Gray</span><span role="gridcell">0</span></div>
+    <div role="row"><span role="gridcell">Margaret</span><span role="gridcell">Green</span><span role="gridcell">21</span></div>
+    <div role="row"><span role="gridcell">Alan</span><span role="gridcell">Blue</span><span role="gridcell">7</span></div>
+  </div>
+</div>
+
+<h2>Quarterly sales</h2>
+<table id="sales">
+  <caption>Sales by region</caption>
+  <thead>
+    <tr><th rowspan="2">Region</th><th colspan="3">Q1</th><th rowspan="2">Total</th></tr>
+    <tr><th>Jan</th><th>Feb</th><th>Mar</th></tr>
+  </thead>
+  <tbody>
+    <tr><td rowspan="2">North</td><td>1</td><td>2</td><td>3</td><td>6</td></tr>
+    <tr><td>4</td><td>5</td><td>6</td><td>15</td></tr>
+    <tr><td>South</td><td colspan="3">n/a</td><td>0</td></tr>
+    <tr><td>East</td><td><a href="east/jan.html">7</a></td><td>8</td><td>9</td><td>24</td></tr>
+  </tbody>
+</table>
+
+<div id="host"><template shadowrootmode="open"><h3>Shadow prices</h3><table><tr><th>Item</th><th>Price</th></tr><tr><td>Tea</td><td>10</td></tr><tr><td>Coffee</td><td>20</td></tr><tr><td>Milk</td><td>5</td></tr></table><slot></slot></template><p>Light text in the host</p></div>
+
+<table class="layout">
+  <tr>
+    <td><h3>Inner stock</h3><table id="stock"><tr><th>Part</th><th>Qty</th></tr><tr><td>Bolt</td><td>100</td></tr><tr><td>Nut</td><td>250</td></tr></table></td>
+    <td><p>Side note</p></td>
+  </tr>
+</table>
+
+<h2>Weather</h2>
+<table id="plain">
+  <tr><td>City</td><td>Temp</td><td>Rain</td></tr>
+  <tr><td>Pune</td><td>31</td><td>2</td></tr>
+  <tr><td>Delhi</td><td>35</td><td>0</td></tr>
+</table>
+
+<h2>Long list</h2>
+<table id="long">
+  <thead><tr><th>#</th><th>Word</th></tr></thead>
+  <tbody>
+      <tr><td>1</td><td>word 01</td></tr>
+      <tr><td>2</td><td>word 02</td></tr>
+      <tr><td>3</td><td>word 03</td></tr>
+      <tr><td>4</td><td>word 04</td></tr>
+      <tr><td>5</td><td>word 05</td></tr>
+      <tr><td>6</td><td>word 06</td></tr>
+      <tr><td>7</td><td>word 07</td></tr>
+      <tr><td>8</td><td>word 08</td></tr>
+      <tr><td>9</td><td>word 09</td></tr>
+      <tr><td>10</td><td>word 10</td></tr>
+      <tr><td>11</td><td>word 11</td></tr>
+      <tr><td>12</td><td>word 12</td></tr>
+      <tr><td>13</td><td>word 13</td></tr>
+      <tr><td>14</td><td>word 14</td></tr>
+      <tr><td>15</td><td>word 15</td></tr>
+      <tr><td>16</td><td>word 16</td></tr>
+      <tr><td>17</td><td>word 17</td></tr>
+      <tr><td>18</td><td>word 18</td></tr>
+      <tr><td>19</td><td>word 19</td></tr>
+      <tr><td>20</td><td>word 20</td></tr>
+      <tr><td>21</td><td>word 21</td></tr>
+      <tr><td>22</td><td>word 22</td></tr>
+      <tr><td>23</td><td>word 23</td></tr>
+      <tr><td>24</td><td>word 24</td></tr>
+      <tr><td>25</td><td>word 25</td></tr>
+  </tbody>
+</table>
+
+<h2>Offers</h2>
+<!-- Plain divs only: filter items, deal cards, and two parts in each card. A card and a part of a card are never one group. -->
+<div>
+  <div><div><b>Sort</b> <i>Price</i></div><div><b>Brand</b> <i>Any</i></div><div><b>Stock</b> <i>Yes</i></div></div>
+  <div>
+    <div><h4>Deal 1</h4><div><b>Code</b> <i>CODE1</i></div><div><b>Ends</b> <i>Day 1</i></div><p>Terms apply 1</p></div>
+    <div><h4>Deal 2</h4><div><b>Code</b> <i>CODE2</i></div><div><b>Ends</b> <i>Day 2</i></div><p>Terms apply 2</p></div>
+    <div><h4>Deal 3</h4><div><b>Code</b> <i>CODE3</i></div><div><b>Ends</b> <i>Day 3</i></div><p>Terms apply 3</p></div>
+    <div><h4>Deal 4</h4><div><b>Code</b> <i>CODE4</i></div><div><b>Ends</b> <i>Day 4</i></div><p>Terms apply 4</p></div>
+  </div>
+</div>
+
+<p><button id="add" type="button">Add table</button></p>
+<div id="late"></div>
+<script>
+  document.getElementById('add').addEventListener('click', () => {
+    setTimeout(() => {
+      document.getElementById('late').innerHTML = '<h2>Late table</h2><table><tr><th>Late</th><th>Value</th></tr><tr><td>a</td><td>1</td></tr><tr><td>b</td><td>2</td></tr></table>';
+    }, 300);
+  });
+</script>
+</body>
+</html>

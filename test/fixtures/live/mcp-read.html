@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Egg shop</title>
+  <style>
+    .grid { display: flex; flex-wrap: wrap; gap: 8px; }
+    .card { width: 180px; padding: 8px; border: 1px solid #ccc; }
+    .mrp { text-decoration: line-through; color: #888; }
+    #results { display: none; }
+    table { border-collapse: collapse; margin: 12px 0; }
+    td, th { border: 1px solid #ccc; padding: 2px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Egg shop</h1>
+  <label>Search products <input type="search" id="q"></label>
+  <button type="button" id="go">Search</button>
+  <p id="hint">Type a product name, then press Search.</p>
+  <section id="results">
+    <h2 id="for">Results</h2>
+    <table>
+      <caption>Egg prices per 100</caption>
+      <thead><tr><th>Zone</th><th>Rate</th><th>Average</th></tr></thead>
+      <tbody>
+        <tr><td>Hyderabad</td><td>525</td><td>535.00</td></tr>
+        <tr><td>Pune</td><td>560</td><td>561.20</td></tr>
+        <tr><td>Chennai</td><td>540</td><td>538.10</td></tr>
+        <tr><td>Mumbai</td><td>575</td><td>570.40</td></tr>
+        <tr><td>Kolkata</td><td>530</td><td>529.90</td></tr>
+      </tbody>
+    </table>
+    <h2>Products</h2>
+    <div class="grid">
+      <div class="card"><div class="name">Farm Eggs 6 pcs</div><div class="price">&#8377;54</div><div class="mrp">&#8377;60</div><button type="button">ADD</button></div>
+      <div class="card"><div class="name">Brown Eggs 12 pcs</div><div class="price">&#8377;120</div><button type="button">ADD</button></div>
+      <div class="card"><div class="name">Duck Eggs 6 pcs</div><div class="price">&#8377;150</div><div class="mrp">&#8377;170</div><button type="button" disabled>Out of stock</button></div>
+      <div class="card"><div class="name">Free Range Eggs 6 pcs</div><div class="price">&#8377;99</div><div class="mrp">&#8377;110</div><button type="button">ADD</button></div>
+      <div class="card"><div class="name">Omega Eggs 10 pcs</div><div class="price">&#8377;135</div><button type="button">ADD</button></div>
+      <div class="card"><div class="name">Quail Eggs 12 pcs</div><div class="price">&#8377;80</div><div class="mrp">&#8377;95</div><button type="button">ADD</button></div>
+    </div>
+  </section>
+  <script>
+    document.getElementById('go').addEventListener('click', () => {
+      const q = document.getElementById('q').value.trim();
+      if (!q) return;
+      document.getElementById('for').textContent = 'Results for ' + q;
+      document.getElementById('hint').textContent = '';
+      document.getElementById('results').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

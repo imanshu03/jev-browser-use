@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<!-- Synthetic fixture for the page reader (test/fast/read.live.test.ts): same-testid cards in row containers. The
+     rows of the results merge into one group. A section label between rows ("Similar Products", "More to Explore")
+     keeps the cards below it apart, as on Zepto's search page. No script, no network. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Sections</title>
+<style>.grid{display:flex;gap:8px;margin:8px 0}.B4vNQ{display:block;width:150px;border:1px solid #ccc;padding:4px}</style>
+</head>
+<body>
+  <h1>Showing results for "chicken"</h1>
+  <div class="results">
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-1">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;101</span> <span class="mrp" style="text-decoration: line-through">&#8377;151</span></div>
+        <div class="nm"><span>Result item 1</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-2">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;102</span> <span class="mrp" style="text-decoration: line-through">&#8377;152</span></div>
+        <div class="nm"><span>Result item 2</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-3">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;103</span> <span class="mrp" style="text-decoration: line-through">&#8377;153</span></div>
+        <div class="nm"><span>Result item 3</span></div>
+      </a>
+    </div>
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-4">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;104</span> <span class="mrp" style="text-decoration: line-through">&#8377;154</span></div>
+        <div class="nm"><span>Result item 4</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-5">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;105</span> <span class="mrp" style="text-decoration: line-through">&#8377;155</span></div>
+        <div class="nm"><span>Result item 5</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-6">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;106</span> <span class="mrp" style="text-decoration: line-through">&#8377;156</span></div>
+        <div class="nm"><span>Result item 6</span></div>
+      </a>
+    </div>
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-7">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;107</span> <span class="mrp" style="text-decoration: line-through">&#8377;157</span></div>
+        <div class="nm"><span>Result item 7</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-8">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;108</span> <span class="mrp" style="text-decoration: line-through">&#8377;158</span></div>
+        <div class="nm"><span>Result item 8</span></div>
+      </a>
+    </div>
+  </div>
+  <div class="similar">
+    <span class="label">Similar Products</span>
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-9">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;109</span> <span class="mrp" style="text-decoration: line-through">&#8377;159</span></div>
+        <div class="nm"><span>Similar item 9</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-10">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;110</span> <span class="mrp" style="text-decoration: line-through">&#8377;160</span></div>
+        <div class="nm"><span>Similar item 10</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-11">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;111</span> <span class="mrp" style="text-decoration: line-through">&#8377;161</span></div>
+        <div class="nm"><span>Similar item 11</span></div>
+      </a>
+    </div>
+  </div>
+  <div class="explore">
+    <span class="label">More to Explore</span>
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-12">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;112</span> <span class="mrp" style="text-decoration: line-through">&#8377;162</span></div>
+        <div class="nm"><span>Explore item 12</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-13">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;113</span> <span class="mrp" style="text-decoration: line-through">&#8377;163</span></div>
+        <div class="nm"><span>Explore item 13</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-14">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;114</span> <span class="mrp" style="text-decoration: line-through">&#8377;164</span></div>
+        <div class="nm"><span>Explore item 14</span></div>
+      </a>
+    </div>
+    <div class="grid w-full">
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-15">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;115</span> <span class="mrp" style="text-decoration: line-through">&#8377;165</span></div>
+        <div class="nm"><span>Explore item 15</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-16">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;116</span> <span class="mrp" style="text-decoration: line-through">&#8377;166</span></div>
+        <div class="nm"><span>Explore item 16</span></div>
+      </a>
+      <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/item-17">
+        <div class="c5SZXs"><button class="cptQT7" tabindex="-1">ADD</button></div>
+        <div class="cQAjo7"><span class="pr">&#8377;117</span> <span class="mrp" style="text-decoration: line-through">&#8377;167</span></div>
+        <div class="nm"><span>Explore item 17</span></div>
+      </a>
+    </div>
+  </div>
+</body>
+</html>

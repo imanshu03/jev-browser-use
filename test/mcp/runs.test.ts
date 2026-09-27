@@ -77,6 +77,39 @@ describe("RunManager: start, busy, get", () => {
     expect(runs.get(run.id).sent).toEqual([{ field: "Reply", text: "Tuesday works." }]);
   });
 
+  it("last() gives the run that ended last, also after the finished list drops it; the run keeps a copy of its input", async () => {
+    const { runs, m } = setup();
+    expect(runs.last()).toBeNull();
+    const vars = { query: "eggs" };
+    const geo = { latitude: 12.9, longitude: 77.6 };
+    const first = runs.start(input("a", { vars, geo }), { interactive: false });
+    expect(first.input).toEqual(input("a", { vars, geo }));
+    vars.query = "milk";
+    expect(first.input?.vars).toEqual({ query: "eggs" });
+    expect(runs.last()).toBeNull();
+    m.last().resolve(result("done"));
+    await flush();
+    expect(runs.last()).toBe(first);
+    let lastRun = first;
+    for (let i = 0; i <= MCP.finishedRuns; i++) {
+      lastRun = runs.start(input(`t${i}`), { interactive: false });
+      m.last().resolve(result("done"));
+      await flush();
+    }
+    expect(() => runs.get(first.id)).toThrow(UnknownRunError);
+    expect(runs.last()).toBe(lastRun);
+  });
+
+  it("touch() moves lastRunEndedAt to now: the idle close counts from a scraper run or a page read", () => {
+    let clock = 1_000;
+    const runs = new RunManager({ start: manual().start, log: fakeLogger(), now: () => clock });
+    expect(runs.lastRunEndedAt()).toBeNull();
+    clock = 5_000;
+    runs.touch();
+    expect(runs.lastRunEndedAt()).toBe(5_000);
+    expect(runs.last()).toBeNull();
+  });
+
   it("the same task while active gives the same run; another task is BusyError", () => {
     const { runs, m } = setup();
     const run = runs.start(input("a"), { interactive: false });

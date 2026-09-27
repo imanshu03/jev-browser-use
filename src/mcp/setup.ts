@@ -103,7 +103,7 @@ export function baseConfig(env: NodeJS.ProcessEnv, log: Logger): RunConfig {
   return cfg;
 }
 
-/** The RunConfig of one browse input. profile = input.profile ?? base.profile; var keys are lowercased. */
+/** The RunConfig of one browse input. profile = input.profile ?? base.profile; var keys are lowercased; geo only from the input. */
 export function configFor(input: BrowseInput, base: RunConfig): RunConfig {
   const cfg: RunConfig = {
     ...base, task: input.task, headed: input.headed, confirm: input.confirm, dryRun: input.dry_run,
@@ -114,10 +114,12 @@ export function configFor(input: BrowseInput, base: RunConfig): RunConfig {
   delete cfg.goal;
   delete cfg.fallbackUrl;
   delete cfg.profile;
+  delete cfg.geo;
   const profile = input.profile ?? base.profile;
   if (profile !== undefined) cfg.profile = profile;
   if (input.url !== undefined) cfg.url = input.url;
   if (input.goal !== undefined) cfg.goal = input.goal;
+  if (input.geo !== undefined) cfg.geo = { ...input.geo };
   return cfg;
 }
 
@@ -220,7 +222,8 @@ export function fastStarter(d: StarterDeps): RunStarter {
     let key: SessionKey | null = null;
     try {
       const pre = prePlan(cfg, profiles);
-      if (pre.profileDirectory !== null) key = { engine, headed: cfg.headed, profileDirectory: pre.profileDirectory ?? null };
+      // Another geolocation needs another Chrome: the override is set on each tab that Chrome opens.
+      if (pre.profileDirectory !== null) key = { engine, headed: cfg.headed, profileDirectory: pre.profileDirectory ?? null, geo: cfg.geo ?? null };
     } catch { /* an unknown profile: the runner reports it */ }
     await d.session.prepare(key);
     const url = await d.session.currentUrl();

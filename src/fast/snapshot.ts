@@ -12,7 +12,8 @@
 // click follows the timers that the input started (`causalArmScript`); the page layer counts the requests over CDP. A
 // single-line text input also carries its chip facts, `token` (see TokenFacts in model.ts); they never reach Jev either.
 // An editor carries its mention chips, `mentions`, and the facts `bareText` and `otherAtoms`. Each action and the focus
-// carry `popup`, the popups around them.
+// carry `popup`, the popups around them. A pointer row with no control role (rule B, `cache.pointerText`) is a click
+// action with role "button" and `inferred`. The page height is the height of the scrolling element (quirks mode).
 // Dates: native date, month, datetime-local, time, and week inputs are fill actions with `date`. One month, one
 // day, and one year part in a container with no other text box are one date group: the snapshot shows the group
 // as one fill action with `date` (its label "<group label or Date>[ range start|end] (M/D/YYYY)", its value the
@@ -322,6 +323,29 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   };
   const writable=e=>!e.readOnly && e.getAttribute('aria-readonly')!=='true';
   const owner=e=>e.form||e.closest('form,[role="form"],dialog,[role="dialog"]');
+  // Rule B: the text of a pointer row, or null. A pointer row is a clickable element with no native or ARIA control role
+  // (a location suggestion on a quick-commerce site). Page script can see its click handler: an onclick function (React
+  // puts one on each element with an onClick prop) or the React props. It is not a control of "sel", is not inside one, and
+  // holds none. Its cursor is pointer and its parent's is not (the root of the pointer area). "shown" is true, and it
+  // holds 1-200 characters of text. The checks go from the cheapest to the most costly. popupScript uses it too.
+  const HANDLERS=['onClick','onMouseDown','onPointerDown'];
+  const handled=e=>{
+    // An onclick attribute first: a read of the property compiles the attribute, and a bad one fires an error on the page.
+    if (e.hasAttribute('onclick') || typeof e.onclick==='function') return true;
+    for (const k of Object.keys(e)) {
+      if (!k.startsWith('__reactProps$') && !k.startsWith('__reactEventHandlers$')) continue;
+      const p=e[k];
+      if (p && HANDLERS.some(h=>typeof p[h]==='function')) return true;
+    }
+    return false;
+  };
+  cache.pointerText=(e,sel,shown)=>{
+    if (!handled(e) || e.matches(sel) || e.parentElement?.closest(sel) || e.querySelector(sel)) return null;
+    const p=e.parentElement;
+    if (getComputedStyle(e).cursor!=='pointer' || (p && getComputedStyle(p).cursor==='pointer') || !shown(e)) return null;
+    const t=(e.innerText||'').replace(/\s+/g,' ').trim();
+    return t.length>=1 && t.length<=200 ? t : null;
+  };
   // Date groups and calendar grids get ids from their own counter. Code only compares them.
   const dates = cache.dates ||= {ids:new WeakMap(), next:1};
   const dateId = e => {
@@ -513,6 +537,22 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       if (editable && !native) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
+  // Pointer rows (rule B, cache.pointerText) that are enabled and in view, as the controls above. Each is a click with
+  // role "button", its text as the label, and "inferred". The rows in an open dialog come first; at most 60.
+  const dialogs=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]')].filter(visible), rows=[];
+  for (const e of document.body.querySelectorAll('*')) {
+    const text=cache.pointerText(e,selector,visible);
+    if (text===null || e.closest('[aria-disabled="true"]')) continue;
+    const r=e.getBoundingClientRect(), clip=clippedRect(e), x=clip.x+clip.w/2, y=clip.y+clip.h/2;
+    if (clip.w<=0 || clip.h<=0 || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    rows.push({e,text,r,top:dialogs.some(d=>d.contains(e))});
+  }
+  rows.sort((a,b)=>Number(b.top)-Number(a.top));
+  for (const {e,text,r} of rows.slice(0,60)) {
+    const popup=popupChain(e);
+    actions.push({node:identity(e),kind:'click',role:'button',label:text,value:'',inferred:true,
+      rect:{x:r.x,y:r.y,w:r.width,h:r.height},form:(f=>f?formId(f):null)(owner(e)),multiline:false,...(popup.length?{popup}:{})});
+  }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;
   while ((node=walker.nextNode()) && length<6000) {
@@ -523,7 +563,9 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       words.push(value); length+=value.length;
     }
   }
-  const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
+  // The scrolling element, not documentElement: a page with no DOCTYPE (quirks mode) scrolls the body, and the height of
+  // documentElement is then the viewport height, so no scroll_down would show.
+  const text=words.join('\n').slice(0,6000), height=(document.scrollingElement||document.documentElement).scrollHeight;
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
   // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
@@ -730,7 +772,8 @@ export function actScript(action: Action, keepChips = false): string {
 
 /**
  * Read the popup next to a chip field (`cache.popupsOf` of the last snapshot): open, its text, the texts of its
- * clickable options, and busy. With `focus`, focus the field first. Null when the node is gone.
+ * clickable options, and busy. With `focus`, focus the field first. Null when the node is gone. A clickable option is a
+ * PICK control, or a pointer row (rule B, `cache.pointerText`) that holds no PICK control; both in document order.
  */
 export function popupScript(action: Action, focus: boolean): string {
   const arg = JSON.stringify({ node: action.node, focus });
@@ -741,10 +784,14 @@ export function popupScript(action: Action, focus: boolean): string {
   const shown=x=>x.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
   const PICK='button,a[href],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"],[role="gridcell"],[role="button"]';
   const popups=c.popupsOf(e,c.tokenBox(e)), picks=[];
-  for (const p of popups) for (const x of p.querySelectorAll(PICK)) {
-    const outer=x.parentElement?.closest(PICK);
-    if (picks.length>=20 || (outer && p.contains(outer)) || x.matches(':disabled') || x.closest('[aria-disabled="true"]') || !shown(x)) continue;
-    const t=(x.getAttribute('aria-label')||x.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200);
+  for (const p of popups) for (const x of p.querySelectorAll('*')) {
+    if (picks.length>=20 || x.closest('[aria-disabled="true"]')) continue;
+    let t=null;
+    if (x.matches(PICK)) {
+      const outer=x.parentElement?.closest(PICK);
+      if ((outer && p.contains(outer)) || x.matches(':disabled') || !shown(x)) continue;
+      t=(x.getAttribute('aria-label')||x.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200);
+    } else if (c.pointerText) t=c.pointerText(x,PICK,shown);
     if (t) picks.push(t);
   }
   const text=popups.map(p=>p.innerText||'').join('\\n').replace(/[ \\t]+/g,' ').trim().slice(0,2000);

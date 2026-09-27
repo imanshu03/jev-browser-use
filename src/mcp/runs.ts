@@ -8,6 +8,7 @@
 // ran with no dialog holds its audit.
 import { randomBytes } from "node:crypto";
 import { flatText, sanitizeText } from "../fast/generate.js";
+import type { GeoPoint } from "../fast/model.js";
 import { cutText } from "../fast/policy.js";
 import type { ConfirmDetail, Human, Logger, PauseKind, PauseResult, RunnerHints, TextReply, TextRequest, TextSource, TextWriteOptions } from "../io.js";
 import { emptyResult } from "../io.js";
@@ -23,6 +24,8 @@ export interface BrowseInput {
   goal?: Goal; vars?: Record<string, string>; max_steps?: number; confirm: "auto" | "always" | "never" | "autonomous"; dry_run: boolean;
   /** With confirm "autonomous" only: the words of the user's own message that turn the mode on. */
   user_said?: string;
+  /** The geolocation that the tabs of the run's Chrome report. */
+  geo?: GeoPoint;
 }
 export interface RunHooks {
   text: TextSource; human: Human; signal: AbortSignal; log: Logger; hints: RunnerHints;
@@ -64,6 +67,7 @@ export interface Run {
   untyped: string[];              // labels of fields whose assistant text no fill typed
   autonomous?: RunAutonomy | null; // set for confirm "autonomous"
   sent: { field: string; text: string }[]; // texts that a send of the run took out of the page
+  input?: BrowseInput;            // the browse input; scraper save reads its geo
   redact(s: string): string;      // the runner's redactor, via the per-run logger, plus the API key removal
 }
 
@@ -121,6 +125,7 @@ class RunState implements Run {
   autonomous: RunAutonomy | null = null;
   confirm: BrowseInput["confirm"] = "auto";
   sent: { field: string; text: string }[] = [];
+  input?: BrowseInput;
   /** The runner's redactor followed by the key removal. The per-run logger replaces it. */
   redactor: (s: string) => string;
   readonly controller = new AbortController();
@@ -189,6 +194,8 @@ export class RunManager {
   private current: RunState | null = null;
   private count = 0;
   private lastEnded: number | null = null;
+  /** The run that ended last. Its page is the session page, so read_page uses its redactor. */
+  private lastRun: RunState | null = null;
   private closed = false;
 
   constructor(deps: RunManagerDeps) {
@@ -218,6 +225,7 @@ export class RunManager {
     }
     const run = new RunState(`r${++this.count}-${randomBytes(2).toString("hex")}`, input.task, this.now(), (s) => stripKey(s, this.secret()));
     run.confirm = input.confirm;
+    run.input = { ...input, ...(input.vars ? { vars: { ...input.vars } } : {}) };
     if (input.confirm === "autonomous") run.autonomous = { userSaid: input.user_said ?? "", unattended: 0 };
     this.runs.set(run.id, run);
     this.current = run;
@@ -337,6 +345,19 @@ export class RunManager {
   /** null before the first run ends. */
   lastRunEndedAt(): number | null {
     return this.lastEnded;
+  }
+
+  /**
+   * A scraper run or a page read used the browser now. The idle close of Chrome counts from the last use, so that it
+   * never closes Chrome in the middle of a scraper run.
+   */
+  touch(): void {
+    this.lastEnded = this.now();
+  }
+
+  /** The run that ended last, or null before the first run ends. It stays after the list of finished runs drops it. */
+  last(): Run | null {
+    return this.lastRun;
   }
 
   /** Cancel the active run, as cancel does. Later starts throw. */
@@ -493,6 +514,7 @@ export class RunManager {
     run.endedAt = this.now();
     if (this.current === run) this.current = null;
     this.lastEnded = run.endedAt;
+    this.lastRun = run;
     const finished = [...this.runs.values()].filter((r) => r.finished);
     while (finished.length > MCP.finishedRuns) {
       const old = finished.shift();

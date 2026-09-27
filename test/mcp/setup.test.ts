@@ -122,6 +122,15 @@ describe("configFor", () => {
     expect(configFor(input({ profile: "none" }), base).profile).toBe("none");
   });
 
+  it("copies input.geo; a geo of the base never goes to a run", () => {
+    const geo = { latitude: 12.9352, longitude: 77.6245 };
+    const input1 = input({ geo });
+    const cfg = configFor(input1, base);
+    expect(cfg.geo).toEqual(geo);
+    expect(cfg.geo).not.toBe(input1.geo);
+    expect("geo" in configFor(input(), { ...base, geo: { latitude: 1, longitude: 2 } })).toBe(false);
+  });
+
   it("leaves url, goal, and fallbackUrl absent when the input has none", () => {
     const cfg = configFor(input(), { ...base, url: "https://old", goal: "check", fallbackUrl: "https://old" });
     expect("url" in cfg || "goal" in cfg || "fallbackUrl" in cfg).toBe(false);
@@ -276,11 +285,23 @@ describe("fastStarter", () => {
   it("a flag profile gives prepare(key); none gives a temporary key; no profile uses the workspace default", async () => {
     const t = setup();
     await t.start(input({ profile: "BP" }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 2" });
+    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 2", geo: null });
     await t.start(input({ profile: "none", headed: false, engine: "chromium" }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "chromium", headed: false, profileDirectory: null });
+    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "chromium", headed: false, profileDirectory: null, geo: null });
     await t.start(input(), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 14" });
+    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 14", geo: null });
+  });
+
+  it("the session key and the runner config have the geolocation of the input", async () => {
+    const t = setup();
+    const geo = { latitude: 12.9352, longitude: 77.6245, accuracy: 30 };
+    await t.start(input({ profile: "none", geo }), t.hooks);
+    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: null, geo });
+    expect(deps().cfg.geo).toEqual(geo);
+    await t.start(input({ profile: "BP", geo: { latitude: 1, longitude: 2 } }), t.hooks);
+    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 2", geo: { latitude: 1, longitude: 2 } });
+    await t.start(input({ profile: "BP" }), t.hooks);
+    expect("geo" in deps().cfg).toBe(false);
   });
 
   it("an unknown profile gives prepare(null); the runner reports the error", async () => {

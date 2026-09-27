@@ -15,6 +15,7 @@ import { createLogger } from "../io.js";
 import { createTransport } from "../transport.js";
 import { MCP, MCP_ENV } from "./limits.js";
 import { RunManager, stripKey } from "./runs.js";
+import { SCRAPE_KIT } from "./scraper-tool.js";
 import { buildServer } from "./server.js";
 import { baseConfig, createJevLink, fastStarter, findPackageRoot, loadPackageEnv } from "./setup.js";
 import { startIdleTimers } from "./timers.js";
@@ -45,10 +46,12 @@ const runs = new RunManager({
   precheck: () => void jev.client(), forceStop: () => session.close(), secret: () => jev.key(),
 });
 
-// 5. The server. JEV_MCP_REVIEW_TEXT is read once, when the server is built.
+// 5. The server. JEV_MCP_REVIEW_TEXT is read once, when the server is built. read_page and scraper use the same
+// session and the scrape kit; a scraper run makes no model call.
 const handle = serveStdio(() => buildServer({
   runs, version: VERSION, env, profiles, secret: () => jev.key(), engine: base.engine === "chromium" ? "chromium" : "cdp", log,
   closeBrowser: async () => { const open = session.chrome !== null; await session.close(); return open; },
+  scrape: { kit: SCRAPE_KIT, session, base },
 }), { onerror: (e) => log.warn(`mcp: ${stripKey(e.message, jev.key())}`) });
 
 // 6. Idle timers. Both are unref'd, so they never keep the process alive.

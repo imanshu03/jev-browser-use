@@ -1,6 +1,6 @@
 import type { ChoiceQuestion } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkBudget } from "../../src/jev.js";
 import type { Answers } from "../../src/jev.js";
 import { extractSpans } from "../../src/task.js";
@@ -10,6 +10,19 @@ import { BLOCKED_VALUE_GEN, DATE_NONE, DATE_RULE, DATE_VALUE_Q, DONE_SENT, DONE_
 import type { StepInput } from "../../src/fast/policy.js";
 import type { Action, DateInfo, Observation, TokenFacts } from "../../src/fast/model.js";
 import { el, obs, scrollDown, scrollUp } from "./fakes.js";
+
+// checkBudget passes through to the real one. A test can make the next `fail` checks throw, to reach a given trim rung.
+const budget = vi.hoisted(() => ({ fail: 0 }));
+vi.mock("../../src/jev.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/jev.js")>();
+  return {
+    ...real,
+    checkBudget: (state: Parameters<typeof real.checkBudget>[0], questions: Parameters<typeof real.checkBudget>[1]): void => {
+      if (budget.fail > 0) { budget.fail -= 1; throw new real.BudgetError(0, 0, "request"); }
+      real.checkBudget(state, questions);
+    },
+  };
+});
 
 const criteriaKeys = (q: unknown): string[] => Object.keys((q as ChoiceQuestion | undefined)?.criteria ?? {});
 /** The option key of the target head row whose element string carries `label`. */
@@ -137,6 +150,56 @@ describe("buildStep", () => {
     expect(lines).toHaveLength(LIMITS.answerLines);
     expect(lines[0]).toHaveLength(LIMITS.answerLineChars);
     expect(lines.filter((l) => l === "a")).toHaveLength(1);
+  });
+  it("answerLines takes at most `max` lines", () => {
+    expect(answerLines("a\nb\nc\nd", 2)).toEqual(["a", "b"]);
+    expect(answerLines("a\na\nb", 2)).toEqual(["a", "b"]);
+    expect(answerLines("a\nb", 0)).toEqual([]);
+  });
+  it("on each trim rung, every answer_line option is a line of the page text that the state carries", () => {
+    // 700 short lines, about 13 000 chars: on the rungs with 3000 and 1500 chars the text holds fewer than 254 lines.
+    const text = Array.from({ length: 700 }, (_, i) => `row ${i} value ${i * 7}`).join("\n");
+    const chars = [LIMITS.textChars, LIMITS.textChars, LIMITS.textCharsTrimmed, LIMITS.textCharsMin, LIMITS.textCharsMin, LIMITS.textCharsMin];
+    for (let rung = 0; rung < chars.length; rung++) {
+      budget.fail = rung;
+      const b = buildStep(input({ goal: "extract", obs: obs("https://a.b/", [el("e1", "click", "Home", "link")], text) }));
+      expect(budget.fail).toBe(0);
+      expect(b.meta.cuts.filter((c) => c.startsWith("over budget"))).toHaveLength(rung);
+      const shown = (b.state as { page: { text: string } }).page.text;
+      expect(shown).toBe(text.slice(0, chars[rung]));
+      const lines = new Set(shown.split("\n").map((l) => l.trim()));
+      const options = Object.entries((b.questions["answer_line"] as ChoiceQuestion).criteria).filter(([k]) => k !== "none");
+      expect(options.length, `rung ${rung}`).toBeGreaterThan(0);
+      for (const [k, v] of options) {
+        expect(lines.has(v as string), `rung ${rung} ${k}: ${String(v)}`).toBe(true);
+        expect(b.meta.lines[k]).toBe(v);
+      }
+      // The last rung keeps the head with the first 60 lines.
+      if (rung === chars.length - 1) {
+        expect(options).toHaveLength(60);
+        expect(options[0]?.[1]).toBe("row 0 value 0");
+        expect(b.meta.cuts.at(-1)).toBe("over budget: answer_line cut to 60 lines");
+      } else expect(options.length).toBe(Math.min(LIMITS.answerLines, lines.size));
+    }
+  });
+  it("the last rung keeps answer_line with at most 60 lines when the state is near the budget, and the request fits", () => {
+    // Long history entries fill the state; 400 short lines make answer_line the longest question. Some history size
+    // lands on the last rung: the rung before it is over budget with 254 lines, and 60 lines fit.
+    const text = Array.from({ length: 400 }, (_, i) => `v${i}`).join("\n");
+    let found: ReturnType<typeof buildStep> | null = null;
+    for (let n = 3000; n <= 9000 && !found; n += 50) {
+      const history = Array.from({ length: 10 }, (_, i) => ({ action: `a${i} ${"h".repeat(n)}`, kind: "click", text: null, page_changed: true, step: i + 1, url: "u", operation: "CLICK" }));
+      let b: ReturnType<typeof buildStep>;
+      try { b = buildStep(input({ goal: "extract", history, obs: obs("https://a.b/", [el("e1", "click", "Home", "link")], text) })); } catch { break; }
+      if (b.meta.cuts.includes("over budget: answer_line cut to 60 lines")) found = b;
+    }
+    expect(found).not.toBeNull();
+    const b = found as ReturnType<typeof buildStep>;
+    const keys = criteriaKeys(b.questions["answer_line"]);
+    expect(keys.length).toBeLessThanOrEqual(61);
+    expect(keys.at(-1)).toBe("none");
+    expect(keys.slice(0, 2)).toEqual(["l1", "l2"]);
+    expect(() => checkBudget(b.state, b.questions)).not.toThrow();
   });
   it("recent_actions carries the last ten history entries with four fields", () => {
     const history = Array.from({ length: 12 }, (_, i) => ({ action: `a${i}`, kind: "click", text: null, page_changed: true, step: i + 1, url: "u", operation: "CLICK" }));

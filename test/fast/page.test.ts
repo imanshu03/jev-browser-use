@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { CdpClient, Chrome } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
-import { CAUSAL_END_SCRIPT, SNAPSHOT_SCRIPT, causalArmScript } from "../../src/fast/snapshot.js";
+import { CAUSAL_END_SCRIPT, SNAPSHOT_SCRIPT, causalArmScript, settleScript } from "../../src/fast/snapshot.js";
+import { SCROLL_STATE_SCRIPT, readScript } from "../../src/fast/read.js";
 import { LIMITS } from "../../src/types.js";
 import { fakeLogger } from "../fakes.js";
 
@@ -587,5 +588,143 @@ describe("openPage fill: key-less edit commands, focus check, and separators by 
     const { page, obs } = await open(c);
     await expect(page.act(doc, obs, "x")).rejects.toBeInstanceOf(StalePage);
     expect(inserts(c)).toEqual([]);
+  });
+});
+
+// ---- The page reader (Page.read) and the loader's scroll (Page.wheel).
+
+describe("openPage.read", () => {
+  const READ = readScript();
+  const isReady = (expr: string) => expr.startsWith("[document.readyState");
+  const pageRead = (url: string) => ({ version: 1, url, title: "T", meta: { headings: [], selected: [], lang: "" }, tables: [], groups: [], text: [], stats: { tables_seen: 0, groups_seen: 0, nodes: 3, scroll_height: 900, viewport_height: 860, truncated: false } });
+
+  it("waits for readyState complete, then evaluates the reader once and sets stats.ms", async () => {
+    const states = ["loading", "interactive", "complete"];
+    const c = scriptedChrome((expr) => {
+      if (isReady(expr)) return [states.length > 1 ? states.shift() : states[0], 111];
+      if (expr === READ) return pageRead("https://example.test/list");
+      return null;
+    });
+    const log = fakeLogger();
+    const page = await openPage(c.chrome, { settleTimeoutMs: 2000, log });
+    const read = await page.read!({});
+    expect(read.url).toBe("https://example.test/list");
+    expect(typeof read.stats.ms).toBe("number");
+    expect(read.stats.ms).toBeGreaterThanOrEqual(0);
+    expect(read.stats.ms).toBeLessThan(500);
+    const exprs = c.sent.filter((s) => s.method === "Runtime.evaluate").map((s) => String(s.params["expression"]));
+    expect(exprs.filter(isReady)).toHaveLength(3);
+    expect(exprs.filter((e) => e === READ)).toHaveLength(1);
+    expect(log.lines.some((l) => /read waited 2 polls/.test(l))).toBe(true);
+  });
+
+  it("passes the options to the script", async () => {
+    const want = readScript({ text: false, limits: { rows: 10 } });
+    const c = scriptedChrome((expr) => (isReady(expr) ? ["complete", 1] : expr === want ? pageRead("https://example.test/a") : null));
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    await expect(page.read!({ text: false, limits: { rows: 10 } })).resolves.toMatchObject({ url: "https://example.test/a" });
+  });
+
+  it("a document that stays below complete is read after the cap with one warning, and not waited for again", async () => {
+    const c = scriptedChrome((expr) => (isReady(expr) ? ["interactive", 222] : expr === READ ? pageRead("https://example.test/slow") : null));
+    const log = fakeLogger();
+    const page = await openPage(c.chrome, { settleTimeoutMs: 100, log });
+    const t0 = Date.now();
+    await page.read!();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(90);
+    expect(log.lines.filter((l) => /not complete after 100 ms; reading it as is/.test(l))).toHaveLength(1);
+    const t1 = Date.now();
+    await page.read!();
+    expect(Date.now() - t1).toBeLessThan(50);
+    expect(log.lines.filter((l) => /not complete/.test(l))).toHaveLength(1);
+  });
+
+  it("a destroyed context and a null value (no body yet) are read again", async () => {
+    let n = 0;
+    const c = scriptedChrome((expr) => {
+      if (isReady(expr)) return ["complete", 1];
+      if (expr !== READ) return null;
+      n += 1;
+      if (n === 1) throw cdpError("Execution context was destroyed.");
+      if (n === 2) return null;
+      return pageRead("https://example.test/next");
+    });
+    const page = await openPage(c.chrome, { settleTimeoutMs: 2000, log: fakeLogger() });
+    await expect(page.read!()).resolves.toMatchObject({ url: "https://example.test/next" });
+    expect(n).toBe(3);
+  });
+
+  it("a reader that never returns throws StalePage at the cap and names the page error", async () => {
+    const c: ReturnType<typeof scriptedChrome> = scriptedChrome((expr) => (isReady(expr) ? ["complete", 1] : null));
+    const send = c.client.send.bind(c.client);
+    c.client.send = async (method, params, sid) => {
+      if (method === "Runtime.evaluate" && params?.["expression"] === READ) {
+        await send(method, params, sid);
+        return { exceptionDetails: { text: "Uncaught", exception: { description: "TypeError: x is not a function\n    at <anonymous>" } } };
+      }
+      return send(method, params, sid);
+    };
+    const page = await openPage(c.chrome, { settleTimeoutMs: 120, log: fakeLogger() });
+    const e = await page.read!().catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(StalePage);
+    expect((e as Error).message).toBe("Page did not settle (TypeError: x is not a function)");
+  });
+
+  it("the settle that an input left runs before the reader, once", async () => {
+    const c = scriptedChrome((expr) => (isReady(expr) ? ["complete", 1] : expr === READ ? pageRead("https://example.test/a") : null));
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    await page.press("Enter");
+    const mark = c.sent.length;
+    await page.read!();
+    const after = c.sent.slice(mark).filter((s) => s.method === "Runtime.evaluate").map((s) => String(s.params["expression"]));
+    const settle = after.indexOf(settleScript(null));
+    expect(settle).toBeGreaterThanOrEqual(0);
+    expect(settle).toBeLessThan(after.indexOf(READ));
+    const mark2 = c.sent.length;
+    await page.read!();
+    expect(c.sent.slice(mark2).some((s) => s.params["expression"] === settleScript(null))).toBe(false);
+  });
+});
+
+describe("openPage.wheel", () => {
+  const state = { y: 400, height: 3000, viewport: 860, width: 1280, nodes: 250 };
+
+  it("sends one mouseWheel at the viewport centre, settles the frames, and returns the state without the width", async () => {
+    const c = scriptedChrome((expr) => (expr === SCROLL_STATE_SCRIPT ? state : null));
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    const s = await page.wheel!(774);
+    expect(s).toEqual({ y: 400, height: 3000, viewport: 860, nodes: 250 });
+    const wheels = c.sent.filter((x) => x.method === "Input.dispatchMouseEvent");
+    expect(wheels).toHaveLength(1);
+    expect(wheels[0]?.params).toMatchObject({ type: "mouseWheel", x: 640, y: 430, deltaX: 0, deltaY: 774 });
+    const exprs = c.sent.map((x) => (x.method === "Runtime.evaluate" ? String(x.params["expression"]) : x.method));
+    expect(exprs.indexOf(settleScript(null))).toBeGreaterThan(exprs.indexOf("Input.dispatchMouseEvent"));
+    expect(exprs.at(-1)).toBe(SCROLL_STATE_SCRIPT);
+  });
+
+  it("wheel(0) sends no input and only reads the state", async () => {
+    const c = scriptedChrome((expr) => (expr === SCROLL_STATE_SCRIPT ? state : null));
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    await page.wheel!(0);
+    expect(c.sent.filter((x) => x.method.startsWith("Input."))).toEqual([]);
+    expect(c.sent.filter((x) => x.method === "Runtime.evaluate")).toHaveLength(1);
+  });
+
+  it("leaves no pending settle: the next observe runs no settle script", async () => {
+    const snap = rawSnapshot("https://example.test/list", "complete", "rows");
+    const c = scriptedChrome((expr) => (expr === SCROLL_STATE_SCRIPT ? state : expr === SNAPSHOT_SCRIPT ? snap : null));
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    await page.wheel!(500);
+    const mark = c.sent.length;
+    await page.observe();
+    const exprs = c.sent.slice(mark).map((x) => String(x.params["expression"] ?? x.method));
+    expect(exprs).toEqual([SNAPSHOT_SCRIPT]);
+  });
+
+  it("a document that is navigating throws StalePage before any input", async () => {
+    const c = scriptedChrome(() => { throw cdpError("Cannot find context with specified id"); });
+    const page = await openPage(c.chrome, { settleTimeoutMs: 300, log: fakeLogger() });
+    await expect(page.wheel!(500)).rejects.toBeInstanceOf(StalePage);
+    expect(c.sent.filter((x) => x.method === "Input.dispatchMouseEvent")).toEqual([]);
   });
 });

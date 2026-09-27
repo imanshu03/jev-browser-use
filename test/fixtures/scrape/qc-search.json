@@ -1,0 +1,52 @@
+{
+  "kind": "jev-scraper",
+  "format": 1,
+  "name": "qc-search",
+  "version": 2,
+  "created_at": "2026-09-27T12:00:00+05:30",
+  "updated_at": "2026-09-28T09:00:00+05:30",
+  "task": "On blinkit.com set the delivery location to {area} and search for {query}",
+  "want": "One row per product card: name, pack size, price, MRP, and whether it can be added to the cart.",
+  "params": { "area": "Koramangala", "query": "chicken curry cut" },
+  "start_url": "https://blinkit.com/",
+  "steps": [
+    { "op": "click", "target": { "role": "button", "name": "Delivery in", "match": "starts" }, "optional": true },
+    { "op": "fill", "target": { "role": "textbox", "name": "search delivery location" }, "value": "{area}" },
+    { "op": "click", "target": { "role": "button", "name": "{area}", "match": "starts" } },
+    { "op": "click", "target": { "role": "link", "name": "Search" } },
+    { "op": "fill", "target": { "role": "textbox", "name": "Search", "match": "starts" }, "value": "{query}" },
+    { "op": "press", "key": "Enter" },
+    { "op": "wait", "for_text": "ADD", "ms": 8000 }
+  ],
+  "load": { "mode": "scroll", "max_scrolls": 10 },
+  "extract": {
+    "source": "records",
+    "match": { "shape": "div", "parent": "div", "testid": null, "slot_keys": ["div>div@2", "div>div.tw-text-300"] },
+    "fields": {
+      "name": { "from": "slot", "pick": [ { "by": "key", "key": "div>div.tw-text-300" }, { "by": "longest" } ], "parser": "text" },
+      "pack": { "from": "slot", "pick": [ { "by": "parse", "parser": "quantity" } ], "parser": "quantity" },
+      "price": { "from": "slot", "pick": [ { "by": "parse", "parser": "price", "struck": false } ], "parser": "price" },
+      "mrp": { "from": "slot", "pick": [ { "by": "parse", "parser": "price", "struck": true } ], "parser": "price" },
+      "can_add": { "from": "slot", "pick": [ { "by": "fact", "fact": "button" } ], "parser": { "kind": "boolean", "true_words": ["add"], "false_words": ["out of stock", "notify me"] } },
+      "area": { "from": "param", "name": "area" }
+    },
+    "filter": [ { "field": "name", "op": "present" } ],
+    "key": ["name", "pack"]
+  },
+  "validate": { "min_rows": 5, "required": ["name", "price"], "required_ratio": 0.8 },
+  "fingerprint": {
+    "source": "records",
+    "headers": [],
+    "slot_keys": ["div>div@2", "div>div.tw-text-300"],
+    "fields": {
+      "name": { "type": "string", "slot": { "key": "div>div.tw-text-300", "struck": false, "button": false, "heading": false } },
+      "pack": { "type": "string" }, "price": { "type": "number" }, "mrp": { "type": "number" }, "can_add": { "type": "boolean" }, "area": { "type": "string" }
+    },
+    "keys": [],
+    "row_count": 24,
+    "url_path": "/s/"
+  },
+  "history": [
+    { "at": "2026-09-27T12:00:00+05:30", "level": "author", "reason": "jev-scrape new", "from_version": 0, "previous": null }
+  ]
+}

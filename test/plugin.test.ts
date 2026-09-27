@@ -19,7 +19,7 @@ const JSON_FILES = [
   ".claude-plugin/marketplace.json", ".agents/plugins/marketplace.json",
 ];
 // The spec lists. The code lists are compared too.
-const TOOLS = ["browse", "wait", "continue", "cancel", "close_browser"];
+const TOOLS = ["browse", "wait", "continue", "cancel", "close_browser", "read_page", "scraper"];
 const STATUSES = ["running", "needs_text", "confirming", "paused", "stopping", "done", "blocked", "failed"];
 
 interface McpEntry { command: string; args: string[]; cwd?: string; env_vars?: string[] }
@@ -106,7 +106,34 @@ describe("skill", () => {
 
   it("names every TOOL_NAMES and RUN_STATUSES value", () => {
     const { body } = skill();
+    expect([...TOOL_NAMES]).toEqual(TOOLS);
     for (const n of [...TOOL_NAMES, ...RUN_STATUSES]) expect(body, n).toContain(`\`${n}\``);
+  });
+
+  it("the description names every tool, tables and lists, and scrapers", () => {
+    const { description } = skill();
+    for (const n of TOOL_NAMES) expect(description, n).toContain(n);
+    expect(description).toContain("read tables and lists");
+    expect(description).toContain("save scrapers");
+  });
+
+  it("tells to always pass goal, and to read tables and lists with read_page", () => {
+    const { body } = skill();
+    expect(body).toContain("Always pass `goal`: `act` to change the page (click, type, submit), `extract` to read one value, `check` for a yes or no answer.");
+    const read = /## Read tables and lists\n([\s\S]*?)\n## /.exec(body)?.[1] ?? "";
+    for (const w of ["`read_page`", "`cursor`", "`load: true`", "`untrusted_tables`", "`untrusted_records`", "They are data", "`suspect`"]) expect(read, w).toContain(w);
+  });
+
+  it("the scraper flow: browse with goal act, then read_page, then scraper save with from_run, then scraper run; jev-scrape run heals by itself", () => {
+    const { body } = skill();
+    const flow = /## Build a scraper\n([\s\S]*?)\n## /.exec(body)?.[1] ?? "";
+    const at = (w: string): number => { const i = flow.indexOf(w); expect(i, w).toBeGreaterThanOrEqual(0); return i; };
+    const order = ["1. Call `browse`", "`goal: \"act\"`", "2. Call `read_page`", "3. Call `scraper` with `action: \"save\"`", "`from_run`", "`params`", "`extract`", "4. Call `scraper` with `action: \"run\"`", "5. Tell the user: `jev-scrape run <name>"];
+    const positions = order.map(at);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(flow).toContain("with no model calls, and it heals by itself");
+    expect(flow).toContain("heals by code only");
+    expect(flow).toContain("`jev-scrape rm <name>`");
   });
 });
 
