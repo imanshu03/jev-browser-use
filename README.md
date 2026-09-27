@@ -70,7 +70,8 @@ The result goes to stdout as one JSON document. The trace goes to stderr. The ex
 | `--goal <act\|extract\|check>` | Skips the goal question. |
 | `--headed` | Shows the window and enables the pause hand-off for sign-in walls. |
 | `--cdp <port>` | One-shot attachment to a running browser. `cdp` and `chromium` use its DevTools WebSocket; `vercel` uses `agent-browser`. Launch binary and profile-copy settings do not change the attached browser. |
-| `--var key=value` | A value Jev may type. Repeatable. Keys that contain pass, pin, otp, secret, token, or code are secret and redacted. |
+| `--geo <lat,lon[,accuracy]>` | `cdp` and `chromium`. The location that pages get from the geolocation API, for sites that ask for the user's location ("Detect my location"). Degrees; accuracy in metres, default 50. Example: `--geo 12.9352,77.6245`. With `vercel` it is a usage error. |
+| `--var key=value` | A value Jev may type. Repeatable. Keys that contain pass, pin, otp, secret, token, or code are secret and redacted, except `pin_code` and `postal_code`. |
 | `--max-steps <n>` | Default 25, max 100. `JEV_BROWSER_MAX_STEPS` sets the default. Without this flag, a `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 is a usage error. |
 | `--step-timeout <ms>` | Per browser command. Default 30000. |
 | `--run-timeout <ms>` | Default 600000. |
@@ -215,7 +216,8 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 ./bin/jev-scrape.js run zepto-search --param query="brown bread" --format csv --out bread.csv
 
 # A page that shows the table at its URL: no navigation, no Jev key needed.
-./bin/jev-scrape.js new necc-now --no-nav --url https://www.e2necc.com/home/eggprice --want "one row per zone and day"
+./bin/jev-scrape.js new necc-now --no-nav --url https://www.e2necc.com/home/eggprice \
+  --task "NECC daily egg prices" --want "one row per zone and day"
 ```
 
 | Command | What it does |
@@ -322,11 +324,13 @@ Without a key, `browse` returns an error that tells how to add one. When the ser
 
 | Tool | Effect |
 |---|---|
-| `browse` | Starts a task. `task` is required. Optional: `url`, `profile` (a name, a directory, or `none`), `headed` (default `true`), `engine` (`cdp` or `chromium`), `goal`, `vars`, `max_steps`, `confirm` (`auto`, `always`, `never`, or `autonomous`; default `auto`), `user_said` (with `autonomous` only, 1 to 300 characters), `dry_run`, and `wait_s`. Without `url`, the task continues on the page where the last run ended. A `url` loads the page again. |
+| `browse` | Starts a task. `task` is required. Optional: `url`, `profile` (a name, a directory, or `none`), `headed` (default `true`), `engine` (`cdp` or `chromium`), `goal`, `vars`, `max_steps`, `confirm` (`auto`, `always`, `never`, or `autonomous`; default `auto`), `user_said` (with `autonomous` only, 1 to 300 characters), `dry_run`, `wait_s`, and `geo` (`latitude`, `longitude`, optional `accuracy` in metres: the location that pages get from the geolocation API). Without `url`, the task continues on the page where the last run ended. A `url` loads the page again. |
 | `wait` | Waits for the run to change, then returns its state. It does not change the run. |
 | `continue` | Gives the text that a run asks for (`values`, field id to text), or declines the request (`decline`, a short reason). |
 | `cancel` | Stops a run. |
 | `close_browser` | Closes the Chrome that the server opened. It returns an error while a run is active. |
+| `read_page` | Reads the page that the last run left open: its tables, lists of repeated records (such as product cards), and form values. Code reads the whole page, also below the fold; Jev does not run and nothing is clicked. Optional: `sets` (only these tables `t1`... and record groups `g1`...), `text` (also the page text), `load` (first scroll until the page stops growing), `cursor` (the next part of a large read), and `max_tokens`. It returns an error while a run is active. |
+| `scraper` | Saves, runs, lists, shows, or deletes a scraper (`action`: `save`, `run`, `list`, `show`, or `delete`). `save` takes `name`, `task`, `want`, `extract`, `from_run`, and `params` after a `browse` run and a `read_page` call. `run` replays the scraper in this Chrome and returns the rows; it heals by code only. `delete` asks the user in a dialog. See [Scraping](#scraping-jev-scrape). |
 
 `browse`, `wait`, and `continue` wait up to `wait_s` seconds (default 40, maximum 50). They return earlier when the run needs the assistant or ends. Each result holds the run state as text JSON and as `structuredContent`. The field `next` tells the assistant what to do.
 
@@ -396,7 +400,7 @@ Risks of this mode:
 
 ### Permissions
 
-In Claude Code, add allow rules only for the three tools that do not act on a page:
+In Claude Code, add allow rules only for the four tools that do not act on a page:
 
 ```json
 {
@@ -404,15 +408,16 @@ In Claude Code, add allow rules only for the three tools that do not act on a pa
     "allow": [
       "mcp__plugin_jev-browser_jev__wait",
       "mcp__plugin_jev-browser_jev__cancel",
-      "mcp__plugin_jev-browser_jev__close_browser"
+      "mcp__plugin_jev-browser_jev__close_browser",
+      "mcp__plugin_jev-browser_jev__read_page"
     ]
   }
 }
 ```
 
-Keep `browse` and `continue` on prompt. The prompt shows the task, the URL, `confirm`, `user_said`, and the text before a page gets them. In bypass mode, set `JEV_MCP_REVIEW_TEXT=1`. Claude Code then prompts for every `continue` call, also in bypass mode, and shows the values.
+Keep `browse`, `continue`, and `scraper` on prompt: a `scraper` run replays saved steps on a live site, and `save` writes a file. The prompt shows the task, the URL, `confirm`, `user_said`, and the text before a page gets them. In bypass mode, set `JEV_MCP_REVIEW_TEXT=1`. Claude Code then prompts for every `continue` call, also in bypass mode, and shows the values.
 
-In its default approval mode, Codex asks before `browse` and `continue`, because their annotations mark them as destructive. It does not ask before `wait`, `cancel`, and `close_browser`.
+In its default approval mode, Codex asks before `browse`, `continue`, and `scraper`, because their annotations mark them as destructive. It does not ask before `wait`, `cancel`, `close_browser`, and `read_page`.
 
 ### URLs
 
