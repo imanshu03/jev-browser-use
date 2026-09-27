@@ -17,7 +17,9 @@
     //           bound: the handler defers with a bound callback that schedules the debounce as another bound callback;
     //           bound-same: as bound, and both bound callbacks wait deb/2: the same delay, so only the native-code
     //           rule tells them apart;
-    //           wrapper: a shared delay helper (as lodash _.delay) defers, then schedules the debounce through it
+    //           wrapper: a shared delay helper (as lodash _.delay) defers, then schedules the debounce through it;
+    //           named-focus: one named search function, debounced on focus and on input (the focus sets it first)
+    //   ticker=1 a background ticker from load: a ring of four functions that set each other every 10 ms
     //   busy=1  the Note field sets aria-busy on the list for 400 ms, driven by animation frames
     //   poll=1  a poll request every 150 ms from load
     //   chain   named, arrow, or copy: the Note field starts a poll chain
@@ -65,10 +67,26 @@
       let t;
       const later = function () { this.search(input.value); }.bind({ search });
       input.addEventListener('input', () => setTimeout(function () { clearTimeout(t); t = setTimeout(later, deb / 2); }.bind(null), deb / 2));
+    } else if (mode === 'named-focus') {
+      let t;
+      function run() { search(input.value); }
+      const debounce = () => { clearTimeout(t); t = setTimeout(run, deb); };
+      input.addEventListener('focus', debounce);
+      input.addEventListener('input', debounce);
     } else if (mode === 'wrapper') {
       const delay = (f, w, ...a) => setTimeout(function () { f.apply(undefined, a); }, w);
       let t;
       input.addEventListener('input', () => delay(() => { clearTimeout(t); t = delay(search, deb, input.value); }, 1));
+    }
+    if (q.get('ticker') === '1') {
+      // A ring of four functions that set each other (an animation that walks its steps): no timer is a copy of the one
+      // that set it, and none repeats within four steps, so the chain climbs the generations after the arm.
+      let ticks = 0;
+      function t1() { ticks += 1; setTimeout(t2, 10); }
+      function t2() { ticks += 1; setTimeout(t3, 10); }
+      function t3() { ticks += 1; setTimeout(t4, 10); }
+      function t4() { ticks += 1; setTimeout(t1, 10); }
+      setTimeout(t1, 10);
     }
     if (q.get('enter') === '1') input.addEventListener('keydown', (e) => { if (e.key === 'Enter') status.textContent = 'enter saw ' + rows.children.length + ' rows'; });
     const note = document.getElementById('note');

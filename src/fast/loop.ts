@@ -17,8 +17,8 @@ import type { Plan } from "../plan.js";
 import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
 import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord, UnattendedAction } from "../types.js";
-import { AUTH_HOST, COMPOSER_SEND_WORDS, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, LIMITS, SEND_WORDS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
-import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observation, Page, UnsentText } from "./model.js";
+import { AUTH_HOST, COMPOSER_SEND_WORDS, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, KEY_PATTERN, LIMITS, SEND_WORDS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
+import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observation, Page, Popup, UnsentText } from "./model.js";
 import { EditRefused, StalePage } from "./model.js";
 import { assignDates, confirmsDates, dateGate, datePlan, inBounds, shownOf, wantOf } from "./dates.js";
 import { buildTextRequest, checkTexts, flatText, hostOf, pickFields, sanitizeText } from "./generate.js";
@@ -56,6 +56,8 @@ export interface FastRunnerDeps {
   fromAssistant?: boolean;
   /** Unsent assistant text that an earlier run left on `page`. The gate applies to it as to this run's own text. */
   unsent?: readonly UnsentText[];
+  /** `<doc>` -> mention chips that an earlier run added on `page`. The unasked-chip gate applies to them as to this run's own. */
+  chips?: readonly (readonly [string, readonly string[]])[];
   /**
    * A person can see the run and act in the browser. Only an autonomous run reads it: without a person, a sign-in wall
    * blocks at once. Default: `human.interactive`.
@@ -79,6 +81,8 @@ interface StepCtx {
   action: ActionKind; value: string | null; valueConf: number | null; risk: RiskClass | null; gate: string;
   /** The audit of an action that an autonomous run does with no dialog. The record gets it only when the input ran. */
   unattended: UnattendedAction | null;
+  /** The gate of the last re-ask in this step: why another action did not run. An action that runs does not keep it. */
+  reaskGate?: string;
 }
 
 /**
@@ -133,6 +137,8 @@ interface SentText {
   /** The step of the send, and the send: `click "Send message"` or `Enter`. */
   step: number;
   action: string;
+  /** The mention chips that the page showed in its fields right before the send. */
+  mentions: string[];
 }
 
 /** A value that a fill of this run typed into a chip (token) field. It is pending until a chip holds it. */
@@ -174,6 +180,26 @@ interface FillState { unsent: Unsent[]; typedText: [string, TypedText][]; spans:
  * observation. A back, a wait, and a date fill wait for the whole settle.
  */
 const EARLY_OPS: ReadonlySet<string> = new Set(["CLICK", "TYPE_TEXT", "PRESS_ENTER"]);
+
+/**
+ * A field whose own name says it takes a message ("Reply to Ann", "Add a comment...", "Message #general"). Enter there
+ * sends, so it is never a chip field: no evidence is learned from it, and code never presses Enter in it.
+ */
+const MESSAGE_FIELD = new RegExp(String.raw`\b(?:${[...COMPOSER_SEND_WORDS, "message", "chat"].join("|")})(?:s|ing)?\b`, "i");
+
+/** A line of a popup that offers nothing to pick: no results, a prompt to type, a load state. */
+const NO_OPTION_LINE = /\b(?:no\b.{0,40}\b(?:results?|matches|members|options|users|people|items|tags|suggestions|contacts)|not found|nothing found|type to|keep typing|press enter|enter to (?:add|create)|searching|loading)\b/i;
+
+/**
+ * The options that Enter can pick in a popup: its clickable options, else its text lines. A line that offers nothing
+ * ("No members found") and a line for the typed value itself ("bug", "Create \"bug\"") are not options. Suggestions
+ * without ARIA roles show only as text lines ("debug", "bugfix"), and Enter can pick the first one.
+ */
+function popupOptions(pop: Popup, value: string): string[] {
+  if (pop.picks.length > 0) return pop.picks;
+  const own = loose(value);
+  return pop.text.split("\n").map((l) => l.trim()).filter((l) => l !== "" && !NO_OPTION_LINE.test(l) && loose(l) !== own && !(/^(?:add|create|use)\b/i.test(l) && holdsText(l, value)));
+}
 
 /** A pending chip value on one observation: its draft holds it, or the draft lost it and nothing before the field holds it. */
 interface PendingToken { key: string; e: TypedToken; state: "draft" | "lost"; field: Action | undefined; strong: boolean }
@@ -266,7 +292,7 @@ const OPTION_ROLES: ReadonlySet<string> = new Set(["option", "menuitem", "menuit
  * Delete". The step is a popup of the clicked control (it shows aria-expanded="true" now), or a new dialog or form with a
  * cancel control. `buttons`: its new submit or destructive controls. `holds`: the DONE answers refused while it is open.
  */
-interface OpenStep { doc: number | undefined; click: string; buttons: { node: number; label: string }[]; holds: number }
+interface OpenStep { doc: number | undefined; click: string; buttons: { node: number; label: string }[]; holds: number; watch?: Unsent[] }
 
 /** The button of a picker that adds its checked items: "Done", "Done (2)", "Add", "Apply", "Insert", "Select", "OK", "Confirm". */
 const COMMIT_BUTTON = /^(?:done|add|apply|insert|select|ok|confirm)\b|\(\d+\)\s*$/i;
@@ -311,7 +337,7 @@ function isCredential(a: Action, label: string): boolean {
 }
 
 /** Labels of fields whose values an audit entry never lists: secrets, and payment and identity numbers. */
-const PRIVATE_LABEL = /\b(?:secret|token|api ?key|card|cvv|cvc|iban|account (?:number|no)|routing|ssn|social security|tax ?id|passport)\b/i;
+const PRIVATE_LABEL = /\b(?:secret|token|(?:api|access|private|secret|signing|ssh|encryption|license|licence) ?key|key ?id|(?:recovery|backup) codes?|webhook|credentials?|card|cvv|cvc|iban|account (?:number|no)|routing|ssn|social security|tax ?id|passport)\b/i;
 /** Autocomplete tokens of fields whose values an audit entry never lists. */
 const PRIVATE_AUTOCOMPLETE = /cc-|one-time-code|password/;
 /** An audit entry lists at most this many other fields, each value cut to AUDIT_VALUE_CHARS. */
@@ -456,7 +482,7 @@ export class FastRunner {
    * The unsent entries that a click on a send control, or an Enter, asked about. Each observation checks whether their
    * text left the page. Another action than WAIT in a later step ends the watch.
    */
-  private sendWatch: { step: number; action: string; entries: Unsent[] } | null = null;
+  private sendWatch: { step: number; action: string; entries: Unsent[]; mentions: string[] } | null = null;
   /** `<doc>|<node>` of the fields that this run saw add a value as a chip, or that showed a multiselect listbox (strong evidence). */
   private readonly tokenFields = new Set<string>();
   /**
@@ -470,7 +496,7 @@ export class FastRunner {
    * Chips of a draft that was there before the run are not in it.
    */
   private readonly addedChips = new Map<string, Set<string>>();
-  /** `<doc>` -> names of the mention chips that the first observation of the document showed. */
+  /** `<doc>|<node>` -> names of the mention chips that the first observation of the field showed. */
   private readonly chipBase = new Map<string, Set<string>>();
   /** Staged pickers that got their one warning for a click that does not send. Keyed by document, popup, and names. */
   private readonly stagedWarned = new Set<string>();
@@ -485,7 +511,11 @@ export class FastRunner {
     this.result = emptyResult(deps.cfg.task, this.goal, deps.cfg.model, deps.cfg.engine ?? "cdp");
     // Text requests of an earlier run have other ids. A seeded entry never drops the spans of this run.
     this.unsent = (deps.unsent ?? []).map((u) => ({ ...u, request: null, earlier: true as const }));
+    for (const [doc, names] of deps.chips ?? []) this.addedChips.set(doc, new Set(names));
   }
+
+  /** The mention chips that this run (or an earlier run on its page) added. The MCP session gives them to the next run. */
+  addedChipList(): [string, string[]][] { return [...this.addedChips].map(([doc, set]) => [doc, [...set]]); }
 
   /** The page the run used. Null when the run opened no page: a plan-level block, or a launch that failed. */
   get page(): Page | null { return this._page; }
@@ -676,12 +706,16 @@ export class FastRunner {
     }
     // A before pair holds only while every observation shows its control with the same value.
     this.unsent = this.unsent.map((u) => this.ageBefore(obs, u));
-    // The chips of the first observation of a document are its draft. A chip that shows later came from this run.
+    // The chips that a field shows the first time an observation shows it are its draft. A chip that shows later came
+    // from this run. A field that renders late (after a loading shell) keeps its draft chips.
     const doc0 = String(obs.doc);
-    const chips = obs.actions.flatMap((a) => (a.kind === "fill" ? (a.mentions ?? []).map((m) => [m, a.label] as const) : []));
-    const base = this.chipBase.get(doc0);
-    if (!base) this.chipBase.set(doc0, new Set(chips.map(([m]) => m)));
-    else for (const [m, label] of chips) if (!base.has(m)) this.addChip(doc0, m, label);
+    for (const a of obs.actions) {
+      if (a.kind !== "fill" || a.node === null) continue;
+      const k = `${doc0}|${a.node}`;
+      const base = this.chipBase.get(k);
+      if (!base) { this.chipBase.set(k, new Set(a.mentions ?? [])); continue; }
+      for (const m of a.mentions ?? []) if (!base.has(m)) this.addChip(doc0, m, a.label);
+    }
     this.checkSent(obs);
     return obs;
   }
@@ -691,10 +725,11 @@ export class FastRunner {
    * counts: a pending entry (a fill that did not stay) gives no evidence that the page had the text to send. The
    * observation after the action is checked at once.
    */
-  private watchSend(gated: Unsent[], action: string): void {
+  private watchSend(gated: Unsent[], action: string, before: Observation): void {
     const entries = gated.filter((u) => !u.pending).map((u) => ({ ...u }));
     if (entries.length === 0) return;
-    this.sendWatch = { step: this.stepNo, action, entries };
+    const mentions = before.actions.flatMap((a) => (a.kind === "fill" ? a.mentions ?? [] : []));
+    this.sendWatch = { step: this.stepNo, action, entries, mentions };
     if (this.held) this.checkSent(this.held);
   }
 
@@ -709,7 +744,7 @@ export class FastRunner {
     for (const u of w.entries) {
       if (!this.textLeft(obs, u)) { left.push(u); continue; }
       if (this.sent.some((x) => x.doc === u.doc && x.label === u.label && x.text === u.text)) continue;
-      const sent: SentText = { doc: u.doc, node: u.node, label: u.label, text: u.text, step: w.step, action: w.action };
+      const sent: SentText = { doc: u.doc, node: u.node, label: u.label, text: u.text, step: w.step, action: w.action, mentions: w.mentions };
       this.sent.push(sent);
       for (const r of this.typedText.values()) if (r.doc === u.doc && r.text === u.text && !r.sent) r.sent = sent;
       // An early observation: the settled page can show the text again (a send that failed). lateRefresh checks it.
@@ -725,7 +760,13 @@ export class FastRunner {
    * from a field that is gone.
    */
   private textLeft(obs: Observation, u: Unsent): boolean {
-    if (obs.doc !== u.doc) return true;
+    if (obs.doc !== u.doc) {
+      // A new document is a send only when nothing on it keeps the text for a later step: no control holds it (a
+      // session timeout shows the form again with the text), and it is no review page that shows the text next to a
+      // send or confirm control. In doubt, no send record: the record tells the user that the text went out.
+      if (holders(obs, u.text).length > 0) return false;
+      return !(holdsText(obs.text, u.text) && obs.actions.some((a) => a.kind === "click" && hit(a.label, [...SEND_WORDS, "confirm", "submit"])));
+    }
     const field = obs.actions.find((a) => a.kind === "fill" && a.node === u.node);
     if (field ? (field.value ?? "").trim() !== "" : obs.filled === undefined || (u.node !== null && obs.filled.includes(u.node))) return false;
     return holders(obs, u.text).length === 0;
@@ -816,7 +857,7 @@ export class FastRunner {
       this.sent = this.sent.filter((x) => x !== sent);
       for (const r of this.typedText.values()) if (r.sent === sent) delete r.sent;
       const w = this.sendWatch;
-      this.sendWatch = { step: sent.step, action: sent.action, entries: [...(w?.entries ?? []), u] };
+      this.sendWatch = { step: sent.step, action: sent.action, entries: [...(w?.entries ?? []), u], mentions: sent.mentions };
       this.log.info(`step ${e.step} the text for "${u.label}" is back in the page after the settle: no send`);
     }
     this.noteChips(e.pre, f);
@@ -914,6 +955,7 @@ export class FastRunner {
           ...(this.typedText.size > 0 ? { textTyped: true } : {}),
           ...(held.size > 0 ? { heldText: held } : {}),
           ...(this.sent.length > 0 ? { sentTexts: this.sentTexts() } : {}),
+          ...(this.sent.length > 0 && this.sentWithoutMention() ? { sentMissesMention: true } : {}),
           ...(back ? {} : { canGoBack: false }),
         };
       };
@@ -1003,6 +1045,7 @@ export class FastRunner {
         reasks += 1;
         if (reasks > LIMITS.fastReasks) return this.blocked(ctx, "ambiguous", ctx.gate || "no target passed the gate after a re-ask", d.target ? top3(d.target.probs) : top3(d.operationProbs), obs.url);
         retryReason = `${ctx.operation ?? "action"}${d.target ? ` on "${d.target.label}"` : ""} was not executed: ${ctx.gate}. Check the current page and choose the next useful action. Fill required text before submitting.`;
+        ctx.reaskGate = ctx.gate;
         this.log.warn(`step ${this.stepNo} retry ${reasks}/${LIMITS.fastReasks}: ${ctx.gate}; observing again`);
         try {
           obs = await this.observeSettled();
@@ -1147,7 +1190,8 @@ export class FastRunner {
   private submitButton(d: Decision, obs: Observation): { target: Target; p: number } | null {
     const c = d.click;
     const focus = obs.focus;
-    if (!c || !focus) return null;
+    // Enter that picks an option presses no button: only pickedOption() can stand in for it.
+    if (!c || !focus || focus.enterOption) return null;
     const button = obs.actions.find((a) => a.id === c.actionId);
     if (!button || button.kind !== "click" || button.role !== "button" || button.node === focus.node) return null;
     if (riskOf("CLICK", c.label) === "navigational") return null;
@@ -1189,7 +1233,8 @@ export class FastRunner {
    * control, and it holds a new submit or destructive control.
    */
   private noteOpened(action: Action, before: Observation, after: Observation | null, risk: RiskClass, step = this.stepNo): void {
-    if (!after || after.doc !== before.doc || action.node === null || (risk !== "submit" && risk !== "destructive")) return;
+    // A new URL on the same document is an SPA route change: a new page, not a step that the click opened.
+    if (!after || after.doc !== before.doc || after.url !== before.url || action.node === null || (risk !== "submit" && risk !== "destructive")) return;
     const had = new Set(before.actions.map((a) => a.node));
     const forms = new Set(before.actions.map((a) => a.form ?? null));
     const fresh = after.actions.filter((a) => a.kind === "click" && a.node !== null && a.node !== action.node && !had.has(a.node));
@@ -1199,7 +1244,10 @@ export class FastRunner {
     const buttons = fresh.filter((a) => (popup || dialogs.has(a.form ?? null)) && riskOf("CLICK", a.label) !== "navigational")
       .map((a) => ({ node: a.node as number, label: cutText(a.label, 40) }));
     if (buttons.length === 0) return;
-    this.openStep = { doc: after.doc, click: cutText(action.label, 60), buttons, holds: 0 };
+    // A send click whose text is still in the page: a click on a button of the step finishes the send, so it watches
+    // the same texts, whatever its label.
+    const watch = this.sendWatch?.step === step ? this.sendWatch.entries.map((u) => ({ ...u })) : [];
+    this.openStep = { doc: after.doc, click: cutText(action.label, 60), buttons, holds: 0, ...(watch.length > 0 ? { watch } : {}) };
     this.log.info(`step ${step} "${this.openStep.click}" opened a step with ${buttons.map((b) => `"${b.label}"`).join(", ")}`);
   }
 
@@ -1362,7 +1410,7 @@ export class FastRunner {
       if (r.kind === "stale") undo();
       // An Enter with unsent text in a field can send it. An Enter that picks an option sends only with a send word in
       // the option: a pick that opens an item also takes the query out of the page.
-      else if (ran(r) && gated.length > 0 && (!pick || hit(pick.label, SEND_WORDS))) this.watchSend(gated, "Enter");
+      else if (ran(r) && gated.length > 0 && (!pick || hit(pick.label, SEND_WORDS))) this.watchSend(this.inForm(gated, focusForm, obs), "Enter", obs);
       return r;
     }
     if (d.operation === "GO_BACK" && d.operationConf < GATES.goBack) {
@@ -1458,7 +1506,7 @@ export class FastRunner {
       bans.add(key);
       return { kind: "reask" };
     }
-    const sends = op === "CLICK" && (risk === "submit" || risk === "destructive");
+    const sends = op === "CLICK" && (risk === "submit" || risk === "destructive" || hit(t.label, SEND_WORDS));
     // An action outside a picker with checked items closes it, and the items are lost. A send re-asks each time; another
     // action re-asks one time and then runs. The mention gates come before the chip gate: that gate can focus a field,
     // and focus outside the picker closes it too.
@@ -1564,10 +1612,14 @@ export class FastRunner {
       kept = used.secret || !(used.source === "generated" || this.deps.fromAssistant) ? shown : cutLines(this.log.redactor(text), LIMITS.spanChars);
       ctx.value = shown;
       // An append is not idempotent: Jev sees only the start of a field, not the text that this run added at its end. A
-      // text that this run added, and that the field still ends with, is not typed again.
-      const added = this.appended.get(`${at.doc}|${target.node}`) ?? [];
+      // text that this run added, and that the field still ends with, is not typed again. Text that an earlier run left
+      // unsent in this field counts too: a rerun of the same task (after a needs_confirmation block) must not add it again.
+      const own = this.appended.get(`${at.doc}|${target.node}`) ?? [];
+      const earlier = this.unsent.filter((u) => u.earlier === true && u.doc === at.doc && u.node === target.node).map((u) => u.text);
+      const added = [...own, ...earlier];
       if (plan?.mode === "append" && added.some((x) => loose(x) === loose(text as string)) && loose(target.value ?? "").endsWith(loose(text))) {
-        ctx.gate = `"${cutText(t.label, 60)}" already ends with this text, which this run added; it is not typed again`;
+        const who = own.some((x) => loose(x) === loose(text as string)) ? "this run" : "an earlier run";
+        ctx.gate = `"${cutText(t.label, 60)}" already ends with this text, which ${who} added; it is not typed again`;
         this.log.info(`step ${this.stepNo} ${ctx.gate}`);
         this.history.push({ action: cutText(target.label, LIMITS.nameChars), kind: "fill (already added)", text: kept, page_changed: false, step: this.stepNo, url: at.url, operation: "TYPE_TEXT" });
         return { kind: "record", rec: this.record(ctx, "skipped", "already added") };
@@ -1594,12 +1646,15 @@ export class FastRunner {
     }
 
     // A date field gets its date through Page.setDate, in the field's own format. It never holds assistant text.
+    const opened = op === "CLICK" ? this.openStep : null;
     const r = target.date !== undefined && used !== null ? await this.typeDate(target, used, at, ctx, shown ?? used.text) : await this.execute(op, target, text, shown, at, ctx, kept, plan);
     // A stale action or a refused fill did not run: the entries that the check dropped on the old observation come back.
     if (r.kind === "stale" || (r.kind === "refused" && !r.changed)) undo();
     // A click on a send control (Send, Post, Reply, Comment, Publish, Share) with unsent text in a field can send it. A
     // destructive word alone is no send: "Delete draft" also takes the text out of the page.
-    else if (op === "CLICK" && ran(r) && gated.length > 0 && hit(t.label, SEND_WORDS)) this.watchSend(gated, `click "${cutText(t.label, LIMITS.nameChars)}"`);
+    else if (op === "CLICK" && ran(r) && gated.length > 0 && hit(t.label, SEND_WORDS)) this.watchSend(this.inForm(gated, target.form, at), `click "${cutText(t.label, LIMITS.nameChars)}"`, at);
+    // A button of the step that a send click opened ("Confirm") finishes that send, whatever its label.
+    else if (op === "CLICK" && ran(r) && opened?.watch && opened.buttons.some((b) => b.node === target.node)) this.watchSend(opened.watch, `click "${cutText(t.label, LIMITS.nameChars)}"`, at);
     // A fill whose next observation did not settle ran too: its text is in the page, and a later run must not send it
     // unseen.
     if (used && target.date === undefined && text !== null && r.kind === "record" && (r.rec.result === "ok" || r.ran === true)) {
@@ -1897,7 +1952,9 @@ export class FastRunner {
     // The controls that held the text before the fill, with their values then. Never for a secret value.
     const prior = had.length > 0 && !span.secret ? { before: had } : {};
     if (typed.trim() !== "") {
-      if (generated || (this.deps.fromAssistant && action.multiline === true && !span.secret)) {
+      // Text that the assistant wrote: generated, or a non-secret var of an MCP run (SKILL.md routes written text into
+      // vars) in any field that takes new text, or a task value in a multiline field. It gates the next click as unsent.
+      if (generated || (this.deps.fromAssistant && !span.secret && (action.multiline === true || (span.source === "var" && canWriteInto(action))))) {
         const label = span.field?.label ?? cutText(flatText(this.log.redactor(action.label)), LIMITS.nameChars);
         this.unsent.push({ doc: obs.doc, node: action.node, label, text: typed, request: span.field?.request ?? null, ...prior, ...(stayed ? {} : { pending: true as const }) });
       } else if (old) {
@@ -2137,8 +2194,11 @@ export class FastRunner {
    */
   private learnTokens(obs: Observation, next: Observation, clicked: Action | null): void {
     if (next.doc !== obs.doc || next.url !== obs.url) return;
+    // A click on a control with no name or a send name (an icon-only send button, "Post comment") sent a message: it
+    // teaches no chip field. Nor does a field whose name says it takes a message.
+    const teaches = !clicked || (clicked.label.trim() !== "" && !hit(clicked.label, SEND_WORDS));
     for (const a of obs.actions) {
-      if (a.kind !== "fill" || !a.token || a.node === null || (a.value ?? "").trim() === "" || (!clicked && a.node !== obs.focus?.node)) continue;
+      if (!teaches || a.kind !== "fill" || !a.token || a.node === null || (a.value ?? "").trim() === "" || (!clicked && a.node !== obs.focus?.node) || MESSAGE_FIELD.test(a.label)) continue;
       const b = next.actions.find((x) => x.kind === "fill" && x.node === a.node);
       if (!b?.token || (b.value ?? "").trim() !== "") continue;
       const had = new Set(a.token.items.map(([id]) => id));
@@ -2237,12 +2297,13 @@ export class FastRunner {
     const holds = p.state === "draft" ? `"${label}" holds "${value}", which is not added yet` : `"${label}" lost "${value}": the field is empty, and no chip holds it`;
     if (p.e.hinted) return { kind: "record", rec: this.blocked(ctx, "ambiguous", `typed value not added: ${holds}. The form is not sent without it`, [], obs.url) };
     if (p.field) {
-      const may = p.strong && p.state === "draft" && !p.e.picks && !this.cfg.dryRun;
+      // Never a script Enter in a field whose name says it takes a message: the page's key handler would send it.
+      const may = p.strong && p.state === "draft" && !p.e.picks && !this.cfg.dryRun && !MESSAGE_FIELD.test(p.field.label);
       const pop = await (this._page as Page).popup(p.field, may);
       if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
       if (pop?.open) p.e.popup = true;
-      if (pop && pop.picks.length > 0) p.e.picks = true;
-      if (may && pop !== null && pop.picks.length === 0 && !pop.busy && (pop.open || !p.e.popup)) {
+      if (pop && popupOptions(pop, p.e.text).length > 0) p.e.picks = true;
+      if (may && pop !== null && popupOptions(pop, p.e.text).length === 0 && !pop.busy && (pop.open || !p.e.popup)) {
         const added = await this.gateCommit(p, label, value, obs, ctx);
         if (added) return added;
       }
@@ -2268,10 +2329,17 @@ export class FastRunner {
     }
     const s = this.tokenState(p.e, now);
     if (s.state !== "draft" || !s.field) return { kind: "stale", message: `the page changed while the popup of "${label}" settled` };
-    const c = await this.commitToken(s.field, p.e.text, now, false, label, `Enter in "${label}"`, value);
+    const c = await this.commitToken(s.field, p.e.text, now, label, `Enter in "${label}"`, value);
     if (c.result === "added") {
       this.typedToken.delete(p.key);
       this.log.info(`step ${this.stepNo} chip gate: a script Enter added "${value}" to "${label}"`);
+      // A page input: it gets its own record, as Jev's Enter in a chip field does (enterToken).
+      const rec = this.record({
+        ...ctx, url: now.url, title: now.title, operation: "PRESS_KEY", operationConf: null, target: { ref: s.field.id, role: s.field.role ?? "", name: label, under: "" },
+        targetConf: null, runnerUp: null, action: "press_key", value: "Enter", valueConf: null, risk: "data_entry", gate: `chip gate: a script Enter added "${value}"`, unattended: null,
+      }, "ok", null);
+      this.result.steps.push({ ...rec, jev_requests: 0 });
+      this.log.step(rec);
       return { kind: "stale", message: `"${label}" held "${value}"; a script Enter added it as a chip` };
     }
     if (c.result === "wrong" || c.result === "cleared") return { kind: "record", rec: this.blocked(ctx, "ambiguous", c.hint, [], now.url) };
@@ -2279,20 +2347,20 @@ export class FastRunner {
   }
 
   /**
-   * A script Enter on a chip field (`Page.commit`), then the check on the next observation. `list`: the popup listed
-   * options, so Enter can have picked one, and a new chip must hold the value. With no list, any new chip counts: a
-   * free-text commit cannot pick another value. The new chip is read with its title, aria-label, and data-* values, so a
-   * chip that shows a display name for an email address still matches.
-   * - added: the draft no longer holds the value, and a new element with text appeared before the field in its box; or
+   * A script Enter on a chip field (`Page.commit`), then the check on the next observation. A new chip must hold the
+   * typed value: a widget can add its highlighted suggestion ("debug" for "bug") also when no option list showed. The new
+   * chip is read with its title, aria-label, and data-* values, so a chip that shows a display name for an email address
+   * still matches.
+   * - added: the draft no longer holds the value, and a new chip that holds it appeared before the field in its box; or
    *   a chip already held the value and the page cleared the repeat.
    * - ignored: the key did not reach the field (the page changed first, or the field lost focus), or the page did not
    *   handle it: not prevented, and the draft and the box stayed the same.
    * - kept: the page handled the key and kept the value in the draft (it refused the value).
-   * - wrong: an option list was open, and the new chip does not hold the value.
+   * - wrong: the new chip does not hold the value.
    * - cleared: the value left the draft and no chip holds it, or the field or the document went away.
    * A handled key adds the history entry `action` with the text `text`.
    */
-  private async commitToken(field: Action, value: string, obs: Observation, list: boolean, label: string, action: string, text: string | null): Promise<TokenCommit> {
+  private async commitToken(field: Action, value: string, obs: Observation, label: string, action: string, text: string | null): Promise<TokenCommit> {
     const page = this._page as Page;
     let res: Awaited<ReturnType<Page["commit"]>>;
     try {
@@ -2316,27 +2384,36 @@ export class FastRunner {
     if (!res.prevented && now && squash(now.value ?? "") === squash(field.value ?? "") && fresh.length === 0) return { result: "ignored", next, hint: "" };
     this.history.push({ action, kind: "key", text, page_changed: next.fingerprint !== obs.fingerprint, step: this.stepNo, url: next.url, operation: "PRESS_ENTER" });
     if (!now) return { result: "cleared", next, hint: `Enter in "${label}" changed the page, and no chip holds "${shown}"` };
+    // A new chip must hold the typed value, also when no option list showed: a widget can add its highlighted
+    // suggestion ("debug" for "bug") with no ARIA roles to show it.
     const hit = fresh.some(([, t]) => holdsText(t, value));
     const wrong = { result: "wrong" as const, next, hint: `Enter in "${label}" added "${cutText(this.log.redactor(fresh[0]?.[1] ?? ""), LIMITS.nameChars)}", not "${shown}"` };
-    if (holdsText(now.value ?? "", value)) return fresh.length > 0 && list && !hit ? wrong : { result: "kept", next, hint: "" };
-    if (fresh.length > 0) return list && !hit ? wrong : { result: "added", next, hint: "" };
+    if (holdsText(now.value ?? "", value)) return fresh.length > 0 && !hit ? wrong : { result: "kept", next, hint: "" };
+    if (fresh.length > 0) return hit ? { result: "added", next, hint: "" } : wrong;
     if ((now.token?.items ?? []).some(([, t]) => holdsText(t, value))) return { result: "added", next, hint: "" };
     return { result: "cleared", next, hint: `Enter in "${label}" took "${shown}" out of the field, and no chip holds it` };
   }
 
   /**
-   * Jev's Enter in a chip field with strong evidence and a draft: a script Enter first. It cannot submit the form, so it
-   * has the data_entry risk. When the page handled it, the step ends there, and a wrong or lost value blocks. Null when
-   * the page did not handle it: the trusted Enter follows with its own risk and gates, so Enter-to-search still works.
-   * Unsent assistant text keeps the trusted path, whose dialog shows the text.
+   * Jev's Enter in a chip field with strong evidence and a draft: a script Enter first. It cannot start the browser's
+   * form submission, and a chip field's key handler adds a chip, so it has the data_entry risk. When the popup shows
+   * suggestions, the step asks again: Enter could pick one of them. When the page handled the Enter, the step ends there,
+   * and a wrong or lost value blocks. Null when the page did not handle it: the trusted Enter follows with its own risk
+   * and gates, so Enter-to-search still works. Unsent assistant text keeps the trusted path, whose dialog shows the text.
    */
   private async enterToken(d: Decision, field: Action, obs: Observation, ctx: StepCtx): Promise<Applied | null> {
-    if (d.operationConf < THRESHOLDS.data_entry.target || this.unsent.length > 0 || this.cfg.dryRun || field.node === null) return null;
+    if (d.operationConf < THRESHOLDS.data_entry.target || this.unsent.length > 0 || this.cfg.dryRun || field.node === null || MESSAGE_FIELD.test(field.label)) return null;
     const key = `${obs.doc}|${field.node}`;
     const value = this.typedToken.get(key)?.text ?? field.value ?? "";
     const label = cutText(flatText(this.log.redactor(field.label)), LIMITS.nameChars);
+    // Suggestions in the popup: Enter can pick the highlighted one instead of the typed value. Jev clicks the match.
     const pop = await (this._page as Page).popup(field);
-    const c = await this.commitToken(field, value, obs, pop !== null && pop.picks.length > 0, label, "PRESS_ENTER", null);
+    const options = pop ? popupOptions(pop, value) : [];
+    if (options.length > 0) {
+      ctx.gate = `"${label}" shows suggestions (${options.slice(0, 3).map((o) => `"${cutText(this.log.redactor(o), 40)}"`).join(", ")}); Enter can pick one of them instead of "${cutText(this.log.redactor(value), LIMITS.spanChars)}". Click the suggestion that matches`;
+      return { kind: "reask" };
+    }
+    const c = await this.commitToken(field, value, obs, label, "PRESS_ENTER", null);
     if (c.result === "ignored") return null;
     ctx.action = "press_key"; ctx.value = "Enter"; ctx.risk = "data_entry";
     ctx.gate = `ok ${d.operationConf.toFixed(2)} (data_entry) script Enter ${c.result}`;
@@ -2383,6 +2460,11 @@ export class FastRunner {
     // An autonomous run audits every submit too: nobody saw it go.
     const needsConfirm = risk === "destructive" || (risk === "submit" && (this.cfg.confirm === "always" || autonomous)) || gated.length > 0;
     if (!needsConfirm || this.cfg.dryRun) return null;
+    // What the action sends that `gated` does not show: mention chips (each notifies a person) and text that no
+    // assistant wrote. The dialog shows it; an autonomous audit keeps it. A sent field text longer than one dialog can
+    // show is cut with an ellipsis, so the person sees that it goes on.
+    const shown = new Set(gated.map((u) => squash(u.text)));
+    const extra = sends.filter((s) => s.mentions.length > 0 || !shown.has(squash(s.text))).map((s) => ({ ...s, text: s.text.length > LIMITS.confirmTextChars ? `${s.text.slice(0, LIMITS.confirmTextChars)}\u2026` : s.text }));
     if (autonomous) {
       // The user's own words turned off every dialog of this run, also for long text. The action goes on, and its
       // record keeps what went out with nobody to see it. execute() keeps the audit only when the input ran.
@@ -2392,6 +2474,7 @@ export class FastRunner {
         action: desc, host: hostOf(url), why,
         texts: gated.map((u) => ({ label: u.label, text: u.text, chars: [...u.text].length, left: null, ...(u.earlier ? { earlier_run: true as const } : {}) })),
         fields: at ? this.auditFields(at.obs, at.form, gated.map((u) => u.node)) : [],
+        ...(extra.length > 0 ? { sends: extra.map((x) => ({ label: x.label, text: cutText(x.text, AUDIT_VALUE_CHARS), mentions: [...x.mentions] })) } : {}),
       };
       return null;
     }
@@ -2408,9 +2491,6 @@ export class FastRunner {
     if (chars > LIMITS.confirmTextChars) return this.blocked(ctx, "needs_confirmation", `the unsent text is too long to show in one dialog (${chars} characters)`, top, url);
     // The MCP dialog and the terminal prompt show every unsent text in full. Without a text model the CLI and chat
     // have no unsent text, so `typed` is empty there.
-    const shown = new Set(gated.map((u) => squash(u.text)));
-    // A sent field text longer than one dialog can show is cut with an ellipsis, so the person sees that it goes on.
-    const extra = sends.filter((s) => s.mentions.length > 0 || !shown.has(squash(s.text))).map((s) => ({ ...s, text: s.text.length > LIMITS.confirmTextChars ? `${s.text.slice(0, LIMITS.confirmTextChars)}\u2026` : s.text }));
     const detail = redactData({ kind: "action" as const, action: desc, host: hostOf(url), typed: gated.map((u) => ({ label: u.label, text: u.text })), ...(extra.length > 0 ? { sends: extra } : {}) }, this.log.redactor);
     const ok = await this.deps.human.confirm(this.log.redactor(`About to ${desc} on ${url}. Type y to allow: `), LIMITS.confirmPromptMs, detail);
     if (this.cancelled) return this.cancel(ctx, url);
@@ -2429,7 +2509,8 @@ export class FastRunner {
       if (out.length >= AUDIT_FIELDS) break;
       if (a.kind !== "fill" || skip.includes(a.node) || (form !== null && form !== undefined && (a.form ?? null) !== form)) continue;
       const value = a.value ?? "";
-      if (value.trim() === "" || isCredential(a, a.label) || PRIVATE_LABEL.test(a.label) || PRIVATE_AUTOCOMPLETE.test(a.autocomplete ?? "")) continue;
+      // A value shaped like a key or a token never goes into an audit, whatever the field's label.
+      if (value.trim() === "" || isCredential(a, a.label) || PRIVATE_LABEL.test(a.label) || PRIVATE_AUTOCOMPLETE.test(a.autocomplete ?? "") || KEY_PATTERN.test(value)) continue;
       out.push({ label: cutText(flatText(this.log.redactor(a.label)), LIMITS.nameChars), value: cutText(this.log.redactor(value), AUDIT_VALUE_CHARS) });
     }
     return out;
@@ -2476,7 +2557,7 @@ export class FastRunner {
     const audit = ctx.unattended;
     ctx.unattended = null;
     if (this.cancelled) return { kind: "record", rec: this.cancel(ctx, obs.url) };
-    if (!ctx.gate || /^(low_|Enter confidence|ambiguous_runner_up|repeat )/.test(ctx.gate)) ctx.gate = "ok";
+    if (!ctx.gate || ctx.gate === ctx.reaskGate || /^(low_|Enter confidence|ambiguous_runner_up|repeat )/.test(ctx.gate)) ctx.gate = "ok";
     if (op === "PRESS_ENTER") ctx.value = "Enter";
     // A later action ends the watch of a send: a fill, a click, or a scroll can take a text out of the page that the
     // send did not take. WAIT keeps it.
@@ -2560,7 +2641,8 @@ export class FastRunner {
     }
     entry.page_changed = next.fingerprint !== obs.fingerprint;
     entry.url = next.url;
-    this.noteChips(obs, next);
+    // A wait or a scroll adds no chip: a field that it shows for the first time holds a draft (chipBase).
+    if (op !== "WAIT" && op !== "SCROLL_DOWN" && op !== "SCROLL_UP") this.noteChips(obs, next);
     this.held = next;
     // An append that lost text of the field, or whose text the field does not show, must not be saved or sent.
     const lost = appended && edited ? appendLost(text as string, edited) : null;
@@ -2604,6 +2686,11 @@ export class FastRunner {
     return this.spans.some((s) => s.source === "mention" && mentionMatches(chip, s.text));
   }
 
+  /** A task name to mention that no chip of any send of this run matches. */
+  private sentWithoutMention(): boolean {
+    return this.spans.some((s) => s.source === "mention" && !this.sent.some((x) => x.mentions.some((c) => mentionMatches(c, s.text))));
+  }
+
   /** An action of this run added a chip with this name in the document of `obs`. */
   private added(obs: Observation, chip: string): boolean {
     return this.addedChips.get(String(obs.doc))?.has(chip) ?? false;
@@ -2634,6 +2721,20 @@ export class FastRunner {
   }
 
   /** The form of the focused element: the focus `form`, or the form of the focused element's action from an older adapter. */
+  /**
+   * The entries that a send in `form` can take out: all but those whose field is in another known form. A send in one
+   * form never records the text of another form's field, which a page change can also take out of view ("Private note"
+   * of form 9 after "Send" of form 7). A field with no form (a pop-out composer), a field that `obs` does not show, and
+   * a send with no form keep every entry.
+   */
+  private inForm(entries: Unsent[], form: number | null | undefined, obs: Observation): Unsent[] {
+    if (form === null || form === undefined) return entries;
+    return entries.filter((u) => {
+      const f = obs.actions.find((x) => x.kind === "fill" && x.node === u.node)?.form ?? null;
+      return f === null || f === form;
+    });
+  }
+
   private focusForm(obs: Observation): number | null {
     const focus = obs.focus;
     if (!focus) return null;

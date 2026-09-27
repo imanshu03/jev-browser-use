@@ -12,6 +12,7 @@ import { findChrome, launchChrome } from "../../src/fast/chrome.js";
 import type { Action, Chrome, Observation, Page, Popup } from "../../src/fast/model.js";
 import { EditRefused, StalePage } from "../../src/fast/model.js";
 import { openPage } from "../../src/fast/page.js";
+import { SNAPSHOT_SCRIPT } from "../../src/fast/snapshot.js";
 import { canPressEnter, canWriteInto } from "../../src/fast/policy.js";
 import { FastRunner } from "../../src/fast/loop.js";
 import { calendarDay, datePlan, hasDateWidget, shownOf } from "../../src/fast/dates.js";
@@ -493,6 +494,44 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     expect(find(await page.observe(), "fill", "Note").value ?? "").toBe("");
   });
 
+  it("a snapshot of a focused editor with 2000 blocks, one mention atom each, does work linear in the blocks", async () => {
+    // The text walk of a focused editor skips the subtree of each atom; it once checked every text node against every
+    // atom, three times per snapshot (24 million Node.contains calls for this page).
+    await page.navigate(`${base}/atoms.html?n=2000&atoms=1&focus=1`, NAV_MS);
+    await evaluate("(() => { const orig = Node.prototype.contains; window.__calls = 0; Node.prototype.contains = function (x) { window.__calls++; return orig.call(this, x); }; })()");
+    await evaluate(SNAPSHOT_SCRIPT);
+    expect(Number(await evaluate("window.__calls"))).toBeLessThan(20 * 2000);
+  }, 60_000);
+
+  it("a replace in a digits-only field takes effect: the selection is set in the page, with no key for the filter to cancel", async () => {
+    await page.navigate(`${base}/digits-only.html`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Phone"), before, "5550199");
+    expect(await evaluate("document.getElementById('phone').value")).toBe("5550199");
+  });
+
+  it("an icon-only <button> is named by its value: a send or delete intent keeps its risk; a state value names nothing", async () => {
+    await page.navigate(`${base}/intent-buttons.html`, NAV_MS);
+    const obs = await page.observe();
+    const labels = obs.actions.filter((a) => a.kind === "click").map((a) => a.label);
+    expect(labels).toContain("send");
+    expect(labels).toContain("delete");
+    expect(labels).not.toContain("on");
+  });
+
+  it("a sent chat message is a row, not a chip: a full-width block above the input gives no chip evidence", async () => {
+    await page.navigate(`${base}/chat-thread.html`, NAV_MS);
+    const before = await page.observe();
+    await page.act(find(before, "fill", "Type something"), before, "Hello there");
+    const typed = await page.observe();
+    await page.press("Enter", typed);
+    const after = await page.observe();
+    expect(after.text).toContain("1 sent");
+    const field = find(after, "fill", "Type something");
+    expect(field.token?.chips ?? []).toEqual([]);
+    expect(field.token?.items.find(([, text]) => text.includes("Hello there"))?.[2]).toBe(0);
+  });
+
   it("a plain field whose click moves focus to a combobox in a dialog is no popover opener: the fill refuses", async () => {
     await page.navigate(`${base}/popover.html`, NAV_MS);
     const before = await page.observe();
@@ -550,6 +589,8 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page (live Chrome): the s
     ["bound", "a bound callback that schedules a bound debounce: native code, never a copy of itself", 550],
     ["bound-same", "two bound callbacks with the same delay: only the native-code rule tells them apart", 550],
     ["wrapper", "a shared delay helper with another delay: not a copy of the callback that armed it", 550],
+    ["named-focus", "one named debounce set on focus, cleared and set again on input: it never ran, so it counts", 550],
+    ["timeout&ticker=1", "a debounce next to a background ticker: the ticker does not use up the input's generations", 550],
   ])("mode %s (%s) shows the new rows", async (mode, _what, min) => {
     const { after } = await fillAndObserve(`search-debounce.html?mode=${mode}&lat=${mode === "direct" ? 600 : 250}`, "Search workflows", "notes");
     expect(after.text).toContain("Open Release notes writer");
@@ -1255,6 +1296,32 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("fill edit plans (live Chrome)"
   }, 30_000);
   afterAll(async () => { await page?.close().catch(() => undefined); await chrome?.close(); });
 
+  it("a two-block editor whose send control has no send word, or no name, next to a hidden input, is a composer: nothing is sent", async () => {
+    const url = pathToFileURL(path.join(FIXTURES, "composer-send.html")).href;
+    for (const [label, id] of [["Icon composer", "icon"], ["Ask composer", "ask"]] as const) {
+      await page.navigate(url, NAV_MS);
+      const obs = await page.observe();
+      // One line: the append joins with a space, as in any composer.
+      const r = await page.act(find(obs, "fill", label), obs, "Reviewed by QA", { mode: "append" });
+      expect(r).toMatchObject({ mode: "append", shape: "composer" });
+      expect(lines(await text(id)).join(" ")).toContain("Reviewed by QA");
+      // Two lines: a composer refuses them before any change.
+      await page.navigate(url, NAV_MS);
+      const again = await page.observe();
+      await expect(page.act(find(again, "fill", label), again, "Line one\nLine two", { mode: "append" })).rejects.toThrow(/line breaks/);
+      expect(await text("sent")).toBe("");
+    }
+  });
+
+  it("a multi-line replace into a Quill-like document keeps every line: a caret at the editor level on the new block counts", async () => {
+    const url = pathToFileURL(path.join(FIXTURES, "quill-like.html")).href;
+    await page.navigate(url, NAV_MS);
+    const obs = await page.observe();
+    const r = await page.act(find(obs, "fill", "Notes"), obs, "Tuesday works for me.\nSee you at 10.", { mode: "replace" });
+    expect(r).toMatchObject({ mode: "replace", shape: "document" });
+    expect(lines(await text("ql"))).toEqual(["Tuesday works for me.", "See you at 10."]);
+  });
+
   it("an append into a document adds a new block after the last one; no Mod+A, no Enter, no hidden input", async () => {
     const r = await fillIn("Document", "Reviewed by QA", "append");
     expect(r).toMatchObject({ mode: "append", shape: "document" });
@@ -1413,6 +1480,14 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("date fields (live Chrome)", ()
     await page.navigate(segmentsUrl, NAV_MS);
     const after = await set("Event date (M/D/YYYY)", "2027-12-05");
     expect(shownOf(field(after, "Event date (M/D/YYYY)"))).toBe("2027-12-05");
+  });
+
+  it("a date part whose click moves focus to a popover field gets no digit: the digits never go into the other field", async () => {
+    await page.navigate(`${segmentsUrl}?thief=1`, NAV_MS);
+    const obs = await page.observe();
+    const ev = field(obs, "Event date (M/D/YYYY)");
+    await expect(page.setDate(ev, obs, datePlan(ev, obs, "2026-09-30")?.plan as never)).rejects.toBeInstanceOf(StalePage);
+    expect(await evaluate("document.getElementById('pop-search').value")).toBe("");
   });
 
   it("a stale observation types nothing", async () => {

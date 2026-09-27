@@ -171,6 +171,14 @@ segs.forEach((seg, i) => {
   });
   seg.addEventListener("beforeinput", (ev) => ev.preventDefault());
 });
+// ?thief=1: a click on the month segment opens a popover whose own field takes focus (a picker with a search box).
+if (new URLSearchParams(location.search).get("thief") === "1") {
+  const pop = document.createElement("div");
+  pop.innerHTML = '<input id="pop-search" aria-label="Search dates">';
+  pop.hidden = true;
+  document.body.append(pop);
+  segs[0].addEventListener("mouseup", () => { pop.hidden = false; document.getElementById("pop-search").focus(); });
+}
 </script>
 </body>
 </html>

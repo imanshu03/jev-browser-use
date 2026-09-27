@@ -33,3 +33,9 @@ export const MCP_HINTS: RunnerHints = {
   credential: "tell the user to type it in the Chrome window, then call browse again. Never send it through the assistant",
   unattendedWall: "this run is autonomous and no person answers in this session, so Jev did not wait for a sign-in. Tell the user to sign in in the Chrome window (a headed run shows it), then call browse again",
 };
+
+/** The hints of a server with JEV_MCP_AUTONOMOUS=0: no hint tells the user to turn on a mode that this server refuses. */
+export function hintsFor(env: NodeJS.ProcessEnv, hints: RunnerHints): RunnerHints {
+  if (env[MCP_ENV.autonomous] !== "0") return hints;
+  return Object.fromEntries(Object.entries(hints).map(([k, v]) => [k, typeof v === "string" ? v.replace(` ${AUTONOMY_WORDS}`, "") : v])) as RunnerHints;
+}

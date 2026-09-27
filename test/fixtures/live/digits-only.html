@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Digits only</title>
+<!-- The usual digits-only filter: shortcuts with Ctrl or Meta pass, digits and editing keys pass, every other key is
+     cancelled. A replace must still take effect. -->
+<input aria-label="Phone" id="phone" value="5550100">
+<script>
+  const ok = /^(?:[0-9]|Backspace|Delete|ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Tab|Home|End|Enter)$/;
+  document.getElementById("phone").addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || ok.test(e.key)) return;
+    e.preventDefault();
+  });
+</script>

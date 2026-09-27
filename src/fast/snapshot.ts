@@ -69,8 +69,8 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
-    // A textbox never takes its name from its content: its text is its value. Only an input button is named by its value
-    // (a Radix checkbox is a <button value="on">).
+    // A textbox never takes its name from its content: its text is its value. An input button is named by its value; a
+    // <button> only when nothing else names it, and never by a state value (a Radix checkbox is a <button value="on">).
     const field=seen.size===1 && ['textbox','searchbox'].includes(role(e));
     const referenced=(e.getAttribute('aria-labelledby')||'').split(/\s+/)
       .map(id=>name(document.getElementById(id),seen)).filter(Boolean).join(' ');
@@ -79,7 +79,10 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       (e.tagName==='INPUT' && ['button','submit','reset'].includes(e.type) ? e.value : '') || e.getAttribute('alt') ||
       (e.tagName==='INPUT' || field ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
         n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
-      e.getAttribute('title') || e.getAttribute('aria-placeholder') || e.getAttribute('placeholder') || e.getAttribute('data-placeholder') || e.querySelector('[data-placeholder]')?.getAttribute('data-placeholder') || '';
+      e.getAttribute('title') || e.getAttribute('aria-placeholder') || e.getAttribute('placeholder') || e.getAttribute('data-placeholder') || e.querySelector('[data-placeholder]')?.getAttribute('data-placeholder') ||
+      // Last: the value of a <button> with no other name (an icon-only intent button: value="send", value="delete"),
+      // never a state value such as "on" (a Radix checkbox is a <button value="on">).
+      (e.tagName==='BUTTON' && !/^(?:on|off|true|false|yes|no|[01])?$/i.test(String(e.value||'').trim()) ? String(e.value).trim() : '') || '';
   };
   const roles=['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
     'option','gridcell','combobox','textbox','searchbox','spinbutton'];
@@ -121,8 +124,11 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
         .replace(/\s+/g,' ').trim().replace(/^@/,'').trim().slice(0,80);};
     const mentions=top.filter(chip).map(label).filter(Boolean);
     let bare='', n;
-    const walker=document.createTreeWalker(e,NodeFilter.SHOW_TEXT);
-    while ((n=walker.nextNode())) if (!top.some(a=>a.contains(n))) bare+=n.textContent;
+    // The walk skips the subtree of each atom: one pass over the text, not text nodes times atoms.
+    const tops=new Set(top);
+    const walker=document.createTreeWalker(e,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,
+      {acceptNode:x=>tops.has(x) ? NodeFilter.FILTER_REJECT : x.nodeType===3 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP});
+    while ((n=walker.nextNode())) bare+=n.textContent;
     return {mentions,bareText:bare.replace(/\s+/g,' ').trim(),otherAtoms:top.filter(a=>!chip(a)).length};
   };
   cache.focus=()=>{
@@ -219,9 +225,15 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   };
   const ITEM_ATTR=/^(?:title|aria-label|data-[\w-]*(?:value|mail|name|label|title|text|user|tag)[\w-]*)$/i;
   // Text nodes, not innerText: CSS text-transform changes innerText. The text of a remove control is left out. An item
-  // with more than 40 elements is not a chip (a message list before a chat input): it gets its cut text only.
-  const tokenItem=(x,field)=>{
-    if (x.getElementsByTagName('*').length>40) return [itemId(x),(x.textContent||'').slice(0,400).replace(/\s+/g,' ').trim().slice(0,200),0];
+  // with more than 40 elements is not a chip (a message list before a chat input): it gets its cut text only. Nor is a
+  // row: an item as wide as its parent, wholly above the input's line (a sent message with its Delete button stacks as
+  // a block over a chat input; a chip sits in the input's own line or wraps beside the other chips).
+  const rowOf=(x,e)=>{
+    const p=x.parentElement, r=x.getBoundingClientRect(), f=e.getBoundingClientRect();
+    return !!p && p.clientWidth>0 && r.width>=0.9*p.clientWidth && r.bottom<=f.top+1;
+  };
+  const tokenItem=(x,field,e)=>{
+    if (x.getElementsByTagName('*').length>40 || rowOf(x,e)) return [itemId(x),(x.textContent||'').slice(0,400).replace(/\s+/g,' ').trim().slice(0,200),0];
     const controls=[x,...x.querySelectorAll('button,[role="button"]')].filter(b=>b.matches('button,[role="button"]'));
     const kinds=controls.map(removeKind), removers=controls.filter((b,i)=>kinds[i]>0);
     const words=[], walker=document.createTreeWalker(x,NodeFilter.SHOW_TEXT); let n;
@@ -267,7 +279,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
       levels.unshift(before);
     }
     const found=levels.flat().filter(x=>!x.matches('script,style,template') && visible(x))
-      .map(x=>tokenItem(x,field)).filter(([,t,k])=>t || k).slice(-20);
+      .map(x=>tokenItem(x,field,e)).filter(([,t,k])=>t || k).slice(-20);
     const combo=e.getAttribute('role')==='combobox' || e.hasAttribute('aria-haspopup');
     const chips=found.filter(([,t,k])=>t && (k===2 || k===1 && combo)).map(([,t])=>t);
     const owner=e.closest('[role="combobox"]');
@@ -589,26 +601,29 @@ export function causalArmScript(node: number | null): string {
   const W=window, POPUP=${JSON.stringify(POPUP)}, BUSY=${JSON.stringify(BUSY)}, sig=${POPUP_SIG};
   let s=W.__jevCausal;
   if (!s) {
-    s=W.__jevCausal={armed:false,until:0,depth:0,cur:0,last:0,timers:new Map(),seen:new WeakMap(),busy:new WeakSet(),fill:null,field:null,changed:[],native:W.setTimeout};
+    s=W.__jevCausal={armed:false,until:0,depth:0,cur:0,last:0,inputOpen:false,followGen:0,timers:new Map(),seen:new WeakMap(),busy:new WeakSet(),fill:null,field:null,changed:[],native:W.setTimeout};
     const tracking=()=>s.armed && (s.depth>0 || performance.now()<s.until);
     const wrap=native=>new Proxy(native,{apply(fn,self,args){
       const cb=args[0], delay=Number(args[1])||0;
       if (!tracking() || typeof cb!=='function' || delay>=s.max) return Reflect.apply(fn,self,args);
-      const gen=(s.depth>0 ? s.cur : s.last)+1, prior=s.seen.get(cb);
+      // The generation counts from the input: a timer that the input's own events set (in the input window) is
+      // generation 1, one set in a follow window is one more than the callback that opened that window, and one set
+      // inside a tracked callback is one more than that callback. A background chain never uses up the input's.
+      const gen=(s.depth>0 ? s.cur : s.inputOpen ? 0 : s.followGen)+1, prior=s.seen.get(cb);
       if (gen>s.gens || (prior!==undefined && delay>=prior)) return Reflect.apply(fn,self,args);
       // A callback that arms a new copy of itself (a new closure with the same code) with the same delay is a poll too.
       // Never for native code: every bound function shows the same text, and a bound callback that schedules another
       // one (a debounced search) is new work.
       if (s.depth>0 && s.run && delay===s.run.delay && String(cb)===s.run.src() && !/\[native code\]\s*\}$/.test(s.run.src())) return Reflect.apply(fn,self,args);
-      s.seen.set(cb,delay);
       let id, first=true, src;
       const run=function(...rest){
         if (!first) return cb.apply(this,rest);
-        first=false; s.timers.delete(id); s.depth++;
+        // Seen when it runs, not when it is set: a debounce that is cleared and set again before it ran is new work.
+        first=false; s.timers.delete(id); s.depth++; s.seen.set(cb,delay);
         const cur=s.cur, outer=s.run; s.cur=gen;
         s.run={delay,src:()=>src??=String(cb)};
         try { return cb.apply(this,rest); }
-        finally { s.depth--; s.cur=cur; s.run=outer; s.last=Math.max(s.last,gen); if (s.armed) s.until=Math.max(s.until,performance.now()+s.follow); }
+        finally { s.depth--; s.cur=cur; s.run=outer; s.last=Math.max(s.last,gen); if (s.armed) { s.until=Math.max(s.until,performance.now()+s.follow); s.followGen=gen; } }
       };
       id=Reflect.apply(fn,self,[run,...args.slice(1)]);
       s.timers.set(id,gen);
@@ -619,7 +634,7 @@ export function causalArmScript(node: number | null): string {
     W.clearTimeout=clear(W.clearTimeout); W.clearInterval=clear(W.clearInterval);
   }
   s.follow=o.follow; s.max=o.max; s.gens=o.gens;
-  s.timers.clear(); s.seen=new WeakMap(); s.cur=0; s.last=0;
+  s.timers.clear(); s.seen=new WeakMap(); s.cur=0; s.last=0; s.inputOpen=true; s.followGen=0;
   s.busy=new WeakSet(document.querySelectorAll(BUSY));
   const field=o.node===null ? null : W.__jevFast?.nodes.get(o.node);
   s.fill=field ? {field,before:new Map([...document.querySelectorAll(POPUP)].map(p=>[p,sig(p)]))} : null;
@@ -639,8 +654,8 @@ export function causalStateScript(close: boolean, extend: boolean): string {
   const s=window.__jevCausal;
   if (!s || !s.armed) return null;
   const now=performance.now();
-  if (close) s.until=Math.min(s.until,now);
-  if (extend) s.until=Math.max(s.until,now+s.follow);
+  if (close) { s.until=Math.min(s.until,now); s.inputOpen=false; }
+  if (extend) { s.until=Math.max(s.until,now+s.follow); s.followGen=0; }
   const busy=[...document.querySelectorAll(${JSON.stringify(BUSY)})].some(e=>!s.busy.has(e) && e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
   return {pending:s.timers.size,follow:Math.max(0,Math.round(s.until-now)),busy};
 })(${close},${extend})`;
@@ -794,8 +809,11 @@ export const KEY_GUARD_SCRIPT = "(() => { const c=window.__jevFast; return c ? c
  */
 export const EDIT_SETTLE_SCRIPT = "new Promise(r => { const t = window.__jevCausal?.native || setTimeout; t.call(window, r, 50); requestAnimationFrame(() => requestAnimationFrame(() => t.call(window, r, 0))); })";
 
-/** The names of a control that sends a message from a composer: COMPOSER_SEND_WORDS, as SEND_BUTTON in loop.ts. */
-const SEND_CONTROL = String.raw`\b(?:${COMPOSER_SEND_WORDS.join("|")})\b`;
+/**
+ * The names of a control that sends a message from a composer: COMPOSER_SEND_WORDS, as SEND_BUTTON in loop.ts, and
+ * "submit" and "ask" (an AI chat box). The shape check reads them: a doubt makes a composer, never a document.
+ */
+const SEND_CONTROL = String.raw`\b(?:${[...COMPOSER_SEND_WORDS, "submit", "ask"].join("|")})\b`;
 
 /** One step of a fill, read in the page. See `editScript`. */
 export interface EditStep {
@@ -879,15 +897,19 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   if (a.step==='read') {
     if (kind!=='editable') return out(true,'',{shape:kind});
     // A send-like control in the field's form or dialog, or else in the containers around the field that hold no other
-    // text field (up to 6): a new line can send there.
+    // visible text field (up to 6): a new line can send there. A send-like control has a send name, or it is an
+    // icon-only button with no name after the field (a send arrow). A hidden field (an emoji search, a clipboard input)
+    // does not end the search. A doubt makes a composer: a composer never takes a new block by code.
     const send=new RegExp(a.send,'i');
-    const name=b=>b.getAttribute('aria-label')||b.innerText||b.value||b.getAttribute('title')||'';
+    const name=b=>(b.getAttribute('aria-label')||b.innerText||b.value||b.getAttribute('title')||'').trim();
+    const shown=x=>x.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
     const fields='textarea,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"],input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"],input[type="number"]';
     const scope=e.closest('form,[role="form"],dialog,[role="dialog"]');
     const roots=scope ? [scope] : [];
-    for (let p=e.parentElement,i=0;p && !scope && i<6 && ![...p.querySelectorAll(fields)].some(f=>f!==e && !e.contains(f) && !f.contains(e));p=p.parentElement,i++) roots.push(p);
+    for (let p=e.parentElement,i=0;p && !scope && i<6 && ![...p.querySelectorAll(fields)].some(f=>f!==e && !e.contains(f) && !f.contains(e) && shown(f));p=p.parentElement,i++) roots.push(p);
+    const iconAfter=b=>name(b)==='' && !!b.querySelector('svg,img') && !!(e.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
     const sends=roots.some(r=>[...r.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"]')]
-      .some(b=>!e.contains(b) && send.test(name(b))));
+      .some(b=>!e.contains(b) && shown(b) && (send.test(name(b)) || iconAfter(b))));
     // Blocks with text, below the wrappers that hold all of them (Draft.js puts one wrapper around the blocks).
     let box=e;
     while (box.children.length===1 && !inline(box.children[0]) && box.children[0].children.length>0) box=box.children[0];
@@ -907,6 +929,11 @@ export function editScript(node: number, step: "read" | "check" | "blank", mode:
   const before=textIn(range(e,0,r.startContainer,r.startOffset)), after=textIn(range(r.endContainer,r.endOffset,e,e.childNodes.length));
   let block=r.endContainer.nodeType===3 ? r.endContainer.parentElement : r.endContainer;
   while (block && block!==e && inline(block)) block=block.parentElement;
+  // A caret at the editor level points at a block (Quill leaves it at (editor, 1) after a new paragraph): that block.
+  if (block===e && r.endContainer===e) {
+    const at=e.childNodes[r.endOffset] ?? e.childNodes[r.endOffset-1];
+    if (at && at.nodeType===1 && !inline(at)) block=at;
+  }
   const within=(block && block!==e ? block : e), inBlock=document.createRange();
   inBlock.selectNodeContents(within);
   const caretBlank=norm(textIn(inBlock))==='';
@@ -949,6 +976,14 @@ export function selectPartScript(node: number): string {
   if (!e?.isConnected || e.tagName!=='INPUT') return false;
   try { e.select(); } catch { return false; }
   return e.selectionStart===0 && e.selectionEnd===e.value.length;
+})(${Math.trunc(node)})`;
+}
+
+/** True when focus is on the date part `node` or inside it: a key or an insert goes only there. */
+export function partFocusScript(node: number): string {
+  return `(node => {
+  const e=window.__jevFast?.nodes.get(node), a=document.activeElement;
+  return !!e?.isConnected && !!a && (a===e || e.contains(a));
 })(${Math.trunc(node)})`;
 }
 

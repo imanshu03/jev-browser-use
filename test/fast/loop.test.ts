@@ -3664,6 +3664,8 @@ describe("chip (token) fields", () => {
     lingers?: boolean;
     /** The options are role=option in a list with no form, and the first one is highlighted: Enter picks it (focus.enterOption). */
     highlight?: boolean;
+    /** The name of the chip field, when it is not the placeholder of the upload form. */
+    label?: string;
     submitted: string | null;
   }
 
@@ -3677,7 +3679,7 @@ describe("chip (token) fields", () => {
       ...(pop?.open ? { popup: true as const } : {}),
     };
     const actions = [
-      el("e1", "fill", s.chips.length === 0 ? FIRST : "textbox", "textbox", { node: 1, value: s.draft, form: 3, inputType: "text", token }),
+      el("e1", "fill", s.label ?? (s.chips.length === 0 ? FIRST : "textbox"), "textbox", { node: 1, value: s.draft, form: 3, inputType: "text", token }),
       el("e2", "fill", "Title (Optional)", "textbox", { node: 2, value: s.title, form: 3, inputType: "text",
         token: { items: [[91, "Title (Optional)", 0]], chips: [], ...(s.lingers && s.focus === 2 && s.open?.open ? { popup: true as const } : {}) } }),
       el("e3", "click", "Open Title (Optional)", "textbox", { node: 2, form: 3 }),
@@ -3761,9 +3763,21 @@ describe("chip (token) fields", () => {
     const after = stepReqs(t)[4]!.state;
     expect(after.recent_actions.at(-1)).toEqual({ action: 'Enter in "textbox"', kind: "key", text: "bob@example.com", page_changed: true });
     expect(after.retry_reason).toBeUndefined();
-    expect(r.steps.map((s) => `${s.action}:${s.result}`)).toEqual(["fill:ok", "press_key:ok", "fill:ok", "fill:ok", "click:ok", "none:done"]);
+    // The gate's script Enter is a page input with a record of its own (after the second fill).
+    expect(r.steps.map((s) => `${s.action}:${s.result}`)).toEqual(["fill:ok", "press_key:ok", "fill:ok", "press_key:ok", "fill:ok", "click:ok", "none:done"]);
     // The field had no evidence of a chip field yet: Jev's first Enter was a trusted Enter with the submit risk.
     expect(r.steps[1]).toMatchObject({ risk: "submit" });
+  });
+
+  it("a field named for a message is never learned as a chip field: a typed draft is not sent by a script Enter at DONE", async () => {
+    // A chat input: Enter sends, and the sent message shows before the input with a Delete button, as a chip would.
+    const t = chips([fill("Reply to Ann", "v_a"), enter, fill("Reply to Ann", "v_b"), finish], { popup: NO_MEMBERS, label: "Reply to Ann" }, { vars: { a: "Thanks", b: "See you Monday" } },
+      { human: fakeHuman({ interactive: true, confirm: [true] }) });
+    const r = await t.runner.run();
+    expect(r.outcome).toBe("done");
+    expect(ops(t)).toEqual(["fill e1 Thanks", "press", "fill e1 See you Monday"]);
+    expect(t.state.chips).toEqual(["Thanks"]);
+    expect(t.log.lines.some((l) => /chip field: .* added a value as a chip/.test(l))).toBe(false);
   });
 
   it("with options in the popup, code never presses Enter: a hint bans the fill for the re-ask, and Jev clicks the member", async () => {
@@ -3854,13 +3868,27 @@ describe("chip (token) fields", () => {
     expect(trusted.state.chips).toEqual(["x", "bob@example.com"]);
   });
 
-  it("Jev's Enter with options open that adds another value than the typed one blocks", async () => {
+  it("Jev's Enter while the popup shows suggestions presses nothing: Enter could add the highlighted one, not the typed value", async () => {
     const t = chips([fill("textbox", "v_q"), enter, finish],
       { multi: true, chips: ["frontend"], enterPicks: true, popup: { open: true, text: "debug\nCreate \"bug\"", picks: ["debug", "Create \"bug\""], busy: false } }, { vars: { q: "bug" } });
     const r = await t.runner.run();
+    expect(ops(t)).toEqual(["fill e1 bug"]);
+    expect(t.state.chips).toEqual(["frontend"]);
     expect(r.outcome).toBe("blocked");
     expect(r.blocked?.kind).toBe("ambiguous");
-    expect(r.blocked?.hint).toMatch(/^Enter in "textbox" added "debug[^"]*", not "bug"$/);
+    const reasons = stepReqs(t).map((x) => x.state.retry_reason ?? "");
+    expect(reasons.some((x) => x.includes('"textbox" shows suggestions ("debug", "Create "bug"")') && x.includes('instead of "bug"'))).toBe(true);
+  });
+
+  it("suggestions without ARIA roles show as popup text only: the gate presses no Enter, and a new chip must hold the typed value", async () => {
+    // A tags widget whose rows have no role: the popup read finds no clickable option, only the text "debug", "bugfix".
+    const t = chips([fill("textbox", "v_q"), click(SUBMIT), finish],
+      { multi: true, chips: ["frontend"], enterPicks: true, popup: { open: true, text: "debug\nbugfix", picks: [], busy: false } }, { vars: { q: "bug" } });
+    const r = await t.runner.run();
+    expect(ops(t).filter((o) => o.startsWith("commit"))).toEqual([]);
+    expect(t.state.chips).toEqual(["frontend"]);
+    expect(t.state.submitted).toBeNull();
+    expect(r.outcome).toBe("blocked");
   });
 
   it("a click that picks the pending value does not wait for it: a 'Create' option, and the option that Enter picks", async () => {
@@ -4785,6 +4813,55 @@ describe("early decisions: a send that the settled page reverses", () => {
       if (maxSteps > 1) expect(settled.length).toBeGreaterThan(0);
     });
   }
+});
+
+describe("the send record after a new page, and across forms (open-points review, groups 4 and 6)", () => {
+  const URL = "https://mail.example/t/9";
+  const TEXT = "Tuesday works.";
+  const compose = (doc: number) => obs(URL, [el("e1", "fill", "Reply", "textbox", { node: 1, value: TEXT, multiline: true, form: 7 }), el("e2", "click", "Send", "button", { node: 2, form: 7 })], "Thread", { doc, filled: [1], texts: [[1, TEXT]] });
+  const stop = { page_kind: "task_page", operation: { choice: "BLOCKED", confidence: 0.9, probabilities: { BLOCKED: 0.9, WAIT: 0.1 } }, blocked_reason: "other" };
+  const sendThenStop = (name: string, state: unknown, q: Questions): PartialAnswers => {
+    if (name !== "step") return {};
+    const text = (state as { page: { text: string } }).page.text;
+    return text === "Thread" ? { page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "Send"), confidence: 0.95 } } : stop;
+  };
+  const after = (next: Observation) => setup("send the reply", { pages: { c: compose(1), n: next }, start: "c", transitions: (c) => (c.op === "act" && c.id === "e2" ? "n" : undefined) },
+    sendThenStop, { url: URL, maxSteps: 3, confirm: "autonomous" }, { unsent: [{ doc: 1, node: 1, label: "Reply", text: TEXT, request: null }] });
+
+  it("a new page that holds the text again (a session timeout) is no send", async () => {
+    const timeout = { ...compose(2), text: "Your session timed out. Send it again." };
+    const t = after(timeout);
+    await t.runner.run();
+    expect(t.runner.sentTexts()).toEqual([]);
+  });
+
+  it("a review page that shows the text next to a confirm control is no send", async () => {
+    const review = obs(URL, [el("e5", "click", "Edit", "link", { node: 5 }), el("e6", "click", "Confirm and send", "button", { node: 6, form: 8 })], `Review your reply\n${TEXT}`, { doc: 2, filled: [], texts: [] });
+    const t = after(review);
+    await t.runner.run();
+    expect(t.runner.sentTexts()).toEqual([]);
+  });
+
+  it("a new page that neither holds nor shows the text records the send", async () => {
+    const sent = obs(URL, [el("e7", "click", "Inbox", "link", { node: 7 })], "Your reply was sent", { doc: 2, filled: [], texts: [] });
+    const t = after(sent);
+    await t.runner.run();
+    expect(t.runner.sentTexts()).toEqual([{ field: "Reply", text: TEXT }]);
+  });
+
+  it("a send in one form records only the texts of its form: a note of another form that leaves the view is not sent", async () => {
+    const NOTE = "Check the contract first.";
+    const two = obs(URL, [
+      el("e1", "fill", "Reply", "textbox", { node: 1, value: TEXT, multiline: true, form: 7 }), el("e2", "click", "Send", "button", { node: 2, form: 7 }),
+      el("e3", "fill", "Private note", "textbox", { node: 3, value: NOTE, multiline: true, form: 9 }),
+    ], "Thread", { doc: 1, filled: [1, 3], texts: [[1, TEXT], [3, NOTE]] });
+    const gone = obs(URL, [el("e7", "click", "Inbox", "link", { node: 7 })], "Inbox", { doc: 1, filled: [], texts: [] });
+    const t = setup("send the reply", { pages: { c: two, n: gone }, start: "c", transitions: (c) => (c.op === "act" && c.id === "e2" ? "n" : undefined) },
+      sendThenStop, { url: URL, maxSteps: 3, confirm: "autonomous" },
+      { unsent: [{ doc: 1, node: 1, label: "Reply", text: TEXT, request: null }, { doc: 1, node: 3, label: "Private note", text: NOTE, request: null }] });
+    await t.runner.run();
+    expect(t.runner.sentTexts()).toEqual([{ field: "Reply", text: TEXT }]);
+  });
 });
 
 describe("a value head that the oracle dropped", () => {

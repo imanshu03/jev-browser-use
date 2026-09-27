@@ -1,7 +1,7 @@
 // Deterministic text work on the task string. No network.
 import type { ProfileEntry } from "./browser.js";
 import type { DateFact, Span } from "./types.js";
-import { LIMITS, SECRET_KEY } from "./types.js";
+import { LIMITS, secretKey } from "./types.js";
 
 export const VALUE_VERBS = ["search for", "search", "look up", "type", "enter", "fill in", "fill", "write", "put",
   "find", "named", "called", "titled", "with", "as", "to", "for", "into", "query", "about"] as const;
@@ -229,7 +229,7 @@ function maskApostrophes(t: string): string {
 
 const unmaskApostrophes = (t: string): string => t.replace(/[\u0001\u0002]/g, (m) => APOS_UNMASK[m] ?? m);
 const DOMAIN_RE = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|co|dev|app|gov|edu|uk|in|de|fr|sh)(?:\/[^\s"'<>)]*)?\b/gi;
-const SECRET_LEAD = /password|passcode|pin|otp|secret/i;
+const SECRET_LEAD = /\b(?:password|passcode|pin|pincode|otp|secret)s?\b/i;
 /** A URL or a domain that starts a value, and "and" after it: the value is the site ("Go to amazon.com and search for shoes"). */
 const SITE_AND = new RegExp(`^(?:https?:\\/\\/[^\\s"'<>)]+|${DOMAIN_RE.source})(?=\\s+(?:and|&)\\s)`, "i");
 
@@ -239,7 +239,7 @@ const NAME_WORD = String.raw`(?:[A-Z]['’])?[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:-[A-Z
  * An @handle that is not part of an email address or a URL: "@ann.lee", or "@" before one to three name words ("@Research
  * Agent").
  */
-const HANDLE = String.raw`(?<![\p{L}\p{N}_.+/-])@(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:\s${NAME_WORD}){0,2}(?![\p{L}\p{N}_.@-])|[\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)`;
+const HANDLE = String.raw`(?<![\p{L}\p{N}_.+/-])@(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*(?:\s${NAME_WORD}){0,2}(?![\p{L}\p{N}_@-]|\.[\p{L}\p{N}_])|[\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)`;
 /** One name after a mention verb: an @handle, a quoted name, or one to three name words. */
 const MENTION_ITEM = String.raw`(?:${HANDLE}|"[^"]{1,60}"|“[^”]{1,60}”|${NAME_WORD}(?:\s${NAME_WORD}){0,2})`;
 /** A mention verb and its list of names: "mention Ann Lee", "Tag @ann.lee and Bob Roy", "ping Ann, Bob and Cleo". */
@@ -466,7 +466,7 @@ const VAR_END = /(?:^|[_-])(?:end|to|until|check_?out)(?:[_-]|$)/i;
 
 export function varSpans(vars: Record<string, string>): Span[] {
   return Object.entries(vars).map(([k, v]) => {
-    const span: Span = { id: `v_${k}`, text: v, source: "var" as const, secret: SECRET_KEY.test(k) };
+    const span: Span = { id: `v_${k}`, text: v, source: "var" as const, secret: secretKey(k) };
     const date = span.secret ? null : parseDate(v);
     if (date) {
       span.date = date;

@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Composer that sends on a new line</title>
+<!-- Rich composers whose new line sends the draft (ProseMirror turns insertParagraph into Enter). Each one has a hidden
+     input next to it (an emoji search), and its send control has no name: an icon, or a "Submit" or "Ask" button. -->
+<style>.box { border: 1px solid #888; margin: 8px; padding: 4px; } [hidden] { display: none; }</style>
+<div class="box">
+  <div id="icon" contenteditable="true" aria-label="Icon composer"><p>Hi team,</p><p>the deploy is done.</p></div>
+  <input class="emoji" hidden aria-label="Search emoji">
+  <button type="button"><svg width="12" height="12"><path d="M0 0L12 6L0 12z"/></svg></button>
+</div>
+<div class="box">
+  <div id="ask" contenteditable="true" aria-label="Ask composer"><p>Summarize this.</p><p>Keep it short.</p></div>
+  <input class="emoji" hidden aria-label="Search emoji">
+  <button type="button">Ask</button>
+</div>
+<p id="sent"></p>
+<script>
+  const sent = document.getElementById("sent");
+  for (const id of ["icon", "ask"]) {
+    const ed = document.getElementById(id);
+    ed.addEventListener("beforeinput", (e) => {
+      if (e.inputType !== "insertParagraph") return;
+      e.preventDefault();
+      sent.textContent += `SENT ${id}: ${ed.innerText.replace(/\s+/g, " ").trim()}\n`;
+      ed.innerHTML = "<p><br></p>";
+    });
+  }
+</script>

@@ -135,6 +135,8 @@ export interface UnattendedAction {
   fields: { label: string; value: string }[];
   /** A fill only: the number of characters of the old value that it replaced. */
   replaced_chars?: number;
+  /** A send, submit, or Enter: each message field that it sent with mention chips or with text that `texts` does not show. */
+  sends?: { label: string; text: string; mentions: string[] }[];
 }
 
 export interface StepRecord {
@@ -346,7 +348,16 @@ export const DISMISS_WORDS = ["close", "dismiss", "reject", "decline", "no thank
   "accept", "agree", "ok", "×", "later", "skip", "maybe later", "i understand"];
 
 export const CREDENTIAL_NAME = /password|passcode|passphrase|\bpin\b|\botp\b|one-time|verification code|security code|2fa|mfa|totp/i;
-export const SECRET_KEY = /pass|pin|otp|secret|token|code/i;
+/**
+ * A var key that names a secret. "password", "passcode", "passphrase", "passwd", "token", and "secret" count anywhere in
+ * the key ("apitoken", "userpassword"); the short words "pass", "pwd", "pin", "otp", and "code" only as a whole word
+ * ("otp_code", "pin"), never as part of another word ("opinion", "shipping_notes", "passenger_note"). `secretKey`
+ * splits camelCase first; keys are often lower-cased before that.
+ */
+export const SECRET_KEY = /(?:password|passwd|passcode|passphrase|token|secret)|(?:^|[^a-z])(?:pass|pwd|pin|otp|code)(?:[^a-z]|$)/i;
+export function secretKey(key: string): boolean {
+  return SECRET_KEY.test(key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"));
+}
 /** Labels of fields that take an exact value. Assistant-written text never goes into them. */
 export const EXACT_VALUE_NAME = /^(to|cc|bcc|from)\b|recipient|e-?mail address|^e-?mail$|phone|mobile number|amount|price|quantity|card number|\biban\b|account number|routing number|street|postal code|zip code|api key|\btoken\b|\bsecret\b|user ?name|\burl\b|website|\bsearch\b/i;
 /** Autocomplete tokens of fields that take an exact value. */
