@@ -1,0 +1,119 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Pointer rows fixture</title>
+<style>
+body{font:12px sans-serif;margin:6px}
+.row{cursor:pointer;padding:2px 4px;border-bottom:1px solid #eee}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+#dlg{border:1px solid #666;padding:4px}
+.box{border:1px solid #999;padding:3px}
+#sugg{border:1px solid #666;padding:2px}
+.many{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+</style></head>
+<body>
+<!-- Rule B (snapshot.ts cache.pointerText): styled divs with a click handler and a pointer cursor, as the location
+     suggestions of Blinkit (onclick property) and Zepto (React props in a role=dialog). No row has a role. -->
+<p id="out">Nothing picked</p>
+<div class="cols">
+<section>
+  <!-- A React-props row: React 17+ keeps onClick in __reactProps$<key>; a root listener calls it (see the script). -->
+  <div id="react" class="row">Koramangala 1st Block</div>
+  <!-- An onclick-property row. -->
+  <div id="prop" class="row">Koramangala Police Station</div>
+  <!-- A root row with a nested pointer child that has its own handler: only the root is a row. -->
+  <div id="outer" class="row">Indiranagar <span id="inner">(Bengaluru)</span></div>
+  <!-- A pointer div with no handler that page script can see. -->
+  <div id="bare" class="row">No handler here</div>
+  <!-- A pointer div with a handler that holds a native control. -->
+  <div id="holds" class="row">Holds a control <button type="button">Inner button</button></div>
+  <!-- A pointer div with a handler inside a link. -->
+  <a href="#x"><div id="inlink" class="row">Inside a link</div></a>
+  <!-- 201 characters of text: too long for a row. -->
+  <div id="long" class="row"></div>
+  <!-- A hidden row. -->
+  <div id="hidden" class="row" style="display:none">Hidden row</div>
+  <!-- A disabled row. -->
+  <div id="off" class="row" aria-disabled="true">Disabled row</div>
+  <!-- An onclick attribute that does not compile: a row, and the snapshot fires no page error for it. -->
+  <div id="attr" class="row" onclick="pick((">Attribute row</div>
+</section>
+<section>
+  <!-- An open dialog: its rows come first. -->
+  <div id="dlg" role="dialog" aria-label="Pick a place">
+    <div id="d1" class="row">Dialog row one</div>
+    <div id="d2" class="row">Dialog row two</div>
+  </div>
+  <!-- A chip field with a suggestion popup of rule-B rows, which the field controls. -->
+  <div class="box"><input id="area" type="text" aria-label="Area" aria-controls="sugg"></div>
+  <div id="sugg" role="listbox">
+    <div id="s1" class="row">Koramangala Suggestion A</div>
+    <div id="s2" class="row">Koramangala Suggestion B</div>
+    <div id="s3" role="option">Plain option</div>
+  </div>
+</section>
+</div>
+<script>
+const out = document.getElementById('out');
+// Page errors, as an error reporter sees them.
+window.__errors = [];
+window.addEventListener('error', (ev) => { window.__errors.push(String(ev.message)); });
+const pick = (text) => { out.textContent = 'Picked ' + text; };
+const byId = (id) => document.getElementById(id);
+// React-like props: an own key "__reactProps$<random>" that holds onClick. No onclick property, no listener on the row.
+const reactProps = (el, props) => { el['__reactProps$x7k2q'] = props; };
+// The root listeners: as React's event delegation, each walks up from the target and calls the first handler of its
+// kind in the props.
+for (const [type, prop] of [['click', 'onClick'], ['mousedown', 'onMouseDown'], ['pointerdown', 'onPointerDown']]) {
+  document.addEventListener(type, (ev) => {
+    for (let n = ev.target; n && n !== document; n = n.parentNode) {
+      const p = n['__reactProps$x7k2q'];
+      if (p && typeof p[prop] === 'function') { p[prop](ev); return; }
+    }
+  });
+}
+// Words, so that the row wraps in its column: 'Long ' (5) + 96 x 'a ' (192) + 'ends' (4) = 201 characters.
+byId('long').textContent = 'Long ' + 'a '.repeat(96) + 'ends';
+const newRow = (text) => {
+  const r = document.createElement('div');
+  r.className = 'row';
+  r.textContent = text;
+  r.onclick = () => pick(text);
+  return r;
+};
+if (location.search.includes('many')) {
+  // 70 rows, all in view: the snapshot keeps 60 of them.
+  const box = document.createElement('div');
+  box.className = 'many';
+  for (let i = 1; i <= 70; i++) box.appendChild(newRow('Row ' + i));
+  const parts = [box];
+  if (location.search.includes('dialog')) {
+    // An open dialog after the 70 rows: its rows come first, so the cap of 60 keeps them.
+    const dlg = document.createElement('div');
+    dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-label', 'Pick');
+    dlg.append(newRow('Dialog A'), newRow('Dialog B'));
+    parts.push(dlg);
+  }
+  document.body.replaceChildren(...parts);
+} else if (location.search.includes('far')) {
+  // A row below the fold: a 2000 px spacer, then the row. It is no action until a scroll brings it in view.
+  const gap = document.createElement('div');
+  gap.style.height = '2000px';
+  document.body.replaceChildren(newRow('Near row'), gap, newRow('Far row'));
+} else {
+  reactProps(byId('react'), { onClick: () => pick('Koramangala 1st Block'), children: 'Koramangala 1st Block' });
+  byId('prop').onclick = () => pick('Koramangala Police Station');
+  byId('outer').onclick = () => pick('Indiranagar');
+  byId('inner').onclick = (ev) => { ev.stopPropagation(); pick('Bengaluru'); };
+  byId('holds').onclick = () => pick('holds');
+  byId('inlink').onclick = () => pick('inlink');
+  byId('long').onclick = () => pick('long');
+  byId('hidden').onclick = () => pick('hidden');
+  byId('off').onclick = () => pick('off');
+  reactProps(byId('d1'), { onMouseDown: () => pick('Dialog row one') });
+  byId('d2').onclick = () => pick('Dialog row two');
+  byId('s1').onclick = () => pick('Suggestion A');
+  reactProps(byId('s2'), { onPointerDown: () => pick('Suggestion B') });
+  byId('s3').onclick = () => pick('Plain option');
+}
+</script>
+</body></html>

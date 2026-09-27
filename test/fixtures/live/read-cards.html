@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<!-- Synthetic fixture for the page reader (test/fast/read.live.test.ts): Blinkit-like and Zepto-like product cards.
+     No scripts and no network. -->
+<head>
+<meta charset="utf-8">
+<title>Cards fixture</title>
+<style>
+  body { margin: 0; font: 13px/1.35 sans-serif; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .strike, .line-through { text-decoration: line-through; color: #888; }
+  .categories-table > div > div { border: 1px solid #ddd; padding: 6px; min-height: 170px; }
+  .tw-add { display: inline-block; border: 1px solid green; padding: 2px 8px; cursor: pointer; }
+  .grid { display: grid; grid-template-columns: repeat(6, 180px); gap: 8px; margin-bottom: 8px; }
+  a.B4vNQ { display: block; border: 1px solid #ccc; padding: 6px; color: inherit; text-decoration: none; }
+  a.B4vNQ p, a.B4vNQ h5 { margin: 2px 0; }
+</style>
+</head>
+<body>
+<div>
+  <div>
+    <span>Quick shop fixture</span> <span>Delivery in 11 minutes</span> <a href="/login">Login</a>
+  </div>
+  <div>
+    <h1>Search results</h1>
+    <div class="categories--with-search"><div class="categories__body"><div class="wrapper"><div class="categories-table">
+      <h2>Showing results for chicken curry cut</h2>
+      <div style="display: grid; grid-template-columns: repeat(6, 180px); gap: 8px;">
+        <div data-pf="reset">
+          <div class="tw-badge">15% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Curry Cut (Small Pieces)</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹120</div><div class="strike">₹142</div><span class="sr-only">Price 120 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">15% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Curry Cut</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹127</div><div class="strike">₹149</div><span class="sr-only">Price 127 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Nandu's Chicken Curry Cut (Skinless)</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹134</div><span class="sr-only">Price 134 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">13% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Total Chicken - Precut Chicken Curry Cut</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹141</div><div class="strike">₹163</div><span class="sr-only">Price 141 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">13% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">FreshToHome Chicken Curry Cut</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹148</div><div class="strike">₹170</div><span class="sr-only">Price 148 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">12% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Zorabian Chicken Curry Cut</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹155</div><div class="strike">₹177</div><span class="sr-only">Price 155 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Suguna Chicken Curry Cut</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹162</div><span class="sr-only">Price 162 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">12% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Venky's Chicken Drumsticks</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹169</div><div class="strike">₹191</div><span class="sr-only">Price 169 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">11% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Breast Boneless</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹176</div><div class="strike">₹198</div><span class="sr-only">Price 176 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">11% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Nandu's Chicken Breast</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹183</div><div class="strike">₹205</div><span class="sr-only">Price 183 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">10% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Keema</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹190</div><div class="strike">₹212</div><span class="sr-only">Price 190 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">10% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Real Good Chicken Curry Cut</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹197</div><div class="strike">₹219</div><span class="sr-only">Price 197 rupees</span></div>
+            <div role="button" aria-disabled="true" class="tw-add">Out of stock</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">10% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Godrej Real Good Chicken Wings</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹204</div><div class="strike">₹226</div><span class="sr-only">Price 204 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">9% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Tender Spring Chicken</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹211</div><div class="strike">₹233</div><span class="sr-only">Price 211 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">FreshToHome Chicken Breast</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹218</div><span class="sr-only">Price 218 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">9% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Zorabian Chicken Keema</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹225</div><div class="strike">₹247</div><span class="sr-only">Price 225 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">9% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Suguna Chicken Drumsticks</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹232</div><div class="strike">₹254</div><span class="sr-only">Price 232 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">8% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Venky's Chicken Curry Cut</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹239</div><div class="strike">₹261</div><span class="sr-only">Price 239 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">8% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Wings</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹246</div><div class="strike">₹268</div><span class="sr-only">Price 246 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">8% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Nandu's Chicken Keema</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹253</div><div class="strike">₹275</div><span class="sr-only">Price 253 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">8% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Total Chicken Wings</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹260</div><div class="strike">₹282</div><span class="sr-only">Price 260 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">8% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Real Good Chicken Breast</div>
+          <div class="tw-pack">450 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹267</div><div class="strike">₹289</div><span class="sr-only">Price 267 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">7% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">Licious Chicken Lollipop</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹274</div><div class="strike">₹296</div><span class="sr-only">Price 274 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset">
+          <div class="tw-badge">7% OFF</div>
+          <div class="tw-img"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="40" height="40"></div>
+          <div class="tw-eta"><span>11 MINS</span></div>
+          <div class="tw-name">FreshToHome Chicken Keema</div>
+          <div class="tw-pack">500 g</div>
+          <div class="tw-price-row">
+            <div class="tw-prices"><div aria-hidden="true">₹281</div><div class="strike">₹303</div><span class="sr-only">Price 281 rupees</span></div>
+            <div role="button" tabindex="0" class="tw-add">ADD</div>
+          </div>
+        </div>
+        <div data-pf="reset" style="display:none"><div class="tw-name">Hidden Chicken Product</div><div class="tw-pack">1 kg</div><div class="tw-price-row"><div class="tw-prices"><div>₹999</div></div></div></div>
+        <div></div>
+      </div>
+    </div></div></div></div>
+    <h2>More results</h2>
+    <div class="NR6Zf"><div class="wqrVb"><div class="lHdy6">
+        <div class="w-full"><div class="grid grid-cols-6">
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-goat-curry-cut-mini-pack/pvid/p01">
+            <div class="c5SZXs"><img alt="Licious Goat Curry Cut (Mini Pack)" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->150</p><p class="line-through mrp-tag">₹<!-- -->160</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Goat Curry Cut (Mini Pack)</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-curry-cut-small/pvid/p02">
+            <div class="c5SZXs"><img alt="Licious Chicken - Curry Cut (Small)" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->159</p><p class="line-through mrp-tag">₹<!-- -->169</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken - Curry Cut (Small)</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/relish-chicken-curry-cut-without-skin/pvid/p03">
+            <div class="c5SZXs"><img alt="Relish Chicken Curry Cut Without Skin" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->168</p><p class="line-through mrp-tag">₹<!-- -->178</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Relish Chicken Curry Cut Without Skin</h5><p class="pack-tag">450 g</p></div>
+          </a>
+        </div></div>
+        <div class="w-full"><div class="grid grid-cols-6">
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-skinless-curry-cut-large/pvid/p04">
+            <div class="c5SZXs"><img alt="Licious Chicken (Skinless) - Curry Cut (Large)" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->177</p><p class="line-through mrp-tag">₹<!-- -->187</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken (Skinless) - Curry Cut (Large)</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/zepto-fresh-chicken-curry-cut/pvid/p05">
+            <div class="c5SZXs"><img alt="Zepto Fresh Chicken Curry Cut" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->186</p><p class="line-through mrp-tag">₹<!-- -->196</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Zepto Fresh Chicken Curry Cut</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/nandu-s-chicken-curry-cut/pvid/p06">
+            <div class="c5SZXs"><img alt="Nandu's Chicken Curry Cut" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->195</p><p class="line-through mrp-tag">₹<!-- -->205</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Nandu's Chicken Curry Cut</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-breast/pvid/p07">
+            <div class="c5SZXs"><img alt="Licious Chicken Breast" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->204</p><p class="line-through mrp-tag">₹<!-- -->214</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken Breast</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/relish-chicken-keema/pvid/p08">
+            <div class="c5SZXs"><img alt="Relish Chicken Keema" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->213</p><p class="line-through mrp-tag">₹<!-- -->223</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Relish Chicken Keema</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/zepto-fresh-chicken-wings/pvid/p09">
+            <div class="c5SZXs"><img alt="Zepto Fresh Chicken Wings" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->222</p><p class="line-through mrp-tag">₹<!-- -->232</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Zepto Fresh Chicken Wings</h5><p class="pack-tag">450 g</p></div>
+          </a>
+        </div></div>
+        <div class="w-full"><div class="grid grid-cols-6">
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-drumsticks/pvid/p10">
+            <div class="c5SZXs"><img alt="Licious Chicken Drumsticks" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->231</p><p class="line-through mrp-tag">₹<!-- -->241</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken Drumsticks</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/nandu-s-chicken-breast/pvid/p11">
+            <div class="c5SZXs"><img alt="Nandu's Chicken Breast" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->240</p><p class="line-through mrp-tag">₹<!-- -->250</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Nandu's Chicken Breast</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/relish-chicken-lollipop/pvid/p12">
+            <div class="c5SZXs"><img alt="Relish Chicken Lollipop" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->249</p><p class="line-through mrp-tag">₹<!-- -->259</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Relish Chicken Lollipop</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/zepto-fresh-chicken-keema/pvid/p13">
+            <div class="c5SZXs"><img alt="Zepto Fresh Chicken Keema" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->258</p><p class="line-through mrp-tag">₹<!-- -->268</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Zepto Fresh Chicken Keema</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-wings/pvid/p14">
+            <div class="c5SZXs"><img alt="Licious Chicken Wings" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->267</p><p class="line-through mrp-tag">₹<!-- -->277</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken Wings</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/nandu-s-chicken-keema/pvid/p15">
+            <div class="c5SZXs"><img alt="Nandu's Chicken Keema" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->276</p><p class="line-through mrp-tag">₹<!-- -->286</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Nandu's Chicken Keema</h5><p class="pack-tag">450 g</p></div>
+          </a>
+        </div></div>
+        <div class="w-full"><div class="grid grid-cols-6">
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/relish-chicken-breast/pvid/p16">
+            <div class="c5SZXs"><img alt="Relish Chicken Breast" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->285</p><p class="line-through mrp-tag">₹<!-- -->295</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Relish Chicken Breast</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/zepto-fresh-chicken-breast/pvid/p17">
+            <div class="c5SZXs"><img alt="Zepto Fresh Chicken Breast" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->294</p><p class="line-through mrp-tag">₹<!-- -->304</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Zepto Fresh Chicken Breast</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/licious-chicken-keema/pvid/p18">
+            <div class="c5SZXs"><img alt="Licious Chicken Keema" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->303</p><p class="line-through mrp-tag">₹<!-- -->313</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Licious Chicken Keema</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/nandu-s-chicken-wings/pvid/p19">
+            <div class="c5SZXs"><img alt="Nandu's Chicken Wings" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->312</p><p class="line-through mrp-tag">₹<!-- -->322</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Nandu's Chicken Wings</h5><p class="pack-tag">450 g</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/relish-chicken-wings/pvid/p20">
+            <div class="c5SZXs"><img alt="Relish Chicken Wings" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->321</p><p class="line-through mrp-tag">₹<!-- -->331</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Relish Chicken Wings</h5><p class="pack-tag">1 pack (300 g)</p></div>
+          </a>
+          <a class="B4vNQ oikWp" data-testid="product-card" href="/pn/zepto-fresh-chicken-drumsticks/pvid/p21">
+            <div class="c5SZXs"><img alt="Zepto Fresh Chicken Drumsticks" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="60" height="60"><button class="cptQT7" tabindex="-1">ADD</button></div>
+            <div class="cp8Rg4"><p class="price-tag">₹<!-- -->330</p><p class="line-through mrp-tag">₹<!-- -->340</p></div>
+            <div class="cQAjo7"><h5 class="name-tag">Zepto Fresh Chicken Drumsticks</h5><p class="pack-tag">450 g</p></div>
+          </a>
+        </div></div>
+    </div></div></div>
+  </div>
+  <div>
+    <p>About us</p>
+    <p>Terms <a href="/terms">Read the terms</a></p>
+  </div>
+</div>
+</body>
+</html>

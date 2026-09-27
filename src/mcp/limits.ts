@@ -10,6 +10,12 @@ export const MCP = {
   idlePingMs: 45_000, pingWindowMs: 600_000, idleCloseMs: 1_800_000, idleCheckMs: 60_000,
   shutdownWatchdogMs: 15_000, viewSteps: 8,
   viewTokens: 7_000,           // estimated tokens per view; Codex cuts tool output above 10k tokens
+  // read_page and scraper
+  readTokensMin: 1_000, readTokensMax: 9_000, readTokensDefault: 6_000,
+  readCache: 3,                // page reads that a cursor or a scraper save can use
+  resultCache: 3,              // scraper run results that a cursor can use
+  scrapeRunMs: 100_000,        // a scraper run stops after this
+  scrapeGraceMs: 10_000,       // the call returns this long after the stop, also when the run has not ended; the sum < 120 s
 } as const;
 
 export const MCP_ENV = {

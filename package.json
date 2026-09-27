@@ -6,17 +6,19 @@
   "private": true,
   "bin": {
     "jev-browser": "./bin/jev-browser.js",
-    "jev-chat": "./bin/jev-chat.js"
+    "jev-chat": "./bin/jev-chat.js",
+    "jev-scrape": "./bin/jev-scrape.js"
   },
   "scripts": {
     "start": "tsx --env-file=.env src/cli.ts",
     "chat": "node bin/jev-chat.js",
     "mcp": "node bin/jev-mcp.js",
+    "scrape": "node bin/jev-scrape.js",
     "build:mcp": "node scripts/build-mcp.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts test/mcp/mcp.live.test.ts",
+    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts test/fast/pointer-rows.live.test.ts test/fast/read.live.test.ts test/scrape/scrape.live.test.ts test/mcp/mcp.live.test.ts test/mcp/read-page.live.test.ts",
     "smoke": "tsx --env-file=.env scripts/smoke.ts"
   },
   "engines": {

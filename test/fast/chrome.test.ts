@@ -218,12 +218,13 @@ describe("syncProfile", () => {
 });
 
 describe("attachTarget", () => {
-  function client() {
+  function client(fail: string[] = []) {
     const sent: { method: string; params: Record<string, unknown>; sessionId?: string }[] = [];
     const c: CdpClient = {
       closed: false,
       async send(method, params, sessionId) {
         sent.push({ method, params: params ?? {}, ...(sessionId !== undefined ? { sessionId } : {}) });
+        if (fail.includes(method)) throw new Error(`${method} refused`);
         if (method === "Target.createTarget") return { targetId: "T" };
         if (method === "Target.attachToTarget") return { sessionId: "S" };
         return {};
@@ -280,6 +281,38 @@ describe("attachTarget", () => {
     const headed = client();
     await attachTarget(headed.c, "about:blank", { headed: true, attached: false });
     expect(headed.sent.map((s) => s.method)).not.toContain("Emulation.setDeviceMetricsOverride");
+  });
+  it("geolocation: the permission goes to the browser (no session), then the override to the new tab; accuracy 50 when absent", async () => {
+    for (const attached of [false, true]) {
+      const { c, sent } = client();
+      const t = await attachTarget(c, "about:blank", { headed: false, attached, geolocation: { latitude: 12.9352, longitude: 77.6245 } });
+      expect(t).toEqual({ targetId: "T", sessionId: "S" });
+      const grant = sent.findIndex((s) => s.method === "Browser.grantPermissions");
+      const override = sent.findIndex((s) => s.method === "Emulation.setGeolocationOverride");
+      expect(sent[grant]).toEqual({ method: "Browser.grantPermissions", params: { permissions: ["geolocation"] } });
+      expect(sent[override]).toEqual({ method: "Emulation.setGeolocationOverride", params: { latitude: 12.9352, longitude: 77.6245, accuracy: 50 }, sessionId: "S" });
+      expect(grant).toBeGreaterThan(sent.findIndex((s) => s.method === "Target.attachToTarget"));
+      expect(override).toBe(grant + 1);
+    }
+    const acc = client();
+    await attachTarget(acc.c, "about:blank", { headed: true, attached: false, geolocation: { latitude: -33.86, longitude: 151.21, accuracy: 10 } });
+    expect(acc.sent.find((s) => s.method === "Emulation.setGeolocationOverride")?.params).toEqual({ latitude: -33.86, longitude: 151.21, accuracy: 10 });
+  });
+  it("without geolocation neither call goes out", async () => {
+    const { c, sent } = client();
+    await attachTarget(c, "about:blank", { headed: false, attached: false });
+    expect(sent.map((s) => s.method)).not.toContain("Browser.grantPermissions");
+    expect(sent.map((s) => s.method)).not.toContain("Emulation.setGeolocationOverride");
+  });
+  it("a refused permission is a debug line; the override still goes out and the tab opens", async () => {
+    const { c, sent } = client(["Browser.grantPermissions"]);
+    const log = fakeLogger();
+    const t = await attachTarget(c, "about:blank", { headed: false, attached: true, geolocation: { latitude: 1, longitude: 2 }, log });
+    expect(t).toEqual({ targetId: "T", sessionId: "S" });
+    expect(sent.find((s) => s.method === "Emulation.setGeolocationOverride")?.params).toEqual({ latitude: 1, longitude: 2, accuracy: 50 });
+    expect(log.lines.some((l) => l.startsWith("DEBUG") && l.includes("geolocation permission not granted") && l.includes("refused"))).toBe(true);
+    // No logger: still no error.
+    await expect(attachTarget(client(["Browser.grantPermissions"]).c, "about:blank", { headed: false, attached: false, geolocation: { latitude: 1, longitude: 2 } })).resolves.toEqual({ targetId: "T", sessionId: "S" });
   });
 });
 

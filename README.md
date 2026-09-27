@@ -6,6 +6,8 @@ Choose `cdp` for direct Chrome control, `chromium` for Chromium through the same
 
 Jev selects operations, targets, offered text values, and completion answers. Code checks confidence, confirmation, page freshness, retries, and run limits before it acts. Tasks can perform actions, extract visible text, or check a condition. In plugin runs, the user's assistant can also write new text for a field that Jev chose. Jev never writes text.
 
+`jev-scrape` saves a scraper for a table or a list on a page, and runs it again with no model call; see [Scraping](#scraping-jev-scrape).
+
 The package and repository are named `jev-browser-use`. The commands remain `jev-browser` and `jev-chat`. Saved keys and profile copies continue to use the `jev-browser` configuration directory, and environment variable names remain unchanged.
 
 ## Install
@@ -194,6 +196,61 @@ time 4.2 s (jev 2.1 s · browser 1.6 s) · input 44,120 tokens · output 61 toke
 ```
 
 The numbers are for that task only. `time` is the run time in seconds. `jev` is the time inside Jev requests. `browser` is the time inside browser commands and settle waits. `input` and `output` are the Jev tokens. `requests` is the number of Jev requests. `/stats` and the exit message show the session totals with the same split.
+
+## Scraping: `jev-scrape`
+
+`jev-scrape` makes a scraper for a table or a list of records on a page, such as a price sheet or the product cards of a search. A scraper is one JSON file: the steps from the start URL to the page (recorded from a Jev run), and an extraction that maps table columns or card slots to row fields. `jev-scrape run` replays the file with no Jev request and no LLM call. When the site changed and the run fails, the scraper heals itself, saves the new version, and gives the rows.
+
+```sh
+# A form: Jev reaches the price sheet once, and the steps keep {month} and {year} as params.
+./bin/jev-scrape.js new necc-daily --url https://www.e2necc.com/home/eggprice \
+  --task "Show the NECC daily egg prices for {month} {year}" --param month=09 --param year=2026 \
+  --want "one row per zone and day: section, zone, day, rate (per 100 eggs)"
+./bin/jev-scrape.js run necc-daily --param month=08
+
+# A search after a delivery location: the location steps run only while the site asks for a location.
+./bin/jev-scrape.js new zepto-search --url https://www.zepto.com/ \
+  --task "Set the delivery location to Koramangala, Bengaluru, then search for {query}" --param "query=Licious chicken curry cut" \
+  --want "one row per product card in the search results: name, pack, price, mrp (the struck-through price), in_stock"
+./bin/jev-scrape.js run zepto-search --param query="brown bread" --format csv --out bread.csv
+
+# A page that shows the table at its URL: no navigation, no Jev key needed.
+./bin/jev-scrape.js new necc-now --no-nav --url https://www.e2necc.com/home/eggprice --want "one row per zone and day"
+```
+
+| Command | What it does |
+|---|---|
+| `new <name> --task "<task>" --want "<rows and fields>" [--url <url>] [--param k=v]... [--no-nav] [--force] [--max-steps n]` | Jev reaches the page (unless `--no-nav`, which needs `--url`), the LLM writes the extraction, code tests it on the page, and the file is saved. `{param}` placeholders in `--task` and `--url` take the `--param` values. An existing name needs `--force`. |
+| `run <name\|path> [--param k=v]... [--no-heal \| --heal full\|code\|none]` | Replays the file and prints the rows. `full` (default) heals with code, then Jev, then the LLM; `code` with code only; `--no-heal` not at all. |
+| `read (--url <url> \| <name\|path>) [--load] [--context]` | Prints what the page reader sees, after the steps of a scraper when you name one. `--load` scrolls first; `--context` prints the LLM page context. For debugging. |
+| `list`, `show <name\|path>`, `rm <name\|path>` | The saved scrapers, one file, and delete one file. |
+
+Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else Parallelloop), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
+
+**Output.** stdout carries only the output; the log goes to stderr.
+
+- Default: the result JSON: `{scraper, version, params, url, rows, row_count, status, healed, reason, blocked, saved, stats: {duration_ms, jev_requests, llm_calls, steps, scrolls}}`. `healed` is null, or `{level: "L1"|"L2"|"L3", reason}`.
+- `--format csv`: the rows as CSV (a header of the field names, `null` as an empty cell) on stdout, and the result without rows as one log line on stderr. A text cell that starts with `=`, `+`, `-`, or `@` gets a `'` first, so that a spreadsheet shows it as text.
+- `--out <file>`: the rows go to the file (a JSON array, or CSV with `--format csv`); stdout is the result without rows and with `"out": "<path>"`. A failed run does not replace an earlier file.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | ok, also after a heal |
+| 2 | blocked: a sign-in wall or a captcha needs a person |
+| 3 | failed after the heal ladder (or with `--no-heal`), a locked profile, or a Chrome that did not start |
+| 4 | usage: a bad flag, an unknown scraper, a bad scraper file, a missing param, an existing name for `new` |
+
+**Healing.** L1 finds the table or card group again by code, from the header names, slot keys, and a few key names that the file keeps, and maps each field again. L2 runs Jev from the start URL and records new steps; it needs `TYPESAFE_API_KEY`. The rows judge Jev's path: when Jev does not say done, the run replays the shortest parts of its path that type every param and keeps the first one that gives the rows. L3 asks the LLM for a new extraction from the page context (at most 2 calls). A heal keeps the field names and types of the rows, and never lowers `min_rows` or drops a required field. A heal saves version + 1 and keeps the old version in `history` (10 entries). A plain run needs no key.
+
+**Steps and values.** A step that sets a value that the profile keeps, such as a delivery location, runs only while the site asks for it: when its control is missing and the page shows the typed value already as a whole word (the header shows "Koramangala"), the run goes on at the next step whose control is there. A missing select is never skipped: the run heals. A param value in the start URL is URL-encoded. A step that submits or deletes ("Add to cart", "Place order") is never saved. A form that shows a default (NECC shows the current month) gets a select step for each param that it shows, so `--param month=08` selects August although Jev did not touch the month when it made the scraper.
+
+**The LLM.** The default is Claude Code headless with no tools (`claude -p`, model `claude-sonnet-5`), in an empty temporary directory, with no API key of this package in its environment. The page data goes to it only as marked untrusted data, and its answer is only parsed as JSON. Set `JEV_SCRAPE_MODEL` for another model, `JEV_SCRAPE_CLAUDE_BIN` for the binary (default `~/.local/bin/claude`, else `claude` on the PATH), `JEV_SCRAPE_LLM=text` to use the text model of `JEV_TEXT_MODEL` and `JEV_TEXT_API_KEY`, or `JEV_SCRAPE_LLM=off`. `JEV_SCRAPE_LLM_TIMEOUT_MS` (default 180000), `JEV_SCRAPE_CONTEXT_CHARS` (default 48000), and `JEV_SCRAPE_STEP_MS` (default 8000, the wait for each step's control) tune it.
+
+**Files.** Scrapers live in `$XDG_CONFIG_HOME/jev-browser/scrapers/<name>.json` (default `~/.config`), mode 600, or at a path that you give. Nothing else is stored: no rows and no pages. A file never holds a secret: `new` refuses a secret param (such as `password` or `otp`) and a password in the task. The `--geo` of `new` stays in the file, and later runs use it. A file holds header names, slot keys, field types, and up to 5 key names of the rows, never the rows.
+
+**Sign-in and captchas.** A run on a page with a sign-in wall or a captcha pauses in a headed run at a terminal, so that you can sign in or solve it in the window; else it exits 2. There is no bypass. Sign in once with `--headed` on the profile copy, and later runs use that session.
+
+In Claude Code or Codex, the plugin tools `read_page` and `scraper` do the same from a browse run: browse to the page with `goal: "act"`, read it with `read_page`, save a draft with `scraper` (`action: "save"`, `from_run`), and test it with `scraper` (`action: "run"`). A plugin run heals by code only; `jev-scrape run` in a terminal heals with Jev and the LLM too.
 
 ## Assistant plugin (Claude Code and Codex)
 

@@ -285,9 +285,35 @@ export function extractUrls(task: string): string[] {
   return out;
 }
 
-function isSecretAt(task: string, index: number): boolean {
+/** An Indian pincode: six digits, no leading zero. */
+const PINCODE = /^[1-9]\d{5}$/;
+/** "pincode", "pin code", or "postal code" right before a value; a ":" or "is" can come between. */
+const PINCODE_LEAD = /\b(?:pin[\s-]*code|postal\s+code)\s*(?::\s*|\s+is\s+|\s)\s*$/i;
+/**
+ * Words that make a "pin code" the PIN of a payment or an account: a UPI, ATM, card, bank, or wallet PIN stays secret.
+ * A word counts in any form ("banking", "netbanking", "creditcard", "transactions").
+ */
+const PAYMENT_WORD = /^(?:upi|atm|mpin|txn|paytm|gpay|phonepe|login|signin|security|\w*(?:card|debit|credit|bank|wallet|transaction)\w*)$/i;
+/** "log in" and "sign in" as two words. */
+const ACCOUNT_PHRASE = /\b(?:log|sign)\s+in\b/i;
+
+/**
+ * The span `text` at `index` is secret when one of the 4 words before it is a secret lead ("password", "pin", "otp").
+ * A pincode is not secret: six digits (no leading zero) right after "pincode", "pin code", or "postal code", with no
+ * other secret lead in the 4 words before that lead ("the OTP pin code") and no payment or account word in the 6 words
+ * before it ("upi", "card", "banking", "transaction", "paytm", "log in"). "PIN 1234" and "UPI pin code 123456" stay secret.
+ */
+function isSecretAt(task: string, index: number, text: string): boolean {
   const before = task.slice(Math.max(0, index - 60), index);
   const words = before.split(/\s+/).filter(Boolean).slice(-4);
+  const lead = PINCODE.test(text) ? PINCODE_LEAD.exec(before) : null;
+  if (lead) {
+    const rest = before.slice(0, lead.index);
+    const near = rest.split(/\s+/).map((w) => w.replace(/[^\p{L}\p{N}]/gu, "")).filter(Boolean);
+    const otherLead = near.slice(-4).some((w) => SECRET_LEAD.test(w));
+    const payment = near.slice(-6).some((w) => PAYMENT_WORD.test(w)) || ACCOUNT_PHRASE.test(near.slice(-6).join(" "));
+    if (!otherLead && !payment) return false;
+  }
   return words.some((w) => SECRET_LEAD.test(w));
 }
 
@@ -330,12 +356,12 @@ export function extractSpans(task: string, exclude: string[] = []): Span[] {
         if (parent && parent !== known) prev.parent = parent; else delete prev.parent;
         if (longCut && !itself) prev.longCut = true; else delete prev.longCut;
         if (itself) prev.topic = true; else delete prev.topic;
-        if (isSecretAt(task, at)) prev.secret = true;
+        if (isSecretAt(task, at, t)) prev.secret = true;
       }
       return known;
     }
     if (ex.has(k) || out.length >= LIMITS.spans) return null;
-    const span: Span = { id: `s${out.length + 1}`, text: t, source, secret: isSecretAt(task, at) };
+    const span: Span = { id: `s${out.length + 1}`, text: t, source, secret: isSecretAt(task, at, t) };
     if (verb) span.verb = verb;
     if (parent) span.parent = parent;
     if (longCut) span.longCut = true;

@@ -1,0 +1,199 @@
+{
+ "version": 1,
+ "url": "https://www.zepto.com/search?query=chicken",
+ "title": "Zepto",
+ "meta": {
+  "headings": [],
+  "selected": [],
+  "lang": "en"
+ },
+ "tables": [],
+ "groups": [
+  {
+   "id": "g1",
+   "shape": "a.b#vnq.oikwp[testid=product-card]",
+   "testid": "product-card",
+   "heading": "",
+   "count": 3,
+   "records": [
+    {
+     "slots": [
+      {
+       "key": "div.c#r4q>div.c#zqx>p.cptqcj",
+       "text": "₹187",
+       "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+      },
+      {
+       "key": "div.c#r4q>div.c#zqx>p.cx#tj",
+       "text": "₹209",
+       "struck": true,
+       "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+      },
+      {
+       "key": "div.c#jbl>div>h5.c#gpd",
+       "text": "Licious Chicken Curry Cut",
+       "heading": true,
+       "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+      },
+      {
+       "key": "div.c#jbl>div.c#pqr>p",
+       "text": "450 g",
+       "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+      },
+      {
+       "key": "div.c#bbx>button>span",
+       "text": "ADD",
+       "button": true,
+       "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+      }
+     ],
+     "href": "https://www.zepto.com/pn/licious-chicken-curry-cut/pvid/1"
+    },
+    {
+     "slots": [
+      {
+       "key": "div.c#r4q>div.c#zqx>p.cptqcj",
+       "text": "₹99",
+       "href": "https://www.zepto.com/pn/eggs/pvid/2"
+      },
+      {
+       "key": "div.c#jbl>div>h5.c#gpd",
+       "text": "Farm Fresh Eggs Pack of 6",
+       "heading": true,
+       "href": "https://www.zepto.com/pn/eggs/pvid/2"
+      },
+      {
+       "key": "div.c#jbl>div.c#pqr>p",
+       "text": "1 pack (6 pcs)",
+       "href": "https://www.zepto.com/pn/eggs/pvid/2"
+      },
+      {
+       "key": "div.c#bbx>button>span",
+       "text": "ADD",
+       "button": true,
+       "href": "https://www.zepto.com/pn/eggs/pvid/2"
+      }
+     ],
+     "href": "https://www.zepto.com/pn/eggs/pvid/2"
+    },
+    {
+     "slots": [
+      {
+       "key": "div.c#r4q>div.c#zqx>p.cptqcj",
+       "text": "₹240",
+       "href": "https://www.zepto.com/pn/mutton/pvid/3"
+      },
+      {
+       "key": "div.c#r4q>div.c#zqx>p.cx#tj",
+       "text": "₹300",
+       "struck": true,
+       "href": "https://www.zepto.com/pn/mutton/pvid/3"
+      },
+      {
+       "key": "div.c#jbl>div>h5.c#gpd",
+       "text": "Mutton Curry Cut",
+       "heading": true,
+       "href": "https://www.zepto.com/pn/mutton/pvid/3"
+      },
+      {
+       "key": "div.c#jbl>div.c#pqr>p",
+       "text": "500 g",
+       "href": "https://www.zepto.com/pn/mutton/pvid/3"
+      },
+      {
+       "key": "div.c#bbx>button>span",
+       "text": "Notify me",
+       "button": true,
+       "href": "https://www.zepto.com/pn/mutton/pvid/3"
+      }
+     ],
+     "href": "https://www.zepto.com/pn/mutton/pvid/3"
+    }
+   ],
+   "slots": [
+    {
+     "key": "div.c#r4q>div.c#zqx>p.cptqcj",
+     "filled": 3,
+     "samples": [
+      "₹187",
+      "₹99",
+      "₹240"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.c#r4q>div.c#zqx>p.cx#tj",
+     "filled": 2,
+     "samples": [
+      "₹209",
+      "₹300"
+     ],
+     "struck": 2,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.c#jbl>div>h5.c#gpd",
+     "filled": 3,
+     "samples": [
+      "Licious Chicken Curry Cut",
+      "Farm Fresh Eggs Pack of 6",
+      "Mutton Curry Cut"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 3
+    },
+    {
+     "key": "div.c#jbl>div.c#pqr>p",
+     "filled": 3,
+     "samples": [
+      "450 g",
+      "1 pack (6 pcs)",
+      "500 g"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.c#bbx>button>span",
+     "filled": 3,
+     "samples": [
+      "ADD",
+      "Notify me"
+     ],
+     "struck": 0,
+     "button": 3,
+     "heading": 0
+    }
+   ],
+   "truncated": false,
+   "signature": {
+    "kind": "records",
+    "shape": "a.b#vnq.oikwp[testid=product-card]",
+    "parent": "div.grid",
+    "testid": "product-card",
+    "slot_keys": [
+     "div.c#bbx>button>span",
+     "div.c#jbl>div.c#pqr>p",
+     "div.c#jbl>div>h5.c#gpd",
+     "div.c#r4q>div.c#zqx>p.cptqcj",
+     "div.c#r4q>div.c#zqx>p.cx#tj"
+    ]
+   }
+  }
+ ],
+ "text": [],
+ "stats": {
+  "ms": 12,
+  "tables_seen": 0,
+  "groups_seen": 0,
+  "nodes": 900,
+  "scroll_height": 2400,
+  "viewport_height": 860,
+  "truncated": false
+ }
+}

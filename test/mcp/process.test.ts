@@ -79,7 +79,7 @@ describe("jev-mcp process", () => {
     await initialize(s);
     send(s, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const list = await response(s, 2);
-    expect(((list["result"] as { tools: { name: string }[] }).tools).map((t) => t.name)).toEqual(["browse", "wait", "continue", "cancel", "close_browser"]);
+    expect(((list["result"] as { tools: { name: string }[] }).tools).map((t) => t.name)).toEqual(["browse", "wait", "continue", "cancel", "close_browser", "read_page", "scraper"]);
     // Without a key, browse is a wrong call and still sends nothing.
     send(s, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "browse", arguments: { task: "open https://example.com", profile: "none" } } });
     const browse = (await response(s, 3))["result"] as { isError?: boolean; content: { text: string }[] };

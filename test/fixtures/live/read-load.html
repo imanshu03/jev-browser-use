@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<!-- Synthetic fixture for the loader (test/fast/read.live.test.ts): 12 cards at the start; near the bottom a scroll adds
+     12 more after 150 ms, up to 60. No network. -->
+<head>
+<meta charset="utf-8">
+<title>Load fixture</title>
+<style>
+  body { margin: 8px; font: 13px/1.35 sans-serif; }
+  .card { height: 60px; border: 1px solid #ccc; margin: 6px 0; padding: 4px; }
+</style>
+</head>
+<body>
+<h1>Infinite list</h1>
+<div id="list"></div>
+<p id="status">Loading more</p>
+<script>
+  const list = document.getElementById('list');
+  let n = 0, busy = false;
+  function add() {
+    for (let i = 0; i < 12 && n < 60; i++) {
+      n++;
+      const d = document.createElement('div');
+      d.className = 'card';
+      d.innerHTML = '<b>Item ' + n + '</b> <span>Rs ' + (100 + n) + '</span>';
+      list.appendChild(d);
+    }
+    if (n >= 60) document.getElementById('status').textContent = 'End of list';
+  }
+  add();
+  addEventListener('scroll', () => {
+    if (busy || n >= 60) return;
+    if (scrollY + innerHeight >= document.documentElement.scrollHeight - 300) {
+      busy = true;
+      setTimeout(() => { add(); busy = false; }, 150);
+    }
+  }, { passive: true });
+</script>
+</body>
+</html>

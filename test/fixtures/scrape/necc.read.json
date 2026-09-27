@@ -1,0 +1,184 @@
+{
+ "version": 1,
+ "url": "https://www.e2necc.com/home/eggprice",
+ "title": "NECC egg prices",
+ "meta": {
+  "headings": [
+   "NATIONAL EGG CO-ORDINATION COMMITTEE",
+   "DAILY EGG PRICES"
+  ],
+  "selected": [
+   {
+    "kind": "select",
+    "name": "ddlMonth",
+    "label": "Month",
+    "value": "08",
+    "text": "08"
+   },
+   {
+    "kind": "select",
+    "name": "ddlYear",
+    "label": "Year",
+    "value": "2026",
+    "text": "2026"
+   },
+   {
+    "kind": "radio",
+    "name": "rblType",
+    "label": "Daily Rate Sheet",
+    "value": "Daily",
+    "text": "Daily Rate Sheet"
+   }
+  ],
+  "lang": "en"
+ },
+ "tables": [
+  {
+   "id": "t1",
+   "kind": "html",
+   "caption": "",
+   "heading": "Menu",
+   "headers": [
+    "Link",
+    "Target"
+   ],
+   "header_rows": 1,
+   "width": 2,
+   "rows": [
+    {
+     "section": null,
+     "cells": [
+      "Home Page",
+      "Home"
+     ]
+    },
+    {
+     "section": null,
+     "cells": [
+      "Egg Price",
+      "Price"
+     ]
+    }
+   ],
+   "sections": [],
+   "row_count": 2,
+   "truncated": false,
+   "nested": false,
+   "signature": {
+    "kind": "table",
+    "headers": [
+     "link",
+     "target"
+    ],
+    "width": 2,
+    "caption": "",
+    "heading": "menu"
+   }
+  },
+  {
+   "id": "t2",
+   "kind": "html",
+   "caption": "",
+   "heading": "DAILY EGG PRICES",
+   "headers": [
+    "Name Of Zone / Day",
+    "1",
+    "2",
+    "3",
+    "4",
+    "Average"
+   ],
+   "header_rows": 1,
+   "width": 6,
+   "rows": [
+    {
+     "section": "NECC SUGGESTED EGG PRICES",
+     "cells": [
+      "Ahmedabad",
+      "590",
+      "590",
+      "585",
+      "-",
+      "588.33"
+     ]
+    },
+    {
+     "section": "NECC SUGGESTED EGG PRICES",
+     "cells": [
+      "Hyderabad",
+      "525",
+      "530",
+      "-",
+      "-",
+      "527.50"
+     ]
+    },
+    {
+     "section": "NECC SUGGESTED EGG PRICES",
+     "cells": [
+      "Namakkal",
+      "480",
+      "485",
+      "490",
+      "495",
+      "487.50"
+     ]
+    },
+    {
+     "section": "Prevailing Prices",
+     "cells": [
+      "Allahabad (CC)",
+      "605",
+      "-",
+      "595",
+      "586",
+      "595.33"
+     ]
+    },
+    {
+     "section": "Prevailing Prices",
+     "cells": [
+      "Bhopal",
+      "570",
+      "570",
+      "N/A",
+      "",
+      "570.00"
+     ]
+    }
+   ],
+   "sections": [
+    "NECC SUGGESTED EGG PRICES",
+    "Prevailing Prices"
+   ],
+   "row_count": 5,
+   "truncated": false,
+   "nested": false,
+   "signature": {
+    "kind": "table",
+    "headers": [
+     "name of zone / day",
+     "1",
+     "2",
+     "3",
+     "4",
+     "average"
+    ],
+    "width": 6,
+    "caption": "",
+    "heading": "daily egg prices"
+   }
+  }
+ ],
+ "groups": [],
+ "text": [],
+ "stats": {
+  "ms": 12,
+  "tables_seen": 2,
+  "groups_seen": 0,
+  "nodes": 900,
+  "scroll_height": 2400,
+  "viewport_height": 860,
+  "truncated": false
+ }
+}

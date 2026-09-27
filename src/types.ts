@@ -1,4 +1,5 @@
 // Shared types and constants. No logic lives here.
+import type { GeoPoint } from "./fast/model.js";
 
 export type Engine = "cdp" | "chromium" | "vercel";
 
@@ -195,6 +196,8 @@ export interface RunConfig {
   refreshProfile?: boolean;
   /** Fast engine: Chrome binary to launch. */
   chromeBin?: string;
+  /** Fast engine: geolocation override for the tabs of the Chrome it launches (`--geo lat,lon[,accuracy]`, MCP browse `geo`). */
+  geo?: GeoPoint;
 }
 
 export type CheckAnswer = boolean | "unknown";
@@ -355,8 +358,12 @@ export const CREDENTIAL_NAME = /password|passcode|passphrase|\bpin\b|\botp\b|one
  * splits camelCase first; keys are often lower-cased before that.
  */
 export const SECRET_KEY = /(?:password|passwd|passcode|passphrase|token|secret)|(?:^|[^a-z])(?:pass|pwd|pin|otp|code)(?:[^a-z]|$)/i;
+/** Var keys of a place, not of a secret: a pin code or a postal code (also pinCode, postalCode, PIN_CODE). */
+const PLACE_KEY = /^(?:pin|postal)[_-]code$/;
 export function secretKey(key: string): boolean {
-  return SECRET_KEY.test(key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"));
+  const split = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+  if (PLACE_KEY.test(split.toLowerCase())) return false;
+  return SECRET_KEY.test(split);
 }
 /** Labels of fields that take an exact value. Assistant-written text never goes into them. */
 export const EXACT_VALUE_NAME = /^(to|cc|bcc|from)\b|recipient|e-?mail address|^e-?mail$|phone|mobile number|amount|price|quantity|card number|\biban\b|account number|routing number|street|postal code|zip code|api key|\btoken\b|\bsecret\b|user ?name|\burl\b|website|\bsearch\b/i;

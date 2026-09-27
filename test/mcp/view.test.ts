@@ -339,8 +339,8 @@ describe("confirmMessage", () => {
 });
 
 describe("contract constants", () => {
-  it("names the five tools, a one-checkbox dialog, and a token estimate for ASCII and other text", () => {
-    expect(TOOL_NAMES).toEqual(["browse", "wait", "continue", "cancel", "close_browser"]);
+  it("names the seven tools, a one-checkbox dialog, and a token estimate for ASCII and other text", () => {
+    expect(TOOL_NAMES).toEqual(["browse", "wait", "continue", "cancel", "close_browser", "read_page", "scraper"]);
     expect(CONFIRM_SCHEMA).toEqual({ type: "object", properties: { allow: { type: "boolean", title: "Allow", default: false } }, required: ["allow"] });
     expect(estTokens("abcd")).toBe(1);
     expect(estTokens("abcde")).toBe(2);

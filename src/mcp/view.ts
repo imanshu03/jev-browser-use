@@ -12,7 +12,7 @@ import type { PendingConfirm, Run } from "./runs.js";
 import { DECLINED_HINT, RUN_STATUSES, stripKey } from "./runs.js";
 import { MCP } from "./limits.js";
 
-export const TOOL_NAMES = ["browse", "wait", "continue", "cancel", "close_browser"] as const;
+export const TOOL_NAMES = ["browse", "wait", "continue", "cancel", "close_browser", "read_page", "scraper"] as const;
 
 const Field = z.object({ id: z.string(), label: z.string(), role: z.string(), required: z.boolean(), multiline: z.boolean(), max_chars: z.number(), current_value: z.string(), mode: z.enum(["append"]).optional() });
 
@@ -84,7 +84,7 @@ export function estTokens(s: string): number {
 }
 
 /** Apply `f` to every string leaf of JSON data. Object keys stay. */
-function mapStrings(value: unknown, f: (s: string) => string): unknown {
+export function mapStrings(value: unknown, f: (s: string) => string): unknown {
   if (typeof value === "string") return f(value);
   if (Array.isArray(value)) return value.map((v) => mapStrings(v, f));
   if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, f)]));

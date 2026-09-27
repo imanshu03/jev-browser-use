@@ -5,11 +5,14 @@ import type { Logger } from "../io.js";
 import type { RunConfig } from "../types.js";
 import { LIMITS } from "../types.js";
 import { LAUNCH_WAIT_MS, launchChrome } from "./chrome.js";
-import type { Chrome, ChromeLaunchOptions, Page, UnsentText } from "./model.js";
+import type { Chrome, ChromeLaunchOptions, GeoPoint, Page, UnsentText } from "./model.js";
 import { openPage as openTab } from "./page.js";
 
-/** What an open Chrome was launched with. */
-export interface SessionKey { engine: "cdp" | "chromium"; headed: boolean; profileDirectory: string | null }  // null = temporary profile
+/**
+ * What an open Chrome was launched with. `geo`: the geolocation override of its tabs; absent and null both mean none. A
+ * run with another geo needs another Chrome: each tab gets the override when it opens.
+ */
+export interface SessionKey { engine: "cdp" | "chromium"; headed: boolean; profileDirectory: string | null; geo?: GeoPoint | null }  // null = temporary profile
 
 /** The open Chrome runs on another profile, engine, or window mode than the run asks for. The session never reuses it silently. */
 export class ProfileMismatchError extends Error {
@@ -22,12 +25,19 @@ export interface SessionOptions {
   open?: (c: Chrome, log: Logger) => Promise<Page>;      // default openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log })
 }
 
+/** Two geolocation overrides are the same: both none (absent or null), or the same point and accuracy (absent = 50 m). */
+function sameGeo(a: GeoPoint | null | undefined, b: GeoPoint | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.latitude === b.latitude && a.longitude === b.longitude && (a.accuracy ?? 50) === (b.accuracy ?? 50);
+}
+
 function sameKey(a: SessionKey, b: SessionKey): boolean {
-  return a.engine === b.engine && a.headed === b.headed && a.profileDirectory === b.profileDirectory;
+  return a.engine === b.engine && a.headed === b.headed && a.profileDirectory === b.profileDirectory && sameGeo(a.geo, b.geo);
 }
 
 function describeKey(k: SessionKey): string {
-  return `${k.profileDirectory === null ? "a temporary profile" : `profile ${k.profileDirectory}`} (${k.engine}, ${k.headed ? "headed" : "headless"})`;
+  const geo = k.geo ? `, geo ${k.geo.latitude},${k.geo.longitude}${k.geo.accuracy !== undefined ? ` accuracy ${k.geo.accuracy} m` : ""}` : "";
+  return `${k.profileDirectory === null ? "a temporary profile" : `profile ${k.profileDirectory}`} (${k.engine}, ${k.headed ? "headed" : "headless"}${geo})`;
 }
 
 /** Resolve when `p` settles or after `ms`, whichever comes first. The timer is cleared when `p` settles first. */
@@ -92,10 +102,13 @@ export class BrowserSession {
     }
   }
 
-  /** Reuse the open Chrome when its key matches; relaunch after client.closed; throw ProfileMismatchError when the directory differs. */
+  /**
+   * Reuse the open Chrome when its key matches; relaunch after client.closed; throw ProfileMismatchError when the
+   * directory, engine, window mode, or geolocation differs.
+   */
   chromeFor(cfg: RunConfig): (profileDirectory: string | undefined) => Promise<Chrome> {
     return async (profileDirectory) => {
-      const want: SessionKey = { engine: cfg.engine === "chromium" ? "chromium" : "cdp", headed: cfg.headed, profileDirectory: profileDirectory ? profileDirectory : null };
+      const want: SessionKey = { engine: cfg.engine === "chromium" ? "chromium" : "cdp", headed: cfg.headed, profileDirectory: profileDirectory ? profileDirectory : null, geo: cfg.geo ?? null };
       // Never two launches at once, and never a launch while a close is in flight: the profile lock is free only
       // when the old Chrome has exited. A launch that a close cancelled rejects; the checks below then see no Chrome.
       if (this.closing) await this.closing;
@@ -180,6 +193,7 @@ export class BrowserSession {
       browser: want.engine === "chromium" ? "chromium" : "chrome",
       headed: cfg.headed, ...(dir !== null ? { profileDirectory: dir } : {}), ...(cfg.refreshProfile ? { refreshProfile: true } : {}),
       ...(cfg.cdp !== undefined ? { cdpPort: cfg.cdp } : {}), ...(cfg.chromeBin ? { chromeBin: cfg.chromeBin } : {}),
+      ...(want.geo ? { geolocation: want.geo } : {}),
       commandTimeoutMs: cfg.stepTimeoutMs, env: this.env, log: this.log,
     }).then(async (c) => {
       if (this._epoch !== epoch) {

@@ -446,22 +446,28 @@ function optionText(span: Span, canGenerate: boolean): EntryType {
   return canGenerate && span.source === "var" && !span.secret ? { var: varKey(span), value: span.text } : spanText(span);
 }
 
-/** Visible text lines for the extract head: trimmed, non-empty, unique, cut to a length, capped in count. */
-export function answerLines(text: string): string[] {
+/** Visible text lines for the extract head: trimmed, non-empty, unique, cut to a length, at most `max` of them. */
+export function answerLines(text: string, max: number = LIMITS.answerLines): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of text.split("\n")) {
+    if (out.length >= max) break;
     const line = raw.trim().replace(/\s+/g, " ").slice(0, LIMITS.answerLineChars);
     if (line.length === 0 || seen.has(line)) continue;
     seen.add(line);
     out.push(line);
-    if (out.length >= LIMITS.answerLines) break;
   }
   return out;
 }
 
-/** `valueHeads`: how many fields get a value head in the step request. */
-interface Trim { textChars: number; maxElements: number | null; answerLine: boolean; valueHeads: number }
+/**
+ * `valueHeads`: how many fields get a value head in the step request. `answerLines`: the most line options of the
+ * answer_line head of an extract goal.
+ */
+interface Trim { textChars: number; maxElements: number | null; answerLines: number; valueHeads: number }
+
+/** The line options of the answer_line head on the last trim rung. */
+export const ANSWER_LINES_MIN = 60;
 
 /** Squashed, lower-case text: two values that differ only in case and spacing are the same value. */
 const same = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
@@ -701,12 +707,11 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
     questions["evidence"] = choice("Which element is the strongest evidence for the answer? Pick none if the page has no such evidence.", ev);
   }
   if (only === undefined && goal === "extract") {
-    if (trim.answerLine) {
-      const c: ChoiceCriteria = {};
-      answerLines(obs.text).forEach((line, i) => { const key = `l${i + 1}`; c[key] = line; meta.lines[key] = line; });
-      c["none"] = "No visible line holds the value the goal asks for";
-      questions["answer_line"] = choice("Which visible text line holds the exact value the goal asks for? Pick none if it is not on this page.", c);
-    }
+    // The options come from the page text that the state carries: Jev never gets a line that the state does not show.
+    const c: ChoiceCriteria = {};
+    answerLines(obs.text.slice(0, trim.textChars), trim.answerLines).forEach((line, i) => { const key = `l${i + 1}`; c[key] = line; meta.lines[key] = line; });
+    c["none"] = "No visible line holds the value the goal asks for";
+    questions["answer_line"] = choice("Which visible text line holds the exact value the goal asks for? Pick none if it is not on this page.", c);
     questions["answer_visible"] = noul("Is the value the goal asks for visible on this page?", {
       true: "The requested value is on screen in the page text",
       false: "The page does not show the requested value yet",
@@ -748,12 +753,13 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
 
 /** The trim ladder: each rung is tried when the one before it is over budget. The first cut drops the extra value heads. */
 const LADDER: { trim: Trim; note: string }[] = [
-  { trim: { textChars: LIMITS.textChars, maxElements: null, answerLine: true, valueHeads: LIMITS.valueHeads }, note: "" },
-  { trim: { textChars: LIMITS.textChars, maxElements: null, answerLine: true, valueHeads: 0 }, note: "value heads left out; a fill asks for its value in a second request" },
-  { trim: { textChars: LIMITS.textCharsTrimmed, maxElements: null, answerLine: true, valueHeads: 0 }, note: `page text cut to ${LIMITS.textCharsTrimmed} chars` },
-  { trim: { textChars: LIMITS.textCharsMin, maxElements: null, answerLine: true, valueHeads: 0 }, note: `page text cut to ${LIMITS.textCharsMin} chars` },
-  { trim: { textChars: LIMITS.textCharsMin, maxElements: LIMITS.fastElementsTrimmed, answerLine: true, valueHeads: 0 }, note: `elements cut to ${LIMITS.fastElementsTrimmed}` },
-  { trim: { textChars: LIMITS.textCharsMin, maxElements: LIMITS.fastElementsTrimmed, answerLine: false, valueHeads: 0 }, note: "answer_line head dropped" },
+  { trim: { textChars: LIMITS.textChars, maxElements: null, answerLines: LIMITS.answerLines, valueHeads: LIMITS.valueHeads }, note: "" },
+  { trim: { textChars: LIMITS.textChars, maxElements: null, answerLines: LIMITS.answerLines, valueHeads: 0 }, note: "value heads left out; a fill asks for its value in a second request" },
+  { trim: { textChars: LIMITS.textCharsTrimmed, maxElements: null, answerLines: LIMITS.answerLines, valueHeads: 0 }, note: `page text cut to ${LIMITS.textCharsTrimmed} chars` },
+  { trim: { textChars: LIMITS.textCharsMin, maxElements: null, answerLines: LIMITS.answerLines, valueHeads: 0 }, note: `page text cut to ${LIMITS.textCharsMin} chars` },
+  { trim: { textChars: LIMITS.textCharsMin, maxElements: LIMITS.fastElementsTrimmed, answerLines: LIMITS.answerLines, valueHeads: 0 }, note: `elements cut to ${LIMITS.fastElementsTrimmed}` },
+  // The head stays: an extract run can still finish on a heavy page. The first lines of the page are kept.
+  { trim: { textChars: LIMITS.textCharsMin, maxElements: LIMITS.fastElementsTrimmed, answerLines: ANSWER_LINES_MIN, valueHeads: 0 }, note: `answer_line cut to ${ANSWER_LINES_MIN} lines` },
 ];
 
 /** Redact the task, the page, and the history with the secret spans. */

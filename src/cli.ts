@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createBrowser } from "./browser.js";
 import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
 import { FastRunner } from "./fast/loop.js";
-import type { Chrome } from "./fast/model.js";
+import type { Chrome, GeoPoint } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
 import type { Logger, TextSource } from "./io.js";
 import { createHuman, createLogger, exitCode, emptyResult } from "./io.js";
@@ -33,7 +33,10 @@ Options:
   --goal <act|extract|check> Skip the goal question.
   --headed                   Show the window. Enables the pause hand-off.
   --cdp <port>               Attach to a running Chrome. cdp/chromium: over its WebSocket. vercel: through agent-browser. Replaces --profile.
-  --var <key=value>          A value Jev may type. Repeatable. Keys with pass/pin/otp/secret/token/code are secret.
+  --geo <lat,lon[,accuracy]> cdp/chromium: the location that pages get from the geolocation API ("Detect my location").
+                             Degrees; accuracy in metres, default 50. Example: --geo 12.9352,77.6245
+  --var <key=value>          A value Jev may type. Repeatable. Keys with pass/pin/otp/secret/token/code are secret,
+                             except pin_code and postal_code.
   --max-steps <n>            Default 25, max 100.
   --step-timeout <ms>        Per browser command. Default 30000.
   --run-timeout <ms>         Default 600000.
@@ -55,6 +58,24 @@ export const VERSION = "0.1.0";
 
 export function packageDir(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+/** A decimal number: digits with an optional sign and fraction. No exponent, no hex, no empty text. */
+const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+/**
+ * The value of `--geo`: "lat,lon" or "lat,lon,accuracy". Latitude -90..90, longitude -180..180, accuracy in metres
+ * 0..100000. Throws UsageError for any other value.
+ */
+export function parseGeo(value: string, flag = "--geo"): GeoPoint {
+  const parts = value.split(",").map((p) => p.trim());
+  const usage = `${flag} needs lat,lon or lat,lon,accuracy (for example 12.9352,77.6245)`;
+  if (parts.length < 2 || parts.length > 3 || parts.some((p) => !DECIMAL.test(p))) throw new UsageError(usage);
+  const [lat, lon, acc] = parts.map(Number) as [number, number, number | undefined];
+  if (lat < -90 || lat > 90) throw new UsageError(`${flag}: latitude must be between -90 and 90`);
+  if (lon < -180 || lon > 180) throw new UsageError(`${flag}: longitude must be between -180 and 180`);
+  if (acc !== undefined && (acc < 0 || acc > 100_000)) throw new UsageError(`${flag}: accuracy must be between 0 and 100000 metres`);
+  return { latitude: lat, longitude: lon, ...(acc !== undefined ? { accuracy: acc } : {}) };
 }
 
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
@@ -98,6 +119,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       }
       case "--headed": cfg.headed = true; break;
       case "--cdp": cfg.cdp = num(next(i, a), a, 1, 65535); i++; break;
+      case "--geo": cfg.geo = parseGeo(next(i, a), a); i++; break;
       case "--var": {
         const kv = next(i, a); i++;
         const eq = kv.indexOf("=");
@@ -131,6 +153,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
   }
   // The vercel engine has no audit of the actions that a run does with no dialog.
   if (cfg.confirm === "autonomous" && cfg.engine === "vercel") throw new UsageError("--confirm autonomous needs --engine cdp or chromium");
+  // agent-browser has no geolocation override.
+  if (cfg.geo && cfg.engine === "vercel") throw new UsageError("--geo needs --engine cdp or chromium");
   // An env value such as "abc" gives NaN, which the old range check let through.
   if (!Number.isFinite(cfg.maxSteps) || cfg.maxSteps > 100 || cfg.maxSteps < 1) throw new UsageError("--max-steps must be between 1 and 100");
   cfg.task = positional.join(" ").trim();
@@ -185,6 +209,7 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
       browser: cfg.engine === "chromium" ? "chromium" : "chrome",
       headed: cfg.headed, ...(profileDirectory ? { profileDirectory } : {}), ...(cfg.refreshProfile ? { refreshProfile: true } : {}),
       ...(cfg.cdp !== undefined ? { cdpPort: cfg.cdp } : {}), ...(cfg.chromeBin ? { chromeBin: cfg.chromeBin } : {}),
+      ...(cfg.geo ? { geolocation: cfg.geo } : {}),
       commandTimeoutMs: cfg.stepTimeoutMs, env: io.env, log,
     }).then((c) => { chrome = c; return c; });
     try { return await launching; } finally { launching = null; }

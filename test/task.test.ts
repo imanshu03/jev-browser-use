@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractKeys, extractProfileMentions, extractSpans, extractUrls, mentionsProfileWord, parseDate, redact, varSpans } from "../src/task.js";
+import { secretKey } from "../src/types.js";
 
 describe("extractUrls", () => {
   it("finds http URLs and strips trailing punctuation", () => {
@@ -204,6 +205,38 @@ describe("extractSpans", () => {
     const s = extractSpans('log in with password "hunter2"');
     expect(s.find((x) => x.text === "hunter2")?.secret).toBe(true);
   });
+  it("a pincode after pincode, pin code, or postal code is not secret", () => {
+    const secretOf = (task: string, text: string): boolean | undefined => extractSpans(task).find((x) => x.text === text)?.secret;
+    for (const task of ["set the location to pincode 560001", "set the location to pin code 560001", "Pincode: 560001 then search milk",
+      "the postal code is 560001", "enter PIN CODE 560001", "use pin-code 560001"]) {
+      expect(secretOf(task, "560001"), task).toBe(false);
+    }
+  });
+  it("a PIN, a pincode with a payment word before it, and a pincode with a leading zero stay secret", () => {
+    const secretOf = (task: string, text: string): boolean | undefined => extractSpans(task).find((x) => x.text === text)?.secret;
+    expect(secretOf("unlock with PIN 1234", "1234")).toBe(true);
+    expect(secretOf("unlock with pin 560001", "560001")).toBe(true);
+    expect(secretOf("pay with UPI pin code 123456", "123456")).toBe(true);
+    expect(secretOf("the card pin code 123456", "123456")).toBe(true);
+    expect(secretOf("the debit card pin code is 123456", "123456")).toBe(true);
+    expect(secretOf("the pincode 056001", "056001")).toBe(true);
+    expect(secretOf("the pincode 5600012", "5600012")).toBe(true);
+    expect(secretOf("the otp 560001", "560001")).toBe(true);
+    // A value with more words between the lead and it is not a pincode of the lead.
+    expect(secretOf("pincode near 560001", "560001")).toBe(true);
+  });
+  it("an OTP or another PIN before the lead, or a bank, card, or payment word in any form, keeps the pin code secret", () => {
+    const secretOf = (task: string, text: string): boolean | undefined => extractSpans(task).find((x) => x.text === text)?.secret;
+    for (const task of ["enter the OTP pin code 482913", "log in to net banking with pin code 482913", "pay with the transaction pin code 482913",
+      "use my creditcard pin code 482913", "enter the netbanking pin code 482913", "log in with the paytm pin code 482913",
+      "enter my UPI PIN, the pin code 482913", "the gpay pin code is 482913", "the txn pin code 482913", "sign in with the pin code 482913"]) {
+      expect(secretOf(task, "482913"), task).toBe(true);
+    }
+    // A delivery pincode stays a place.
+    for (const task of ["set the delivery location to pin code 560001", "deliver to my home, pincode 560001", "search for shops near the pin code 560001"]) {
+      expect(secretOf(task, "560001"), task).toBe(false);
+    }
+  });
 });
 
 describe("mention spans", () => {
@@ -242,6 +275,12 @@ describe("varSpans", () => {
       { id: "v_email", text: "a@b.c", source: "var", secret: false },
       { id: "v_password", text: "x", source: "var", secret: true },
     ]);
+  });
+  it("a pin code or postal code var is not secret; a pin, a UPI pin, and an OTP code are", () => {
+    for (const k of ["pin_code", "postal_code", "pinCode", "postalCode", "PIN_CODE", "pin-code"]) expect(secretKey(k), k).toBe(false);
+    for (const k of ["pin", "upi_pin", "otp_code", "PIN", "card_pin", "pin_code_2", "mpin_code"]) expect(secretKey(k), k).toBe(true);
+    expect(varSpans({ pin_code: "560001" })[0]?.secret).toBe(false);
+    expect(varSpans({ upi_pin: "1234" })[0]?.secret).toBe(true);
   });
 });
 

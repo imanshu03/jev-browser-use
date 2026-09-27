@@ -1,0 +1,379 @@
+{
+ "version": 1,
+ "url": "https://blinkit.com/s/?q=chicken%20curry%20cut",
+ "title": "Search results - Blinkit",
+ "meta": {
+  "headings": [
+   "Showing results for chicken curry cut"
+  ],
+  "selected": [
+   {
+    "kind": "input",
+    "name": "q",
+    "label": "Search",
+    "value": "chicken curry cut",
+    "text": "chicken curry cut"
+   }
+  ],
+  "lang": "en"
+ },
+ "tables": [],
+ "groups": [
+  {
+   "id": "g1",
+   "shape": "a.tile",
+   "testid": null,
+   "heading": "Categories",
+   "count": 4,
+   "records": [
+    {
+     "slots": [
+      {
+       "key": "div",
+       "text": "Dairy"
+      },
+      {
+       "key": "img",
+       "text": "",
+       "alt": "Dairy icon"
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div",
+       "text": "Meat"
+      },
+      {
+       "key": "img",
+       "text": "",
+       "alt": "Meat icon"
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div",
+       "text": "Eggs"
+      },
+      {
+       "key": "img",
+       "text": "",
+       "alt": "Eggs icon"
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div",
+       "text": "Bakery"
+      },
+      {
+       "key": "img",
+       "text": "",
+       "alt": "Bakery icon"
+      }
+     ]
+    }
+   ],
+   "slots": [
+    {
+     "key": "div",
+     "filled": 4,
+     "samples": [
+      "Dairy",
+      "Meat",
+      "Eggs"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "img",
+     "filled": 4,
+     "samples": [
+      "Dairy icon",
+      "Meat icon",
+      "Eggs icon"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    }
+   ],
+   "truncated": false,
+   "signature": {
+    "kind": "records",
+    "shape": "a.tile",
+    "parent": "div.tiles",
+    "testid": null,
+    "slot_keys": [
+     "div",
+     "img"
+    ]
+   }
+  },
+  {
+   "id": "g2",
+   "shape": "div",
+   "testid": null,
+   "heading": "Showing results for chicken curry cut",
+   "count": 5,
+   "records": [
+    {
+     "slots": [
+      {
+       "key": "div.tw-absolute>div",
+       "text": "10% OFF"
+      },
+      {
+       "key": "div.tw-flex>div.tw-text-100",
+       "text": "8 MINS"
+      },
+      {
+       "key": "div.tw-text-300",
+       "text": "Licious Chicken Curry Cut (Skinless)"
+      },
+      {
+       "key": "div.tw-text-200",
+       "text": "450 g"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200",
+       "text": "₹187"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200@2",
+       "text": "₹209",
+       "struck": true
+      },
+      {
+       "key": "div.tw-flex@2>div.tw-rounded>div",
+       "text": "ADD",
+       "button": true
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div.tw-flex>div.tw-text-100",
+       "text": "8 MINS"
+      },
+      {
+       "key": "div.tw-text-300",
+       "text": "Fresho Farm Eggs"
+      },
+      {
+       "key": "div.tw-text-200",
+       "text": "6 pcs"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200",
+       "text": "₹66"
+      },
+      {
+       "key": "div.tw-flex@2>div.tw-rounded>div",
+       "text": "ADD",
+       "button": true
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div.tw-absolute>div",
+       "text": "5% OFF"
+      },
+      {
+       "key": "div.tw-flex>div.tw-text-100",
+       "text": "8 MINS"
+      },
+      {
+       "key": "div.tw-text-300",
+       "text": "Amul Taaza Toned Milk"
+      },
+      {
+       "key": "div.tw-text-200",
+       "text": "1 l"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200",
+       "text": "₹72"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200@2",
+       "text": "₹76",
+       "struck": true
+      },
+      {
+       "key": "div.tw-flex@2>div.tw-rounded>div",
+       "text": "ADD",
+       "button": true
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div.tw-flex>div.tw-text-100",
+       "text": "8 MINS"
+      },
+      {
+       "key": "div.tw-text-300",
+       "text": "Country Delight Paneer"
+      },
+      {
+       "key": "div.tw-text-200",
+       "text": "200 g"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200",
+       "text": "₹95"
+      },
+      {
+       "key": "div.tw-flex@2>div.tw-rounded>div",
+       "text": "Out of stock",
+       "button": true,
+       "disabled": true
+      }
+     ]
+    },
+    {
+     "slots": [
+      {
+       "key": "div.tw-flex>div.tw-text-100",
+       "text": "8 MINS"
+      },
+      {
+       "key": "div.tw-text-300",
+       "text": "Fresho Farm Eggs"
+      },
+      {
+       "key": "div.tw-text-200",
+       "text": "6 pcs"
+      },
+      {
+       "key": "div.tw-flex@2>div>div.tw-text-200",
+       "text": "₹66"
+      },
+      {
+       "key": "div.tw-flex@2>div.tw-rounded>div",
+       "text": "ADD",
+       "button": true
+      }
+     ]
+    }
+   ],
+   "slots": [
+    {
+     "key": "div.tw-absolute>div",
+     "filled": 2,
+     "samples": [
+      "10% OFF",
+      "5% OFF"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-flex>div.tw-text-100",
+     "filled": 5,
+     "samples": [
+      "8 MINS"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-text-300",
+     "filled": 5,
+     "samples": [
+      "Licious Chicken Curry Cut (Skinless)",
+      "Fresho Farm Eggs",
+      "Amul Taaza Toned Milk"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-text-200",
+     "filled": 5,
+     "samples": [
+      "450 g",
+      "6 pcs",
+      "1 l"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-flex@2>div>div.tw-text-200",
+     "filled": 5,
+     "samples": [
+      "₹187",
+      "₹66",
+      "₹72"
+     ],
+     "struck": 0,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-flex@2>div>div.tw-text-200@2",
+     "filled": 2,
+     "samples": [
+      "₹209",
+      "₹76"
+     ],
+     "struck": 2,
+     "button": 0,
+     "heading": 0
+    },
+    {
+     "key": "div.tw-flex@2>div.tw-rounded>div",
+     "filled": 5,
+     "samples": [
+      "ADD",
+      "Out of stock"
+     ],
+     "struck": 0,
+     "button": 5,
+     "heading": 0
+    }
+   ],
+   "truncated": false,
+   "signature": {
+    "kind": "records",
+    "shape": "div",
+    "parent": "div.categories-table",
+    "testid": null,
+    "slot_keys": [
+     "div.tw-flex>div.tw-text-100",
+     "div.tw-flex@2>div.tw-rounded>div",
+     "div.tw-flex@2>div>div.tw-text-200",
+     "div.tw-text-200",
+     "div.tw-text-300"
+    ]
+   }
+  }
+ ],
+ "text": [],
+ "stats": {
+  "ms": 12,
+  "tables_seen": 0,
+  "groups_seen": 2,
+  "nodes": 900,
+  "scroll_height": 2400,
+  "viewport_height": 860,
+  "truncated": false
+ }
+}

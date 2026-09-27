@@ -7,7 +7,7 @@ import path from "node:path";
 import readline from "node:readline";
 import type { Logger } from "../io.js";
 import { connectPipe, connectWebSocket, type CdpOptions } from "./cdp.js";
-import type { CdpClient, Chrome, ChromeLaunchOptions } from "./model.js";
+import type { CdpClient, Chrome, ChromeLaunchOptions, GeoPoint } from "./model.js";
 
 export interface ProfileEntry { directory: string; name: string }
 
@@ -314,6 +314,10 @@ export interface AttachTargetOptions {
   userAgent?: string;
   /** The client hints that go with `userAgent` (see `userAgentMetadata`). */
   userAgentMetadata?: UserAgentMetadata;
+  /** The geolocation that the tab reports (`ChromeLaunchOptions.geolocation`). Absent: Chrome's own behaviour. */
+  geolocation?: GeoPoint;
+  /** Debug lines, for example a geolocation permission that Chrome refused. */
+  log?: Logger;
 }
 
 /** The `userAgentMetadata` of Emulation.setUserAgentOverride. */
@@ -385,7 +389,9 @@ export function userAgentMetadata(product: unknown, chromium: boolean, platform:
 /**
  * Attach one session to a new target and enable the domains the page layer needs. In attach mode the
  * tab opens in the background, so it never takes the tab the user works in (as browser-use/jev-ultrafast
- * browser.py does with `background=True`; MIT License, Copyright (c) 2026 Browser Use).
+ * browser.py does with `background=True`; MIT License, Copyright (c) 2026 Browser Use). With `geolocation`, the tab
+ * reports that point: Browser.grantPermissions (geolocation), then Emulation.setGeolocationOverride (accuracy 50 m when
+ * absent).
  */
 export async function attachTarget(client: CdpClient, url: string, opts: AttachTargetOptions): Promise<{ targetId: string; sessionId: string }> {
   const created = await client.send("Target.createTarget", { url, newWindow: false, ...(opts.attached ? { background: true } : {}) });
@@ -396,10 +402,26 @@ export async function attachTarget(client: CdpClient, url: string, opts: AttachT
   await client.send("Page.enable", {}, sessionId);
   await client.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId);
   if (opts.userAgent) await client.send("Emulation.setUserAgentOverride", { userAgent: opts.userAgent, ...(opts.userAgentMetadata ? { userAgentMetadata: opts.userAgentMetadata } : {}) }, sessionId);
+  if (opts.geolocation) {
+    // The permission is for the browser (no session), so the page gets the position with no prompt. Without it the
+    // override still answers a page that has the permission: a refusal does not fail the tab.
+    try {
+      await client.send("Browser.grantPermissions", { permissions: ["geolocation"] });
+    } catch (e) {
+      opts.log?.debug(`geolocation permission not granted: ${(e as Error).message}`);
+    }
+    const g = opts.geolocation;
+    await client.send("Emulation.setGeolocationOverride", { latitude: g.latitude, longitude: g.longitude, accuracy: g.accuracy ?? 50 }, sessionId);
+  }
   if (!opts.headed && !opts.attached) {
     await client.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false }, sessionId);
   }
   return { targetId, sessionId };
+}
+
+/** The geolocation part of the attach options of each new tab of a launched or attached Chrome. */
+function geoOptions(opts: ChromeLaunchOptions): Pick<AttachTargetOptions, "geolocation" | "log"> {
+  return opts.geolocation ? { geolocation: opts.geolocation, log: opts.log } : {};
 }
 
 async function attachChrome(opts: ChromeLaunchOptions, port: number): Promise<Chrome> {
@@ -415,13 +437,14 @@ async function attachChrome(opts: ChromeLaunchOptions, port: number): Promise<Ch
   let closing: Promise<void> | null = null;
   const userAgent = plainUserAgent(info["User-Agent"]);
   const hints = userAgent ? userAgentMetadata(info.Browser, opts.browser === "chromium", process.platform, process.arch, platformVersionOf()) : null;
+  const geo = geoOptions(opts);
   return {
     client,
     userDataDir: null,
     profile: { directory: null, copyDir: null, copied: false, copyMs: 0 },
     launchMs,
     async newTarget(url) {
-      const t = await attachTarget(client, url, { headed: opts.headed, attached: true, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}) });
+      const t = await attachTarget(client, url, { headed: opts.headed, attached: true, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo });
       owned.add(t.targetId);
       return t;
     },
@@ -544,6 +567,7 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
   let closing: Promise<void> | null = null;
   const userAgent = plainUserAgent(version["userAgent"]);
   const hints = userAgent ? userAgentMetadata(version["product"], opts.browser === "chromium" || /chromium/i.test(bin), process.platform, process.arch, platformVersionOf()) : null;
+  const geo = geoOptions(opts);
   const chrome: Chrome = {
     client,
     userDataDir: udd,
@@ -551,7 +575,7 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
     launchMs,
     ...(child.pid !== undefined ? { pid: child.pid } : {}),
     async newTarget(url) {
-      const t = await attachTarget(client, url, { headed: opts.headed, attached: false, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}) });
+      const t = await attachTarget(client, url, { headed: opts.headed, attached: false, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo });
       owned.add(t.targetId);
       return t;
     },

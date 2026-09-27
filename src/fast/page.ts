@@ -7,6 +7,8 @@ import fs from "node:fs";
 import type { Action, Chrome, DatePlan, EditMode, EditPlan, EditResult, Observation, Page, PageOptions, Popup } from "./model.js";
 import { LIMITS } from "../types.js";
 import { EditRefused, StalePage } from "./model.js";
+import { SCROLL_STATE_SCRIPT, readScript } from "./read.js";
+import type { PageRead, ScrollState } from "./read-types.js";
 import type { EditStep } from "./snapshot.js";
 import { BLUR_SCRIPT, CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, nativeDateScript, pageKeyGuardScript, partFocusScript, popupScript, selectPartScript, settleScript } from "./snapshot.js";
 
@@ -71,6 +73,12 @@ function docIdOf(raw: RawSnapshot): unknown {
 
 /** Whitespace runs become one space; zero-width characters go. For the compare of a field value after a fill. */
 const flat = (s: string): string => s.replace(/[\u200B\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+
+/** The first line of an error text, at most 200 characters. */
+const firstLine = (s: unknown): string => String(s ?? "exception").split("\n")[0]!.slice(0, 200);
+
+/** readyState and the document id (performance.timeOrigin) in one evaluation, for the readiness wait of Page.read. */
+const READY_DOC_SCRIPT = "[document.readyState, performance.timeOrigin]";
 
 /** The lines of a text that a document fill types: each line with text, in order. */
 export function textLines(text: string): string[] {
@@ -146,19 +154,42 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
   /**
    * Evaluate in the page. `exception` is true when the page threw or the context went away
-   * (the document is navigating). A transport error, a timeout, or a dead target propagates.
+   * (the document is navigating); `why` is then the first line of the error. A transport error, a timeout, or a dead
+   * target propagates.
    */
-  async function evaluate(expression: string, awaitPromise = false): Promise<{ value: unknown; exception: boolean }> {
+  async function evaluate(expression: string, awaitPromise = false): Promise<{ value: unknown; exception: boolean; why?: string }> {
     try {
       const res = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise });
-      if (res["exceptionDetails"]) return { value: null, exception: true };
+      const details = res["exceptionDetails"] as { text?: unknown; exception?: { description?: unknown } } | undefined;
+      if (details) return { value: null, exception: true, why: firstLine(details.exception?.description ?? details.text) };
       const result = res["result"] as { value?: unknown } | undefined;
       return { value: result?.value ?? null, exception: false };
     } catch (e) {
       if (client.closed) throw e;
-      if (CONTEXT_GONE.test(String((e as Error)?.message ?? e))) return { value: null, exception: true };
+      const message = String((e as Error)?.message ?? e);
+      if (CONTEXT_GONE.test(message)) return { value: null, exception: true, why: firstLine(message) };
       throw e;
     }
+  }
+
+  /** The settle that the last input left for the next read of the page. `stop`: an early observe (see causalSettle). */
+  async function settlePending(stop = false): Promise<void> {
+    if (early !== null) await causalSettle();
+    if (pendingSettle === undefined) return;
+    const action = pendingSettle;
+    const causal = causalPending;
+    pendingSettle = undefined;
+    causalPending = false;
+    if (causal) await causalSettle(action, stop);
+    else await evaluate(settleScript(action), true);
+  }
+
+  /** Scroll position, scroll height, viewport, width, and element count. StalePage while the document navigates. */
+  async function scrollState(): Promise<ScrollState & { width: number }> {
+    const r = await evaluate(SCROLL_STATE_SCRIPT);
+    const v = r.value as (ScrollState & { width: number }) | null;
+    if (r.exception || v === null || typeof v !== "object") throw new StalePage("Document changed during the scroll. Read again.");
+    return v;
   }
 
   async function waitReady(timeoutMs: number): Promise<void> {
@@ -414,15 +445,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
     async observe(o) {
       const start = Date.now();
-      if (early !== null) await causalSettle();
-      if (pendingSettle !== undefined) {
-        const action = pendingSettle;
-        const causal = causalPending;
-        pendingSettle = undefined;
-        causalPending = false;
-        if (causal) await causalSettle(action, o?.early === true);
-        else await evaluate(settleScript(action), true);
-      }
+      await settlePending(o?.early === true);
       const deadline = start + opts.settleTimeoutMs;
       let polls = 0;
       for (;;) {
@@ -637,6 +660,59 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     async screenshot(path) {
       const res = await call("Page.captureScreenshot", { format: "jpeg", quality: 72 });
       fs.writeFileSync(path, Buffer.from(String(res["data"] ?? ""), "base64"));
+    },
+
+    async read(o) {
+      // The work of the last input ends first, as in observe: a click that adds a table after a timer shows it here.
+      await settlePending();
+      // Then the document: readyState "complete", polled every 20 ms up to the cap. A document that stays below it is
+      // read as it is, with one warning (observe accepts it the same way).
+      const ready = Date.now() + opts.settleTimeoutMs;
+      let polls = 0;
+      for (;;) {
+        const r = await evaluate(READY_DOC_SCRIPT);
+        const v = !r.exception && Array.isArray(r.value) ? (r.value as unknown[]) : null;
+        if (v !== null && (v[0] === "complete" || accepted(v[1]))) break;
+        if (Date.now() >= ready) {
+          if (v !== null) {
+            opts.log.warn(`page not complete after ${opts.settleTimeoutMs} ms; reading it as is`);
+            acceptedDoc = { id: v[1] };
+          }
+          break;
+        }
+        polls += 1;
+        await settleSleep(20);
+      }
+      if (polls > 0) opts.log.debug(`read waited ${polls} polls for readyState complete`);
+      // The reader. A document that goes away under it (or has no body yet) is read again, up to the cap.
+      const script = readScript(o);
+      const deadline = Date.now() + opts.settleTimeoutMs;
+      let why = "";
+      for (;;) {
+        const t0 = Date.now();
+        const r = await evaluate(script);
+        if (!r.exception && r.value !== null && typeof r.value === "object") {
+          const out = r.value as PageRead;
+          out.stats.ms = Date.now() - t0;
+          return out;
+        }
+        if (r.why) why = r.why;
+        if (Date.now() >= deadline) throw new StalePage(`Page did not settle${why ? ` (${why})` : ""}`);
+        await settleSleep(20);
+      }
+    },
+
+    async wheel(dy) {
+      // The rest of an early settle ends before a new input: its work belongs to the input before.
+      if (early !== null) await causalSettle();
+      // A wheel of 0 pixels sends no input: it only reads the state (the loader reads the page this way after its pause).
+      if (dy !== 0) {
+        const at = await scrollState();
+        await mouse("mouseWheel", Math.round(at.width / 2), Math.round(at.viewport / 2), { deltaX: 0, deltaY: dy });
+        await evaluate(settleScript(null), true);
+      }
+      const { width: _width, ...state } = await scrollState();
+      return state;
     },
 
     async close() {

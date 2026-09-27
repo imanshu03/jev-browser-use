@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Human, TextRequest } from "../../src/io.js";
 import { emptyResult } from "../../src/io.js";
 import { MCP, MCP_HINTS } from "../../src/mcp/limits.js";
-import type { RunHooks, RunStarter } from "../../src/mcp/runs.js";
+import { ReadView } from "../../src/mcp/read-view.js";
+import type { BrowseInput, RunHooks, RunStarter } from "../../src/mcp/runs.js";
 import { RunManager } from "../../src/mcp/runs.js";
-import { NoKeyError, baseConfig, fastStarter } from "../../src/mcp/setup.js";
+import { NoKeyError, baseConfig, configFor, fastStarter } from "../../src/mcp/setup.js";
 import type { RunViewData } from "../../src/mcp/view.js";
 import { RunView, TOOL_NAMES } from "../../src/mcp/view.js";
 import type { RunResult } from "../../src/types.js";
@@ -12,7 +13,7 @@ import { LIMITS } from "../../src/types.js";
 import { BrowserSession } from "../../src/fast/session.js";
 import { fakeLogger, fakeOracle } from "../fakes.js";
 import { el, fakeChrome, fakePage, obs } from "../fast/fakes.js";
-import { KEY, MAIL, PROFILES, connect, fakeJev, idx, mailSession, replyOracle, type ElicitAnswer, type ElicitParams } from "./helpers.js";
+import { KEY, MAIL, PROFILES, connect, fakeJev, fakeKit, idx, mailSession, readSession, replyOracle, shopRead, type ElicitAnswer, type ElicitParams } from "./helpers.js";
 
 type Result = Awaited<ReturnType<Awaited<ReturnType<typeof connect>>["client"]["callTool"]>>;
 
@@ -67,7 +68,7 @@ afterEach(() => {
 });
 
 describe("tools/list", () => {
-  it("lists the 5 tools with their annotations; continue has no _meta by default", async () => {
+  it("lists the 7 tools with their annotations; continue has no _meta by default", async () => {
     const c = await connect(deps(new RunManager({ start: held().start, log: fakeLogger() })));
     const { tools } = await c.client.listTools();
     expect(tools.map((t) => t.name)).toEqual([...TOOL_NAMES]);
@@ -77,9 +78,30 @@ describe("tools/list", () => {
     expect(by["continue"]?.annotations).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
     expect(by["cancel"]?.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(by["close_browser"]?.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+    expect(by["read_page"]?.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
+    expect(by["scraper"]?.annotations).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    expect(tools.map((t) => t.name)).toEqual(["browse", "wait", "continue", "cancel", "close_browser", "read_page", "scraper"]);
     expect(by["continue"]?._meta?.["anthropic/requiresUserInteraction"]).toBeUndefined();
     expect(by["browse"]?.inputSchema).toMatchObject({ additionalProperties: false, required: ["task"], properties: { headed: { default: true }, wait_s: { default: 40, maximum: 50 }, vars: { propertyNames: { pattern: "^[a-z0-9_]{1,40}$" } } } });
     expect(by["continue"]?.inputSchema).toMatchObject({ required: ["run", "request"], properties: { request: { pattern: "^t[0-9]{1,2}$" }, values: { propertyNames: { pattern: "^f[0-9]{1,2}$" } } } });
+    expect(by["read_page"]?.inputSchema).toMatchObject({ additionalProperties: false, properties: { text: { default: false }, load: { default: false }, cursor: { maxLength: 100 }, max_tokens: { default: 6000, minimum: 1000, maximum: 9000 }, sets: { maxItems: 10, items: { pattern: "^[tg][0-9]{1,3}$" } } } });
+    expect(by["scraper"]?.inputSchema).toMatchObject({
+      additionalProperties: false, required: ["action"],
+      properties: { action: { enum: ["save", "run", "list", "show", "delete"] }, heal: { enum: ["code", "none"], default: "code" }, headed: { default: true }, overwrite: { default: false }, max_tokens: { default: 6000 }, extract: { type: "object", required: ["set", "fields"] } },
+    });
+    await c.close();
+  });
+
+  it("the goal of browse says what each value does and to always pass it; geo is a strict point", async () => {
+    const c = await connect(deps(new RunManager({ start: held().start, log: fakeLogger() })));
+    const { tools } = await c.client.listTools();
+    const browse = tools.find((x) => x.name === "browse");
+    expect(browse?.inputSchema).toMatchObject({
+      properties: {
+        goal: { enum: ["act", "extract", "check"], description: "act: change the page (click, type, submit). extract: read a value from the page. check: answer yes or no. Always pass it." },
+        geo: { type: "object", additionalProperties: false, required: ["latitude", "longitude"], properties: { latitude: { minimum: -90, maximum: 90 }, longitude: { minimum: -180, maximum: 180 } } },
+      },
+    });
     await c.close();
   });
 
@@ -331,6 +353,46 @@ describe("autonomous runs", () => {
     const browse = tools.find((x) => x.name === "browse");
     expect(browse?.inputSchema).toMatchObject({ properties: { confirm: { enum: ["auto", "always", "never", "autonomous"], default: "auto" }, user_said: { type: "string", minLength: 1, maxLength: 300 } } });
     expect(browse?.description).toContain('Set confirm to "autonomous" only when the user\'s own message asks for it');
+    await c.close();
+  });
+});
+
+describe("geo and read_page", () => {
+  it("browse with geo passes it to the run config; a bad point is a wrong call", async () => {
+    const inputs: BrowseInput[] = [];
+    const start: RunStarter = async (input) => { inputs.push(input); return done(); };
+    const c = await connect(deps(new RunManager({ start, log: fakeLogger() })));
+    const geo = { latitude: 12.9352, longitude: 77.6245, accuracy: 25 };
+    view(await c.client.callTool({ name: "browse", arguments: { task: "set the location", goal: "act", geo, wait_s: 1 } }));
+    expect(inputs[0]?.geo).toEqual(geo);
+    expect(configFor(inputs[0] as BrowseInput, baseConfig({}, fakeLogger())).geo).toEqual(geo);
+    view(await c.client.callTool({ name: "browse", arguments: { task: "no location", wait_s: 1 } }));
+    expect("geo" in (inputs[1] as BrowseInput)).toBe(false);
+    for (const bad of [{ latitude: 91, longitude: 0 }, { latitude: 1 }, { latitude: 1, longitude: 2, altitude: 3 }]) {
+      expect((await c.client.callTool({ name: "browse", arguments: { task: "x", geo: bad } })).isError, JSON.stringify(bad)).toBe(true);
+    }
+    expect(inputs).toHaveLength(2);
+    await c.close();
+  });
+
+  it("read_page is a wrong call while a run is active (it names the run) and when no page is open", async () => {
+    const h = held();
+    const runs = new RunManager({ start: h.start, log: fakeLogger() });
+    const s = readSession(shopRead());
+    const c = await connect({ ...deps(runs), scrape: { kit: fakeKit(), session: s.session, base: s.base } });
+    const none = await c.client.callTool({ name: "read_page", arguments: {} });
+    expect(none.isError).toBe(true);
+    expect(text(none)).toBe("No page is open. Call browse with a url first.");
+    const v = view(await c.client.callTool({ name: "browse", arguments: { task: "a", wait_s: 0 } }));
+    await s.open();
+    const busy = await c.client.callTool({ name: "read_page", arguments: {} });
+    expect(busy.isError).toBe(true);
+    expect(text(busy)).toBe(`run ${v.run} is active. Call wait with run "${v.run}", or cancel it first.`);
+    h.s.finish(done());
+    await c.client.callTool({ name: "wait", arguments: { run: v.run, wait_s: 5 } });
+    const read = await c.client.callTool({ name: "read_page", arguments: {} });
+    expect(read.isError).toBeFalsy();
+    expect(ReadView.parse(read.structuredContent).untrusted_tables.map((t) => t.id)).toEqual(["t1"]);
     await c.close();
   });
 });

@@ -1,0 +1,12 @@
+<html><head><meta charset="utf-8"><title>Quirks fixture</title></head>
+<!-- The shape of e2necc.com/home/eggprice: no DOCTYPE (quirks mode, the body scrolls), a short header in flow, and the
+     price table in an absolutely positioned panel that is taller than the viewport. document.documentElement.scrollHeight
+     is then the viewport height; the page height is the scroll height of the scrolling element (the body). -->
+<body style="margin:0 10px;font:12px sans-serif">
+<table><tr><td><h3>Top of the page</h3></td></tr></table>
+<div id="panel" style="position:absolute;top:120px;left:50px;width:600px">
+  <table border="1"><tr><th>Zone</th><th>Price</th></tr><tr><td>Hyderabad</td><td>525</td></tr></table>
+  <div style="height:2400px"></div>
+  <p>Bottom of the page</p>
+</div>
+</body></html>

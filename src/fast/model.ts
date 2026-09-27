@@ -6,6 +6,7 @@
 // jev_ultrafast/browser.py; MIT License, Copyright (c) 2026 Browser Use).
 
 import type { Logger } from "../io.js";
+import type { PageRead, ReadOptions, ScrollState } from "./read-types.js";
 
 /** One CDP connection: a pipe to a Chrome we launched, or a WebSocket to a Chrome we attached to. */
 export interface CdpClient {
@@ -16,6 +17,14 @@ export interface CdpClient {
   /** Close the transport. Pending sends reject. */
   close(): Promise<void>;
   readonly closed: boolean;
+}
+
+/** A geolocation override for every tab of a Chrome: the page's navigator.geolocation reports this point. */
+export interface GeoPoint {
+  latitude: number;   // -90..90
+  longitude: number;  // -180..180
+  /** Metres. Default 50. */
+  accuracy?: number;
 }
 
 export interface ChromeLaunchOptions {
@@ -35,6 +44,11 @@ export interface ChromeLaunchOptions {
   chromeBin?: string;
   /** Per CDP command timeout. Default 30000 ms. The CLI passes `--step-timeout`. */
   commandTimeoutMs?: number;
+  /**
+   * Geolocation override. Each new tab gets Browser.grantPermissions (geolocation) and Emulation.setGeolocationOverride,
+   * so "Detect my location" works in a headless run. Absent: Chrome's own behaviour.
+   */
+  geolocation?: GeoPoint;
   env: NodeJS.ProcessEnv;
   log: Logger;
 }
@@ -164,6 +178,11 @@ export interface Action {
   date?: DateInfo;                    // a date field: code types a whole task date into it (Page.setDate)
   datePart?: DatePartName;            // a month, day, or year part that is not in a whole group
   day?: CalendarDay;                  // a day of a calendar grid
+  /**
+   * A pointer row (rule B in snapshot.ts): a clickable element with no native or ARIA control role, found by its pointer
+   * cursor and its click handler. Its role is "button" and its label its text. Set by the snapshot; never sent to Jev.
+   */
+  inferred?: true;
 }
 
 /**
@@ -371,6 +390,18 @@ export interface Page {
   url(): Promise<string>;
   /** Save a JPEG screenshot. */
   screenshot(path: string): Promise<void>;
+  /**
+   * The page reader (read.ts): tables, record groups, form values, and visible text of the whole document, open shadow
+   * roots included, in one evaluation. Waits first for any pending post-input settle, as observe does, and retries while
+   * the document is navigating, up to `settleTimeoutMs`. Reads only; changes nothing on the page. An adapter without it
+   * cannot scrape.
+   */
+  read?(opts?: ReadOptions): Promise<PageRead>;
+  /**
+   * Code-only scroll for the loader: one mouseWheel of `dy` pixels at the viewport centre, then the frame settle. No
+   * freshness check and no action: the caller only reads the page afterwards. Returns the scroll state after it.
+   */
+  wheel?(dy: number): Promise<ScrollState>;
   /** Close this tab. Idempotent. */
   close(): Promise<void>;
   /** Milliseconds spent inside browser calls and settle waits, and the number of CDP commands. */
