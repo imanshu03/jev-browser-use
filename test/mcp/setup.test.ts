@@ -23,6 +23,7 @@ vi.mock("../../src/fast/loop.js", () => ({
     unsentText(): unknown[] { return runner.unsent; }
     untypedText(): string[] { return runner.untyped; }
     sentTexts(): { field: string; text: string }[] { return runner.sent; }
+    addedChipList(): [string, string[]][] { return []; }
   },
 }));
 
@@ -311,7 +312,7 @@ describe("fastStarter", () => {
     const epoch = t.session.epoch;
     runner.page = t.page;
     await t.start(input({ profile: "none", headed: true }), t.hooks);
-    expect(t.keep).toHaveBeenCalledWith(t.page, epoch, []);
+    expect(t.keep).toHaveBeenCalledWith(t.page, epoch, [], []);
     expect(t.session.page).toBe(t.page);
   });
 
@@ -322,7 +323,7 @@ describe("fastStarter", () => {
     runner.page = t.page;
     runner.unsent = [entry];
     await t.start(input({ profile: "none" }), t.hooks);
-    expect(t.keep).toHaveBeenLastCalledWith(t.page, expect.any(Number), [entry]);
+    expect(t.keep).toHaveBeenLastCalledWith(t.page, expect.any(Number), [entry], []);
     expect(t.session.unsent).toEqual([entry]);
     await t.start(input({ profile: "none", task: "click the Comment button" }), t.hooks);
     expect(deps()).toMatchObject({ page: t.page, unsent: [entry] });

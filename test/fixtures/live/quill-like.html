@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Quill-like document</title>
+<!-- As Quill 2: a document whose first block is a heading. A new paragraph adds <p><br></p> and leaves the DOM caret at
+     the editor level, (editor, index of the new block), not inside it. Typed text goes into the block at the caret. -->
+<div id="ql" contenteditable="true" aria-label="Notes"><h1>Release notes</h1><p>Old line one.</p><p>Old line two.</p></div>
+<script>
+  const ed = document.getElementById("ql");
+  const blockAt = () => {
+    const s = getSelection();
+    if (!s.rangeCount) return null;
+    const r = s.getRangeAt(0);
+    if (r.endContainer === ed) return ed.children[r.endOffset] ?? ed.children[r.endOffset - 1] ?? null;
+    let n = r.endContainer.nodeType === 3 ? r.endContainer.parentElement : r.endContainer;
+    while (n && n.parentElement !== ed) n = n.parentElement;
+    return n;
+  };
+  ed.addEventListener("beforeinput", (e) => {
+    if (e.inputType === "insertParagraph") {
+      e.preventDefault();
+      const cur = blockAt();
+      const p = document.createElement("p");
+      p.innerHTML = "<br>";
+      if (cur) cur.after(p); else ed.append(p);
+      const i = [...ed.children].indexOf(p);
+      getSelection().setBaseAndExtent(ed, i, ed, i);
+    } else if (e.inputType === "insertText") {
+      const s = getSelection(), r = s.getRangeAt(0);
+      if (r.endContainer !== ed) return;
+      e.preventDefault();
+      const b = blockAt();
+      if (!b) return;
+      b.textContent = e.data;
+      s.setBaseAndExtent(b.firstChild, e.data.length, b.firstChild, e.data.length);
+    }
+  });
+</script>

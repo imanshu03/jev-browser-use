@@ -52,7 +52,7 @@ export type ConfirmEnd = "allowed" | "denied" | "no_pickup" | "no_answer" | "can
  * An autonomous run: the user's words, the number of step records with an audit so far, and the first step after which
  * an audited text left the page.
  */
-export interface RunAutonomy { readonly userSaid: string; unattended: number; sentAt: number | null }
+export interface RunAutonomy { readonly userSaid: string; unattended: number }
 
 export interface Run {
   readonly id: string;            // `r${n}-${4 hex}`
@@ -218,7 +218,7 @@ export class RunManager {
     }
     const run = new RunState(`r${++this.count}-${randomBytes(2).toString("hex")}`, input.task, this.now(), (s) => stripKey(s, this.secret()));
     run.confirm = input.confirm;
-    if (input.confirm === "autonomous") run.autonomous = { userSaid: input.user_said ?? "", unattended: 0, sentAt: null };
+    if (input.confirm === "autonomous") run.autonomous = { userSaid: input.user_said ?? "", unattended: 0 };
     this.runs.set(run.id, run);
     this.current = run;
     let p: Promise<RunResult>;
@@ -390,7 +390,6 @@ export class RunManager {
         const a = run.autonomous;
         if (rec.unattended && a) {
           a.unattended += 1;
-          if (a.sentAt === null && rec.unattended.texts.some((t) => t.left === true)) a.sentAt = rec.step;
         }
         const line = flatText(run.redact(stepLine(rec, (s) => run.redact(s))));
         run.lastStep = line;

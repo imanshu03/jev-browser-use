@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Chat thread</title>
+<!-- A chat whose Enter sends: each sent message shows as a full-width row before the input, with a Delete button, as a
+     chip would. The input's name is neutral, so only the layout tells a message from a chip. -->
+<div id="thread"><input id="box" placeholder="Type something" autocomplete="off"></div>
+<p id="status">0 sent</p>
+<script>
+  const box = document.getElementById("box"), status = document.getElementById("status");
+  let n = 0;
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !box.value.trim()) return;
+    e.preventDefault();
+    const m = document.createElement("div");
+    m.append(document.createTextNode(box.value + " "));
+    const del = document.createElement("button");
+    del.setAttribute("aria-label", "Delete message");
+    del.textContent = "x";
+    del.onclick = () => m.remove();
+    m.append(del);
+    box.before(m);
+    status.textContent = `${++n} sent`;
+    box.value = "";
+  });
+</script>

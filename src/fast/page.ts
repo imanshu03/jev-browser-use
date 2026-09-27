@@ -8,7 +8,7 @@ import type { Action, Chrome, DatePlan, EditMode, EditPlan, EditResult, Observat
 import { LIMITS } from "../types.js";
 import { EditRefused, StalePage } from "./model.js";
 import type { EditStep } from "./snapshot.js";
-import { BLUR_SCRIPT, CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, nativeDateScript, pageKeyGuardScript, popupScript, selectPartScript, settleScript } from "./snapshot.js";
+import { BLUR_SCRIPT, CAUSAL_END_SCRIPT, DOC_ID_SCRIPT, EDIT_SETTLE_SCRIPT, KEY_GUARD_SCRIPT, LOCATION_SCRIPT, MARKER_SCRIPT, PAGE_KEY_SCRIPT, READY_STATE_SCRIPT, SNAPSHOT_SCRIPT, actScript, causalArmScript, causalStateScript, commitScript, editScript, nativeDateScript, pageKeyGuardScript, partFocusScript, popupScript, selectPartScript, settleScript } from "./snapshot.js";
 
 const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
   Enter: { code: "Enter", vk: 13, text: "\r" },
@@ -319,6 +319,25 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await settleEdit();
   }
 
+  /**
+   * Put the selection of the focused input or textarea where `mode` needs it, in the page, with no key event: all of the
+   * text for a replace, a caret at the end for an append. A key filter (a digits-only field) cancels a key event, even
+   * the key-less command's "Unidentified" key. False for an editor, and for an input without a selection API (email,
+   * number): the key-less command does it then.
+   */
+  async function selectInPage(mode: EditMode): Promise<boolean> {
+    const r = await evaluate(`(mode => {
+      const e = document.activeElement;
+      if (!e || !['INPUT','TEXTAREA'].includes(e.tagName)) return false;
+      try {
+        const n = String(e.value).length;
+        if (mode === 'replace') e.setSelectionRange(0, n); else e.setSelectionRange(n, n);
+        return true;
+      } catch { return false; }
+    })(${JSON.stringify(mode)})`);
+    return !r.exception && r.value === true;
+  }
+
   /** One step of a fill (`editScript`). A document that went away: StalePage before the first insert, else EditRefused. */
   async function editStep(node: number, step: "read" | "check" | "blank", mode: EditMode, keep: string[], typed: boolean): Promise<EditStep> {
     const r = await evaluate(editScript(node, step, mode, keep));
@@ -345,7 +364,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     const mode: EditMode = read.blank && plan.keepChips !== true ? "replace" : plan.mode;
     // A line break can send in a composer. Refuse before any change.
     if (mode === "append" && shape === "composer" && /\n/.test(text)) throw new EditRefused("the text has line breaks, and a new line can send the message in this field");
-    await command(mode === "replace" ? "selectAll" : "moveToEndOfDocument");
+    if (read.kind === "editable" || !(await selectInPage(mode))) await command(mode === "replace" ? "selectAll" : "moveToEndOfDocument");
     const ready = await editStep(node, "check", mode, [], false);
     if (!ready.ok) throw new EditRefused(`the fill did not start: ${ready.why}`);
     if (shape === "document" && (mode === "append" || /\n/.test(text))) {
@@ -373,7 +392,10 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     await settleEdit();
     const after = await editStep(node, "read", mode, [], true);
     // An input without a selection API (email, number) had no selection check. Its value must be the text now.
-    if (ready.selectable === false && mode === "replace" && !read.blank && flat(after.text) !== flat(text)) {
+    // The page can normalize the value: lower case (an email), or the number that it parsed ("12.50" is "12.5"). A
+    // select-all that did not happen ("10" and "25" give "1025") is still refused.
+    const norm = (s: string): string => { const f = flat(s); const n = f === "" ? NaN : Number(f); return Number.isFinite(n) ? String(n) : f.toLowerCase(); };
+    if (ready.selectable === false && mode === "replace" && !read.blank && norm(after.text) !== norm(text)) {
       throw new EditRefused(`the field shows "${flat(after.text).slice(0, 60)}" after the fill, not the typed text`, true);
     }
     return { mode, shape, before: read.text, after: after.text };
@@ -507,6 +529,8 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         return;
       }
       let typed = false;
+      /** A part got its keys or its text. */
+      let wrote = false;
       for (const part of plan.parts) {
         const r = await evaluate(actScript({ ...action, kind: "click", node: part.node }));
         const at = r.value as { x: number; y: number } | null;
@@ -519,6 +543,14 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
         await mouse("mousePressed", at.x, at.y, { button: "left", clickCount: 1 });
         await mouse("mouseReleased", at.x, at.y, { button: "left", clickCount: 1 });
         typed = true;
+        // Type only while the part has focus: a click can open a popover that focuses its own field, and the digits
+        // would go there. Nothing typed yet: observe again. Else the date is half set: refused, and the loop reads it back.
+        const focused = await evaluate(partFocusScript(part.node));
+        if (focused.exception || focused.value !== true) {
+          if (!wrote) { await settleNow(); throw new StalePage("Focus is not on the date part after its click. Observe again."); }
+          throw new EditRefused("focus left the date field before its last part", true);
+        }
+        wrote = true;
         if (part.spin) {
           // A spinbutton segment (react-aria, MUI) reads digit keys, not inserted text.
           for (const ch of part.text) {

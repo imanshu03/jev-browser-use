@@ -247,6 +247,8 @@ export interface StepInput {
   heldText?: ReadonlySet<number>;
   /** Texts that a send of this run took out of the page: `sent_texts` in the state, and the DONE_SENT text. */
   sentTexts?: { field: string; text: string }[];
+  /** A send of this run went out without a chip for a name that the task asks to mention: DONE_SENT is not offered. */
+  sentMissesMention?: boolean;
   /** False: the tab has no earlier web page, or a GO_BACK of this step fell below its gate. GO_BACK is not offered then. */
   canGoBack?: boolean;
 }
@@ -647,7 +649,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
   if (canPressEnter(obs)) ops["PRESS_ENTER"] = obs.focus?.enterOption ? ENTER_PICKS : "Press Enter to submit the focused field.";
   if (input.canGoBack !== false) ops["GO_BACK"] = "Go back to the previous page.";
   const sent = input.sentTexts ?? [];
-  if (!doneBanned) ops["DONE"] = sent.length > 0 ? DONE_SENT : DONE_TEXT;
+  if (!doneBanned) ops["DONE"] = sent.length > 0 && input.sentMissesMention !== true ? DONE_SENT : DONE_TEXT;
   ops["BLOCKED"] = "No supported operation can make progress.";
   meta.offered = Object.keys(ops);
 

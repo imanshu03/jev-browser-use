@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>atoms</title></head>
+<body>
+<div id="ed" contenteditable="true" role="textbox" aria-label="Document" style="height:400px;overflow:auto"></div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const n = Number(q.get('n') || 1000), atoms = q.get('atoms') === '1';
+  const ed = document.getElementById('ed');
+  let html = '';
+  for (let i = 0; i < n; i++) html += '<p>Line ' + i + ' some text here ' + (atoms ? '<span contenteditable="false" data-type="mention">@user' + i + '</span>' : '<span>@user' + i + '</span>') + ' tail words ' + i + '</p>';
+  ed.innerHTML = html;
+  if (q.get('focus') === '1') ed.focus();
+</script>
+</body></html>

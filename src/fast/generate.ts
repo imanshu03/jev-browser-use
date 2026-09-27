@@ -83,7 +83,8 @@ export function pickFields(obs: Observation, target: Action, skip: { banned: Set
       label: cutText(flatText(redactor(a.label)), LIMITS.nameChars),
       role: a.role ?? "textbox",
       required: i === 0,
-      multiline: a.multiline === true,
+      // A keepChips append goes into a message editor with mention chips, and page.ts refuses line breaks there.
+      multiline: a.multiline === true && !(i === 0 && held?.keepChips === true),
       max_chars: Math.min(a.maxLength ?? LIMITS.generatedChars, LIMITS.generatedChars),
       current_value: i === 0 && held ? cutLines(sanitizeText(redactor(a.value ?? "")), LIMITS.heldValueChars) : cutText(sanitizeText(redactor(a.value ?? "")), LIMITS.valueChars),
       ...(i === 0 && held?.mode === "append" ? { mode: "append" as const } : {}),

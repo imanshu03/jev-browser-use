@@ -276,7 +276,9 @@ export function dateGate(obs: Observation, assigned: DateAssignment[], spans: Sp
   // A numeric task date whose day and month can change places, and that fits no date field in scope: code cannot check
   // the fields for it, so the picker waits. The run then blocks with the fix.
   const fields = obs.actions.filter((a) => a.date !== undefined && (scope === "page" || (a.form ?? null) === scope));
-  const lost = fields.length > 0 ? spans.find((s) => s.date?.ambiguous !== undefined && !fields.some((f) => wantOf(f, s) !== null)) : undefined;
+  // A date inside a longer quoted text (a message, a name) is text to type, not a date for a field.
+  const inText = (s: Span): boolean => spans.some((q) => q.source === "quoted" && q.text.length > s.text.length && q.text.includes(s.text));
+  const lost = fields.length > 0 ? spans.find((s) => s.date?.ambiguous !== undefined && !inText(s) && !fields.some((f) => wantOf(f, s) !== null)) : undefined;
   const unread = lost ? `the task date ${lost.text} fits no date field here, because its day and month can change places: write the month as a word or use YYYY-MM-DD` : null;
   return [typeFirst, unread].filter((x) => x !== null).join("; ") || null;
 }

@@ -153,7 +153,7 @@ describe("RunManager: autonomous runs", () => {
     await expect(h.human.confirm("About to click. Type y to allow: ", 1000, { kind: "action", action: "click", host: "x", typed: [] })).resolves.toBe(false);
     expect(run.status).toBe("running");
     expect(run.pending).toBeNull();
-    expect(run.autonomous).toEqual({ userSaid: `do it autonomously ${KEY}`, unattended: 0, sentAt: null });
+    expect(run.autonomous).toEqual({ userSaid: `do it autonomously ${KEY}`, unattended: 0 });
     expect(log.lines).toContain(`INFO run ${run.id} started (autonomous: no dialogs; the user said "do it autonomously ***")`);
     const plain = setup();
     plain.runs.start(input("b"), { interactive: true });
@@ -172,7 +172,7 @@ describe("RunManager: autonomous runs", () => {
     expect(r2.autonomous).toBeNull();
   });
 
-  it("step records with an audit count for the banner; the first text that left the page sets sentAt", () => {
+  it("step records with an audit count for the banner; a text that left the page is not a send record (group 28)", () => {
     const { runs, m } = setup();
     const run = runs.start(input("a", { confirm: "autonomous", user_said: "don't ask me" }), { interactive: false });
     const log = m.last().hooks.log;
@@ -180,7 +180,7 @@ describe("RunManager: autonomous runs", () => {
     log.step(rec(2, { unattended: audit(false) }));
     log.step(rec(3, { unattended: audit(true) }));
     log.step(rec(4, { unattended: audit(true) }));
-    expect(run.autonomous).toMatchObject({ unattended: 3, sentAt: 3 });
+    expect(run.autonomous).toEqual({ userSaid: "don't ask me", unattended: 3 });
     expect(run.steps).toBe(4);
   });
 });

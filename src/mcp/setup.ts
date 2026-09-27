@@ -20,7 +20,7 @@ import type { Transport } from "../transport.js";
 import { createTransport } from "../transport.js";
 import type { RunConfig } from "../types.js";
 import type { BrowseInput, RunStarter } from "./runs.js";
-import { MCP_ENV } from "./limits.js";
+import { MCP_ENV, hintsFor } from "./limits.js";
 
 /** No TypeSafe API key in the environment, the package .env, or the saved config file. */
 export class NoKeyError extends Error { override name = "NoKeyError"; }
@@ -230,14 +230,15 @@ export function fastStarter(d: StarterDeps): RunStarter {
     const oracle = (d.oracle ?? ((model: string, log: Logger) => createOracle(d.jev.client(), model, log)))(cfg.model, hooks.log);
     // Text that an earlier run typed and did not send stays in its field. The gate of this run covers it too.
     const runner = new FastRunner({
-      cfg, profiles, chrome: d.session.chromeFor(cfg), ...(page ? { page, unsent: d.session.unsent } : {}), openPage: (c) => d.session.openPage(c),
+      cfg, profiles, chrome: d.session.chromeFor(cfg), ...(page ? { page, unsent: d.session.unsent, chips: d.session.chips } : {}), openPage: (c) => d.session.openPage(c),
       oracle, human: hooks.human, log: hooks.log, warm: () => d.jev.warm(),
-      text: hooks.text, signal: hooks.signal, hints: hooks.hints, fromAssistant: true, ...(hooks.attended !== undefined ? { attended: hooks.attended } : {}),
+      text: hooks.text, signal: hooks.signal, hints: hintsFor(d.env, hooks.hints), fromAssistant: true, ...(hooks.attended !== undefined ? { attended: hooks.attended } : {}),
     });
     const result = await runner.run();
     hooks.untyped?.(runner.untypedText());
     hooks.sent?.(runner.sentTexts());
-    d.session.keep(runner.page, epoch, runner.unsentText());
+    // The mention chips that this run added stay stray chips for the next run on the page (the unasked-chip gate).
+    d.session.keep(runner.page, epoch, runner.unsentText(), runner.addedChipList());
     if (result.error?.kind === "browser") await d.session.close();
     return result;
   };

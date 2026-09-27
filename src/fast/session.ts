@@ -54,6 +54,8 @@ export class BrowserSession {
   private closing: Promise<void> | null = null;
   /** Unsent assistant text on the session page, from the run that used it last. */
   private _unsent: UnsentText[] = [];
+  /** `<doc>` -> mention chips that runs added on the session page. */
+  private _chips: [string, string[]][] = [];
 
   constructor(opts: SessionOptions) {
     this.env = opts.env;
@@ -68,6 +70,8 @@ export class BrowserSession {
   get epoch(): number { return this._epoch; }
   /** Unsent assistant text on the session page. The next run on the page gets it, so its gate applies there too. */
   get unsent(): UnsentText[] { return this._unsent.map((u) => ({ ...u })); }
+  /** Mention chips that earlier runs added on the session page. The next run's unasked-chip gate covers them too. */
+  get chips(): [string, string[]][] { return this._chips.map(([d, n]) => [d, [...n]]); }
 
   /** null: the plan decides the profile, so close any open Chrome. Otherwise close when the key differs from the open key or client.closed. */
   async prepare(key: SessionKey | null): Promise<void> {
@@ -115,15 +119,16 @@ export class BrowserSession {
   async openPage(chrome: Chrome): Promise<Page> {
     const page = await this.open(chrome, this.log);
     // A close during the open leaves another Chrome, or none, in the session. The page is then not kept.
-    if (chrome === this._chrome) { this._page = page; this._unsent = []; }
+    if (chrome === this._chrome) { this._page = page; this._unsent = []; this._chips = []; }
     return page;
   }
 
   /** Keeps runner.page and its unsent text only when no close happened since `epoch`. keep(null) changes nothing. */
-  keep(page: Page | null, epoch: number, unsent: readonly UnsentText[] = []): void {
+  keep(page: Page | null, epoch: number, unsent: readonly UnsentText[] = [], chips: readonly (readonly [string, readonly string[]])[] = []): void {
     if (page && epoch === this._epoch && this._chrome) {
       this._page = page;
       this._unsent = unsent.map((u) => ({ ...u }));
+      this._chips = chips.map(([d, n]) => [d, [...n]]);
     }
   }
 
@@ -134,7 +139,7 @@ export class BrowserSession {
     if (!page) return undefined;
     let url: string;
     try { url = await page.url(); } catch {
-      if (this._page === page) { this._page = null; this._unsent = []; }
+      if (this._page === page) { this._page = null; this._unsent = []; this._chips = []; }
       return undefined;
     }
     const t = url.trim();
@@ -151,7 +156,7 @@ export class BrowserSession {
     // completes after this point closes its own Chrome.
     this._epoch += 1;
     this._page = null;
-    this._unsent = [];
+    this._unsent = []; this._chips = [];
     const p: Promise<void> = this.shut().finally(() => { if (this.closing === p) this.closing = null; });
     this.closing = p;
     return p;
@@ -162,7 +167,7 @@ export class BrowserSession {
     const c = this._chrome;
     this._chrome = null;
     this._page = null;
-    this._unsent = [];
+    this._unsent = []; this._chips = [];
     this.key = null;
     if (!c) return;
     await c.close().catch(() => undefined);
