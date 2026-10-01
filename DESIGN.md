@@ -33,6 +33,8 @@ Each direct engine uses one Chrome DevTools Protocol (CDP) connection.
 | `chromium` | Same as `cdp --browser chromium` | `--chrome-bin`, then `JEV_CHROMIUM_BIN`, then Chromium discovery | Chromium source profiles; copies under `jev-browser/chromium` |
 | `vercel` | `Runner`, `agent-browser` CLI | `JEV_BROWSER_BIN` or the package-local CLI | Profile handling belongs to `agent-browser` |
 
+Scraper files can store the source browser. Replay uses that browser for profile lookup, launch, and Jev navigation. `JEV_BROWSER` can override the stored browser in the scraper CLI. Files with no browser keep the default selection rules.
+
 The configuration root for copies is `$XDG_CONFIG_HOME` or `~/.config`. The selected browser determines source profiles and copy storage, including when a binary override is used. Discovery of a named browser checks only that browser's locations. The direct engines require an installed browser and do not download one.
 
 The one-shot `--cdp` flag attaches to an existing browser for either direct engine. Attachment skips binary selection and profile copying. Chat chooses its engine at startup and does not expose `--cdp` or an engine-switch command.

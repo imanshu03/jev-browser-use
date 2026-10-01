@@ -75,6 +75,16 @@ describe("parseArgs", () => {
 });
 
 describe("main", () => {
+  it("run uses the browser stored in the scraper file", async () => {
+    saveScraper({ ...loadSpec("necc-egg-prices"), browser: "edge" }, env);
+    const seen: { browser?: BrowserOptions } = {};
+    expect(await main(["run", "necc-egg-prices"], io().io, runDeps(result("ok"), seen))).toBe(0);
+    expect(seen.browser).toMatchObject({ browser: "edge", profileDirectory: "Profile 14" });
+    env["JEV_BROWSER"] = "brave";
+    expect(await main(["run", "necc-egg-prices"], io().io, runDeps(result("ok"), seen))).toBe(0);
+    expect(seen.browser?.browser).toBe("brave");
+  });
+
   it("--help, no args, --version", async () => {
     const a = io();
     expect(await main(["--help"], a.io)).toBe(0);
@@ -214,6 +224,12 @@ describe("main", () => {
 });
 
 describe("main: new", () => {
+  it("new stores the selected browser for later replay", async () => {
+    env["JEV_BROWSER"] = "edge";
+    expect(await main(ARGS, io().io, newDeps([draft]))).toBe(0);
+    expect(loadScraper("shop", env).spec.browser).toBe("edge");
+  });
+
   const RES = "https://shop.example/s?q=eggs";
   const draft = JSON.stringify({
     set: "g2",

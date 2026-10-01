@@ -237,6 +237,8 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 
 Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else Parallelloop), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
 
+A new scraper stores its browser with its profile. MCP replay uses the stored browser. The CLI also uses it unless `JEV_BROWSER` selects another browser. The browser profile list and the Jev navigator use the same selection. Older files with no browser use the current default.
+
 **Output.** stdout carries only the output; the log goes to stderr.
 
 - Default: the result JSON: `{scraper, version, params, url, rows, row_count, status, healed, reason, blocked, saved, stats: {duration_ms, jev_requests, llm_calls, steps, scrolls}}`. `healed` is null, or `{level: "L1"|"L2"|"L3", reason}`.

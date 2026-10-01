@@ -342,6 +342,31 @@ describe("scraper save", () => {
 });
 
 describe("scraper run", () => {
+  it("stores the source browser and uses its profile list for replay", async () => {
+    const t = await stack();
+    const run = await t.browse({}, { browser: "edge" });
+    await t.read();
+    view(await t.call({ ...SAVE, from_run: run }));
+    const spec = t.kit.files.get("shop-eggs") as ScraperSpec;
+    expect(spec.browser).toBe("edge");
+    const prepare = vi.spyOn(t.session, "prepare");
+    view(await t.call({ action: "run", name: "shop-eggs" }));
+    expect(prepare).toHaveBeenLastCalledWith(expect.objectContaining({ browser: "edge", profileDirectory: "Profile 14" }));
+    expect(t.launches.at(-1)?.browser).toBe("edge");
+    await t.session.close();
+    await t.c.close();
+  });
+
+  it("save without from_run uses the browser of the open session", async () => {
+    const t = await stack();
+    await t.session.openPage(await t.session.chromeFor({ ...t.base, task: "x", headed: true, browser: "brave" })(undefined));
+    await t.read();
+    view(await t.call(SAVE));
+    expect((t.kit.files.get("shop-eggs") as ScraperSpec).browser).toBe("brave");
+    await t.session.close();
+    await t.c.close();
+  });
+
   const rows = (n: number): Row[] => Array.from({ length: n }, (_, i) => ({ name: `Product ${i} ${"x".repeat(1 + (i % 30))}`, price: 10 + i, in_stock: i % 3 !== 0, mrp: i % 2 ? null : 20 + i }));
 
   it("replays on the session page with heal code, no navigator, and no LLM; the rows fit the budget and the cursor gives the rest once", async () => {

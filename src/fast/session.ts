@@ -77,6 +77,7 @@ export class BrowserSession {
   }
 
   get chrome(): Chrome | null { return this._chrome; }
+  get browser(): BrowserKind | null { return this.key?.browser ?? null; }
   get page(): Page | null { return this._page; }
   /** +1 on every close. A page from a run that started before a close belongs to a closed Chrome. */
   get epoch(): number { return this._epoch; }

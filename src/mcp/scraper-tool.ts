@@ -29,6 +29,7 @@ import { defaultValidate, mergeValidate, validateRows } from "../scrape/validate
 import type { RunConfig } from "../types.js";
 import { DEFAULT_PROFILE_NAME, secretKey } from "../types.js";
 import { MCP, MCP_ENV } from "./limits.js";
+import { browserChoice } from "./setup.js";
 import type { CachedRead, ReadViewData } from "./read-view.js";
 import { Recent, fitRead, pageString, parseReadCursor, setId, setsOf } from "./read-view.js";
 import type { Run, RunManager } from "./runs.js";
@@ -512,10 +513,13 @@ export class ScrapeTools {
       ? [...old.history, { at, level: "manual", reason: "MCP scraper save", from_version: old.version, previous: bodyOf(old) } satisfies HealEntry].slice(-HISTORY_MAX)
       : [{ at, level: "author", reason: "MCP scraper save", from_version: 0, previous: null }];
     const profile = run?.result?.profile?.name;
+    const browser = run
+      ? browserOf(browserChoice(run.input ?? {}, { engine: this.d.engine, browser: this.d.browser }), this.d.env)
+      : this.d.scrape.session.browser ?? undefined;
     const geo = run?.input?.geo ? geoOf(run.input.geo) : undefined;
     const spec: ScraperSpec = {
       kind: "jev-scraper", format: 1, name, version: old ? old.version + 1 : 1, created_at: old?.created_at ?? at, updated_at: at,
-      task, want: a.want ?? "", params, ...(profile ? { profile } : {}), ...(geo ? { geo } : {}),
+      task, want: a.want ?? "", params, ...(browser ? { browser } : {}), ...(profile ? { profile } : {}), ...(geo ? { geo } : {}),
       start_url: startUrl, steps, load, extract, validate, fingerprint, history,
     };
     let path: string;
@@ -541,8 +545,8 @@ export class ScrapeTools {
     const got = this.load(a.name);
     if ("error" in got) return got;
     const { spec, path } = got;
-    const engine = this.d.engine;
-    const kind = browserOf({ engine, ...(this.d.browser ? { browser: this.d.browser } : {}) }, this.d.env) ?? null;
+    const engine = spec.browser ? "cdp" : this.d.engine;
+    const kind = spec.browser ?? browserOf({ engine, ...(this.d.browser ? { browser: this.d.browser } : {}) }, this.d.env) ?? null;
     const profiles = this.d.profiles(kind ?? undefined);
     const want = spec.profile ?? DEFAULT_PROFILE_NAME;
     const dir = profileDir(want, profiles);

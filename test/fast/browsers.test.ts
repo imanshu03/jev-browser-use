@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../../src/cli.js";
 import { browserOf, defaultUserDataDir, detectBrowser, findChrome, launchChrome, profileCopyDir, userAgentMetadata } from "../../src/fast/chrome.js";
 import { browserChoice, checkInput, configFor } from "../../src/mcp/setup.js";
+import { envBrowser, navBase } from "../../src/scrape/launch.js";
 import { UsageError } from "../../src/plan.js";
 import { fakeLogger } from "../fakes.js";
 
@@ -90,7 +91,7 @@ describe("Edge and Brave profiles", () => {
     await expect(launchChrome({ headed: false, profileDirectory: "Profile 1", env, log: fakeLogger() })).rejects.toThrow(/did not answer/);
     const copy = path.join(root, "config", "jev-browser", "edge", "profile-1");
     expect(fs.readFileSync(path.join(copy, "Default", "Cookies"), "utf8")).toBe("c");
-    expect(fs.existsSync(`${copy}.jev-lock`)).toBe(false);
+    await vi.waitFor(() => expect(fs.existsSync(`${copy}.jev-lock`)).toBe(false));
     expect(fs.existsSync(path.join(root, "config", "jev-browser", "chrome"))).toBe(false);
   });
 });
@@ -123,5 +124,15 @@ describe("MCP browser choice", () => {
     expect(configFor({ task: "t", headed: true, confirm: "auto", dry_run: false, browser: "brave" }, base)).toMatchObject({ engine: "cdp", browser: "brave" });
     expect(configFor({ task: "t", headed: true, confirm: "auto", dry_run: false }, base)).not.toHaveProperty("browser");
     expect(checkInput({ task: "t", headed: true, confirm: "auto", dry_run: false, engine: "chromium", browser: "edge" }, {}, [])).toMatch(/engine "chromium" launches Chromium/);
+  });
+});
+
+
+describe("scraper browser selection", () => {
+  it("uses the saved browser and keeps it in the navigator config", () => {
+    expect(envBrowser({}, "edge")).toBe("edge");
+    expect(envBrowser({ JEV_BROWSER: "brave" }, "edge")).toBe("brave");
+    expect(navBase({}, { headed: false }, "edge")).toMatchObject({ engine: "cdp", browser: "edge" });
+    expect(navBase({ JEV_BROWSER: "brave" }, { headed: false })).toMatchObject({ browser: "brave" });
   });
 });

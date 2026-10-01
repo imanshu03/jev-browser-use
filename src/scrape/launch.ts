@@ -38,10 +38,10 @@ export function parseGeo(text: string): GeoPoint {
   return geo;
 }
 
-/** The browser of a scraper command: JEV_BROWSER, Chromium for JEV_BROWSER_ENGINE=chromium, else the first installed one. */
-export function envBrowser(env: NodeJS.ProcessEnv): BrowserKind | undefined {
+/** Select JEV_BROWSER, the saved browser, the Chromium engine alias, or the first installed browser. */
+export function envBrowser(env: NodeJS.ProcessEnv, saved?: BrowserKind): BrowserKind | undefined {
   const named = env["JEV_BROWSER"];
-  return browserOf({ engine: env["JEV_BROWSER_ENGINE"], ...(named ? { browser: browserKind(named, "JEV_BROWSER") } : {}) }, env);
+  return browserOf({ engine: env["JEV_BROWSER_ENGINE"], ...(named ? { browser: browserKind(named, "JEV_BROWSER") } : saved ? { browser: saved } : {}) }, env);
 }
 
 export interface BrowserOptions {
@@ -95,8 +95,10 @@ export function cliBrowser(o: BrowserOptions, deps: BrowserDeps = {}): ScrapeBro
 }
 
 /** The RunConfig that L2 and `jev-scrape new` start from. */
-export function navBase(env: NodeJS.ProcessEnv, o: { headed: boolean; maxSteps?: number; logLevel?: "info" | "debug"; logJson?: boolean }): RunConfig {
+export function navBase(env: NodeJS.ProcessEnv, o: { headed: boolean; maxSteps?: number; logLevel?: "info" | "debug"; logJson?: boolean }, saved?: BrowserKind): RunConfig {
+  const browser = envBrowser(env, saved);
   return {
+    ...(browser ? { browser } : {}),
     task: "", headed: o.headed, maxSteps: o.maxSteps ?? 25, stepTimeoutMs: 30_000, runTimeoutMs: 600_000, pauseTimeoutMs: 300_000,
     confirm: "auto", dryRun: false, session: `jev-scrape-${randomBytes(4).toString("hex")}`, model: env["TYPESAFE_DEFAULT_MODEL"] ?? "jev-latest",
     logLevel: o.logLevel ?? "info", logJson: o.logJson ?? false, keepOpen: true, agentBrowserBin: "", vars: {}, engine: "cdp",
