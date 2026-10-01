@@ -19,24 +19,32 @@ cp .env.example .env
 
 Set `TYPESAFE_API_KEY` in `.env` before running a one-shot task. [.env.example](.env.example) describes the required key and optional engine, model, profile, binary, and storage settings. Chat can ask for and save a key when the environment key is empty. Existing shell environment values take priority over `.env`.
 
-Node 22 or later. Install Google Chrome for `cdp` or Chromium for `chromium`. `agent-browser` ships with the package for the `vercel` engine.
+Node 22 or later. The direct engines need one installed Chromium-family browser: Google Chrome, Microsoft Edge, Brave, or Chromium. `agent-browser` ships with the package for the `vercel` engine.
 
 ## Engines
 
 | Engine | Browser control |
 |---|---|
-| `cdp` (default) | Controls installed Chrome directly through the Chrome DevTools Protocol. |
-| `chromium` | Launches installed Chromium and controls it through the same CDP implementation. |
+| `cdp` (default) | Controls an installed browser (Chrome, Edge, Brave, or Chromium) directly through the Chrome DevTools Protocol. |
+| `chromium` | The same as `cdp --browser chromium`. |
 | `vercel` | Uses Vercel's `agent-browser` CLI. |
 
 Select an engine with `--engine` in either CLI or chat, or set `JEV_BROWSER_ENGINE`. The flag overrides a valid environment setting. The old names `fast` and `legacy` are no longer accepted. The `cdp` and `chromium` engines share the same decision and browser-control code.
 
-Use `--chrome-bin <path>` to override the direct engine's browser binary. Otherwise `cdp` uses `JEV_CHROME_BIN` and Chrome discovery; `chromium` uses `JEV_CHROMIUM_BIN` and Chromium discovery. On macOS and Linux, `cdp` discovery can fall back to Chromium if Chrome is absent. The selected engine still determines the source profile directory. Chromium discovery only checks Chromium locations. Install Chromium before using this option; the CLI does not download it.
+### Browsers
 
-Chromium uses its own source profiles and stores copies under `~/.config/jev-browser/chromium`. Chrome copies stay under `~/.config/jev-browser/chrome`. The copy root uses `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. With the one-shot `--cdp <port>` flag, either direct engine uses the browser at that port and opens an owned tab. The selected engine does not change the attached browser binary or profile.
+Select the browser with `--browser <chrome|edge|brave|chromium>` in either CLI or chat, `JEV_BROWSER`, or the MCP `browse` argument `browser`. Without one, the direct engine uses the first browser that it finds:
+
+1. A browser whose binary override is set: `JEV_CHROME_BIN`, `JEV_EDGE_BIN`, `JEV_BRAVE_BIN`, or `JEV_CHROMIUM_BIN`.
+2. The first installed browser, in the order Chrome, Edge, Brave, Chromium. On macOS the CLI looks in `/Applications` and `~/Applications`, on Windows in the program folders, and on Linux on `PATH`.
+
+`--chrome-bin <path>` overrides the binary of the selected browser. The CLI never downloads a browser. When it finds none, the run fails with `no supported browser found: install Google Chrome, Microsoft Edge, Brave, or Chromium ...`. Another engine does not fix this error, because every engine needs an installed browser. To use a browser at an unusual path, such as Playwright's Chrome for Testing, set `JEV_CHROMIUM_BIN` to its binary.
+
+Each browser works with profiles in the same way. When the task or `--profile` names a profile, the run copies it from that browser's own profile folder (for example `~/Library/Application Support/Microsoft Edge` on macOS) to `~/.config/jev-browser/<browser>/<profile>`, and launches the browser on the copy. Otherwise the run uses a temporary profile. The copy root uses `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. With the one-shot `--cdp <port>` flag, either direct engine uses the browser at that port and opens an owned tab. The selected engine does not change the attached browser binary or profile.
 
 ```sh
 ./bin/jev-browser.js "open wikipedia.org" --engine cdp --profile none
+./bin/jev-browser.js "open wikipedia.org" --browser edge --profile "Work"
 ./bin/jev-browser.js "open wikipedia.org" --engine chromium --profile none
 ./bin/jev-browser.js "open wikipedia.org" --engine vercel --profile none
 ```
@@ -229,6 +237,8 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 
 Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else `Parallelloop` when it exists, else a temporary profile), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
 
+A new scraper stores its browser with its profile. MCP replay uses the stored browser. The CLI also uses it unless `JEV_BROWSER` selects another browser. The browser profile list and the Jev navigator use the same selection. Older files with no browser use the current default.
+
 **Output.** stdout carries only the output; the log goes to stderr.
 
 - Default: the result JSON: `{scraper, version, params, url, rows, row_count, status, healed, reason, blocked, saved, stats: {duration_ms, jev_requests, llm_calls, steps, scrolls}}`. `healed` is null, or `{level: "L1"|"L2"|"L3", reason}`.
@@ -302,7 +312,7 @@ If you do not use the Codex plugin, add the server to the Codex `config.toml`. R
 command = "node"
 args = ["<repo>/plugin/dist/jev-mcp.mjs"]
 env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "JEV_BROWSER_CONFIG", "XDG_CONFIG_HOME",
-  "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_CHROME_BIN", "JEV_CHROMIUM_BIN",
+  "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_BROWSER", "JEV_CHROME_BIN", "JEV_EDGE_BIN", "JEV_BRAVE_BIN", "JEV_CHROMIUM_BIN",
   "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
@@ -435,7 +445,7 @@ In its default approval mode, Codex asks before `browse`, `continue`, and `scrap
 | `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for every `continue` call, also in bypass mode. The server reads it at startup. Codex does not use it. |
 | `JEV_MCP_AUTONOMOUS` | `0` turns off [autonomous mode](#autonomous-mode): `browse` refuses `confirm: "autonomous"`. |
 
-The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_CHROME_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
+The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_BROWSER`, `JEV_CHROME_BIN`, `JEV_EDGE_BIN`, `JEV_BRAVE_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
 
 ### Plugin limits
 

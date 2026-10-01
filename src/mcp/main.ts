@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import { VERSION } from "../cli.js";
 import { defaultUserDataDir, listProfiles } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import { BrowserSession } from "../fast/session.js";
 import { createLogger } from "../io.js";
 import { createTransport } from "../transport.js";
@@ -40,7 +41,7 @@ const transport = createTransport({ log });
 const jev = createJevLink(env, log, transport, { packageEnv: packageRoot !== null });
 log.redactor = (s) => stripKey(s, jev.key());
 const session = new BrowserSession({ env, log });
-const profiles = (engine: "cdp" | "chromium") => listProfiles(defaultUserDataDir(env, undefined, engine === "chromium" ? "chromium" : "chrome"));
+const profiles = (browser: BrowserKind | undefined) => listProfiles(defaultUserDataDir(env, undefined, browser));
 const runs = new RunManager({
   start: fastStarter({ session, jev, base, env, profiles }), log,
   precheck: () => void jev.client(), forceStop: () => session.close(), secret: () => jev.key(),
@@ -49,7 +50,7 @@ const runs = new RunManager({
 // 5. The server. JEV_MCP_REVIEW_TEXT is read once, when the server is built. read_page and scraper use the same
 // session and the scrape kit; a scraper run makes no model call.
 const handle = serveStdio(() => buildServer({
-  runs, version: VERSION, env, profiles, secret: () => jev.key(), engine: base.engine === "chromium" ? "chromium" : "cdp", log,
+  runs, version: VERSION, env, profiles, secret: () => jev.key(), engine: base.engine === "chromium" ? "chromium" : "cdp", ...(base.browser ? { browser: base.browser } : {}), log,
   closeBrowser: async () => { const open = session.chrome !== null; await session.close(); return open; },
   scrape: { kit: SCRAPE_KIT, session, base },
 }), { onerror: (e) => log.warn(`mcp: ${stripKey(e.message, jev.key())}`) });

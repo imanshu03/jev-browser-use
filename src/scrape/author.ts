@@ -1,6 +1,7 @@
 // `jev-scrape new`: build a scraper from scratch. Jev reaches the page of the rows (unless --no-nav), its step records
 // become the steps, the LLM writes the extract from the page context (up to 3 calls), code tests it on the page, and
 // the first version is saved. The result is the first extraction.
+import type { BrowserKind } from "../fast/chrome.js";
 import type { Page } from "../fast/model.js";
 import type { LoadOptions, LoadReport } from "../fast/read.js";
 import type { PageRead } from "../fast/read-types.js";
@@ -38,6 +39,7 @@ export interface AuthorOptions {
   headed: boolean;
   /** The profile name to store in the file (absent: the default). */
   profile?: string;
+  browserKind?: BrowserKind;
   geo?: GeoPoint;
   browser: ScrapeBrowser;
   /** Needed unless `noNav`. */
@@ -160,7 +162,7 @@ export async function authorScraper(o: AuthorOptions): Promise<{ result: ScrapeR
   try {
     spec = parseScraper({
       kind: "jev-scraper", format: 1, name: o.name, version: 1, created_at: at, updated_at: at,
-      task: o.task, want: o.want, params: o.params, ...(o.profile ? { profile: o.profile } : {}), ...(o.geo ? { geo: o.geo } : {}),
+      task: o.task, want: o.want, params: o.params, ...(o.browserKind ? { browser: o.browserKind } : {}), ...(o.profile ? { profile: o.profile } : {}), ...(o.geo ? { geo: o.geo } : {}),
       start_url: startUrl, steps, load: r.load, extract: r.extract, validate: r.validate,
       fingerprint: fingerprintOf(r.extract, r.read, r.outcome.set ?? "", r.outcome.rows),
       history: [{ at, level: "author", reason: "jev-scrape new", from_version: 0, previous: null }],

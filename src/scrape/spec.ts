@@ -310,6 +310,7 @@ export const ScraperSpec = z.strictObject({
   params: z.record(ParamName, z.string().max(500)),
   /** The Chrome profile name or directory; "none" is a temporary profile. Absent: "Parallelloop" when it exists, else "none". */
   profile: z.string().min(1).max(100).optional(),
+  browser: z.enum(["chrome", "edge", "brave", "chromium"]).optional(),
   geo: GeoSchema.optional(),
   ...SpecBody.shape,
   history: z.array(HealEntry).max(HISTORY_MAX),

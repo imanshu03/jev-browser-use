@@ -8,6 +8,8 @@
 // from a page is redacted with the last run's redactor, has the API key removed, and is sanitized and flattened.
 import * as z from "zod";
 import type { ProfileEntry } from "../browser.js";
+import { browserOf } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import { flatText } from "../fast/generate.js";
 import type { GeoPoint, Page } from "../fast/model.js";
 import type { PageRead } from "../fast/read-types.js";
@@ -27,6 +29,7 @@ import { defaultValidate, mergeValidate, validateRows } from "../scrape/validate
 import type { RunConfig } from "../types.js";
 import { DEFAULT_PROFILE_NAME, secretKey } from "../types.js";
 import { MCP, MCP_ENV } from "./limits.js";
+import { browserChoice } from "./setup.js";
 import type { CachedRead, ReadViewData } from "./read-view.js";
 import { Recent, fitRead, pageString, parseReadCursor, setId, setsOf } from "./read-view.js";
 import type { Run, RunManager } from "./runs.js";
@@ -65,8 +68,10 @@ export interface ScrapeToolDeps {
   scrape: ScrapeDeps;
   runs: RunManager;
   env: NodeJS.ProcessEnv;
-  profiles: (engine: "cdp" | "chromium") => ProfileEntry[];
+  profiles: (browser: BrowserKind | undefined) => ProfileEntry[];
   engine: "cdp" | "chromium";
+  /** The server's browser (JEV_BROWSER). Absent: Chromium for engine chromium, else the first installed browser. */
+  browser?: BrowserKind;
   secret: () => string | null;
   now: () => number;
   log?: Logger;
@@ -510,10 +515,13 @@ export class ScrapeTools {
     // A run or a browser on a temporary profile saves "none": a replay must not open the default profile instead.
     const open = this.d.scrape.session.chrome;
     const profile = run?.result ? (run.result.profile?.name ?? "none") : open ? (open.profile.directory ?? "none") : undefined;
+    const browser = run
+      ? browserOf(browserChoice(run.input ?? {}, { engine: this.d.engine, browser: this.d.browser }), this.d.env)
+      : this.d.scrape.session.browser ?? undefined;
     const geo = run?.input?.geo ? geoOf(run.input.geo) : undefined;
     const spec: ScraperSpec = {
       kind: "jev-scraper", format: 1, name, version: old ? old.version + 1 : 1, created_at: old?.created_at ?? at, updated_at: at,
-      task, want: a.want ?? "", params, ...(profile ? { profile } : {}), ...(geo ? { geo } : {}),
+      task, want: a.want ?? "", params, ...(browser ? { browser } : {}), ...(profile ? { profile } : {}), ...(geo ? { geo } : {}),
       start_url: startUrl, steps, load, extract, validate, fingerprint, history,
     };
     let path: string;
@@ -539,8 +547,9 @@ export class ScrapeTools {
     const got = this.load(a.name);
     if ("error" in got) return got;
     const { spec, path } = got;
-    const engine = this.d.engine;
-    const profiles = this.d.profiles(engine);
+    const engine = spec.browser ? "cdp" : this.d.engine;
+    const kind = spec.browser ?? browserOf({ engine, ...(this.d.browser ? { browser: this.d.browser } : {}) }, this.d.env) ?? null;
+    const profiles = this.d.profiles(kind ?? undefined);
     const { want, fallback } = scraperProfile(spec.profile, profiles);
     if (fallback) this.d.log?.info(`scraper ${spec.name}: no profile in the file and no ${DEFAULT_PROFILE_NAME} profile here; using a temporary profile`);
     const dir = profileDir(want, profiles);
@@ -548,8 +557,8 @@ export class ScrapeTools {
     const session = this.d.scrape.session;
     const headed = a.headed;
     const geo = spec.geo ? geoOf(spec.geo) : null;
-    await session.prepare({ engine, headed, profileDirectory: dir, geo });
-    const cfg: RunConfig = { ...this.d.scrape.base, task: spec.task, headed, engine };
+    await session.prepare({ browser: kind, headed, profileDirectory: dir, geo });
+    const cfg: RunConfig = { ...this.d.scrape.base, task: spec.task, headed, engine, ...(kind ? { browser: kind } : {}) };
     delete cfg.geo;
     if (geo) cfg.geo = geo;
     const epoch = session.epoch;

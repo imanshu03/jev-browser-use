@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProfileEntry } from "../browser.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import { defaultUserDataDir, listProfiles } from "../fast/chrome.js";
 import type { GeoPoint } from "../fast/model.js";
 import { loadAll } from "../fast/read.js";
@@ -18,7 +19,7 @@ import { authorScraper, secretProblem } from "./author.js";
 import { toCsv } from "./csv.js";
 import { loadOptions } from "./heal.js";
 import type { BrowserOptions } from "./launch.js";
-import { cliBrowser, lazyNavigator, navBase, parseGeo, resolveProfile } from "./launch.js";
+import { cliBrowser, envBrowser, lazyNavigator, navBase, parseGeo, resolveProfile } from "./launch.js";
 import type { LlmBackend } from "./llm.js";
 import { llmFromEnv, llmTimeoutMs } from "./llm.js";
 import { buildContext, contextChars } from "./prompt.js";
@@ -211,23 +212,24 @@ function emit(result: ScrapeResult, a: Args, io: MainIo, log: Logger, columns: s
   return exitOf(result.status);
 }
 
-function profilesOf(io: MainIo, deps: ScrapeDeps): ProfileEntry[] {
-  return deps.profiles ?? listProfiles(defaultUserDataDir(io.env));
+function profilesOf(io: MainIo, deps: ScrapeDeps, saved?: BrowserKind): ProfileEntry[] {
+  return deps.profiles ?? listProfiles(defaultUserDataDir(io.env, undefined, envBrowser(io.env, saved)));
 }
 
 /** The profile of a command: --profile, else the file's profile, else the default when it exists here, else "none". */
 function profileOf(a: Args, spec: ScraperSpec | null, io: MainIo, log: Logger, deps: ScrapeDeps): string {
   if (a.profile !== undefined) return a.profile;
-  const { want, fallback } = scraperProfile(spec?.profile, profilesOf(io, deps));
+  const { want, fallback } = scraperProfile(spec?.profile, profilesOf(io, deps, spec?.browser));
   if (fallback) log.info(`no ${DEFAULT_PROFILE_NAME} profile here; using a temporary profile`);
   return want;
 }
 
 /** The browser of a command: the profile `want`, and the geolocation of --geo, else `geo` (the geo of the scraper file). */
-function browserFor(a: Args, want: string, geo: ScraperSpec["geo"], io: MainIo, log: Logger, deps: ScrapeDeps): ScrapeBrowser {
-  const profile = resolveProfile(want, profilesOf(io, deps));
+function browserFor(a: Args, want: string, geo: ScraperSpec["geo"], io: MainIo, log: Logger, deps: ScrapeDeps, saved?: BrowserKind): ScrapeBrowser {
+  const profile = resolveProfile(want, profilesOf(io, deps, saved));
   const where: GeoPoint | undefined = a.geo ?? (geo ? { latitude: geo.latitude, longitude: geo.longitude, ...(geo.accuracy !== undefined ? { accuracy: geo.accuracy } : {}) } : undefined);
-  const opts: BrowserOptions = { headed: a.headed, env: io.env, log, ...(profile ? { profileDirectory: profile.directory } : {}), ...(where ? { geo: where } : {}) };
+  const kind = envBrowser(io.env, saved);
+  const opts: BrowserOptions = { headed: a.headed, ...(kind ? { browser: kind } : {}), env: io.env, log, ...(profile ? { profileDirectory: profile.directory } : {}), ...(where ? { geo: where } : {}) };
   return deps.browser ? deps.browser(opts) : cliBrowser(opts);
 }
 
@@ -250,10 +252,10 @@ const secretsOf = (env: NodeJS.ProcessEnv): string[] => [env["TYPESAFE_API_KEY"]
 async function commandRun(a: Args, io: MainIo, log: Logger, deps: ScrapeDeps): Promise<number> {
   const { spec, path: file } = loadScraper(a.target as string, io.env);
   const params = runParams(spec, a.params);
-  const browser = browserFor(a, profileOf(a, spec, io, log, deps), spec.geo, io, log, deps);
+  const browser = browserFor(a, profileOf(a, spec, io, log, deps), spec.geo, io, log, deps, spec.browser);
   const human = deps.human ?? createHuman({ stdin: io.stdin, stderr: io.stderr, forceNonInteractive: false });
   const nav = deps.navigator !== undefined ? { navigator: deps.navigator, close: async () => undefined }
-    : lazyNavigator(io.env, log, human, profilesOf(io, deps), navBase(io.env, { headed: a.headed, logLevel: a.logLevel, logJson: a.logJson }));
+    : lazyNavigator(io.env, log, human, profilesOf(io, deps, spec.browser), navBase(io.env, { headed: a.headed, logLevel: a.logLevel, logJson: a.logJson }, spec.browser));
   const llm = deps.llm !== undefined ? deps.llm : a.heal === "full" ? llmFromEnv(io.env, log) : null;
   const abort = new AbortController();
   const off = onSigint(browser, abort, log);
@@ -289,6 +291,7 @@ async function commandNew(a: Args, io: MainIo, log: Logger, deps: ScrapeDeps): P
   const nav = deps.navigator !== undefined ? { navigator: deps.navigator, close: async () => undefined }
     : a.noNav ? { navigator: null, close: async () => undefined }
       : lazyNavigator(io.env, log, human, profilesOf(io, deps), navBase(io.env, { headed: a.headed, ...(a.maxSteps !== undefined ? { maxSteps: a.maxSteps } : {}), logLevel: a.logLevel, logJson: a.logJson }));
+  const kind = envBrowser(io.env);
   const profile = profileOf(a, null, io, log, deps);
   const browser = browserFor(a, profile, undefined, io, log, deps);
   const abort = new AbortController();
@@ -301,7 +304,7 @@ async function commandNew(a: Args, io: MainIo, log: Logger, deps: ScrapeDeps): P
       ...(a.url ? { url: a.url } : {}), ...(a.maxSteps !== undefined ? { maxSteps: a.maxSteps } : {}),
       // A scraper made on a temporary profile stores "none", so a replay never opens the default profile instead.
       ...(a.profile ? { profile: a.profile } : profile === "none" ? { profile: "none" } : {}),
-      ...(a.geo ? { geo: a.geo } : {}), ...(deps.now ? { now: deps.now } : {}),
+      ...(kind ? { browserKind: kind } : {}), ...(a.geo ? { geo: a.geo } : {}), ...(deps.now ? { now: deps.now } : {}),
       stepTimeoutMs: stepTimeoutMs(io.env), llmTimeoutMs: llmTimeoutMs(io.env), contextChars: contextChars(io.env), secrets: secretsOf(io.env),
     });
   } finally {
@@ -315,7 +318,7 @@ async function commandNew(a: Args, io: MainIo, log: Logger, deps: ScrapeDeps): P
 async function commandRead(a: Args, io: MainIo, log: Logger, deps: ScrapeDeps): Promise<number> {
   const loaded = a.target ? loadScraper(a.target, io.env) : null;
   const params = loaded ? runParams(loaded.spec, a.params) : a.params;
-  const browser = browserFor(a, profileOf(a, loaded?.spec ?? null, io, log, deps), loaded?.spec.geo, io, log, deps);
+  const browser = browserFor(a, profileOf(a, loaded?.spec ?? null, io, log, deps), loaded?.spec.geo, io, log, deps, loaded?.spec.browser);
   const abort = new AbortController();
   const off = onSigint(browser, abort, log);
   try {

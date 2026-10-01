@@ -21,6 +21,8 @@ TypeSafe Jev drives Chrome and chooses every browser action. You start the run, 
 | `stopping` | Call `wait` with `run`. |
 | `done`, `blocked`, `failed` | Tell the user `result.reason`, `result.answer`, and `result.final_url`. For `blocked`, also tell `result.blocked.hint`. If `result.text_not_typed` is set, tell the user that Jev did not type your text in those fields. If `result.sent_texts` is set, tell the user that those texts were sent. Never send them again, and do not run the whole task again. In an autonomous run, also tell each action in `result.unattended` (see [Autonomous mode](#autonomous-mode)). Stop. |
 
+If `result.reason` says `not found` or `no supported browser found`, the computer has no browser that jev can launch. Tell the user to install Google Chrome, Microsoft Edge, Brave, or Chromium, or to set the binary path that the message names. Do not try another engine, another browser, or another browser tool: each engine needs one of these browsers, and the result would not be the user's browser. Use the `browser` argument only when the user names a browser.
+
 If `result.blocked.kind` is `needs_confirmation`, the text that you wrote can still be in the field. You cannot do the action yourself, so do not offer to. Follow `result.blocked.hint`: it tells the user to check the text in the Chrome window and do the action there, or, for a headless run, to run the task again with `headed: true`. A new `browse` call on the same page also asks the user before each click or Enter while that text is in the field. Do not change to autonomous mode yourself after this block.
 
 ## Autonomous mode

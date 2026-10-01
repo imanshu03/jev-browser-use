@@ -57,7 +57,7 @@ async function stack(opts: { read?: PageRead; elicit?: (p: ElicitParams) => Elic
   let clock = NOW;
   const runs = new RunManager({ start, log, secret: () => KEY, now: () => clock });
   const c = await connect({
-    runs, version: "0.1.0", env: {}, profiles: () => opts.profiles ?? PROFILES, secret: () => KEY, log, now: () => NOW,
+    runs, version: "0.1.0", env: { JEV_CHROME_BIN: "/opt/chrome" }, profiles: () => opts.profiles ?? PROFILES, secret: () => KEY, log, now: () => NOW,
     closeBrowser: async () => true, scrape: { kit, session: s.session, base: s.base },
   }, opts.elicit);
   const call = (args: Record<string, unknown>): Promise<Result> => c.client.callTool({ name: "scraper", arguments: args });
@@ -342,6 +342,32 @@ describe("scraper save", () => {
 });
 
 describe("scraper run", () => {
+  it.each([false, true])("stores the source browser and uses its profile list for replay (temporary: %s)", async (temporary) => {
+    const t = await stack();
+    const run = await t.browse(temporary ? { profile: null } : {}, { browser: "edge", ...(temporary ? { profile: "none" } : {}) });
+    await t.read();
+    view(await t.call({ ...SAVE, from_run: run }));
+    const spec = t.kit.files.get("shop-eggs") as ScraperSpec;
+    expect(spec.browser).toBe("edge");
+    expect(spec.profile).toBe(temporary ? "none" : "Parallelloop");
+    const prepare = vi.spyOn(t.session, "prepare");
+    view(await t.call({ action: "run", name: "shop-eggs" }));
+    expect(prepare).toHaveBeenLastCalledWith(expect.objectContaining({ browser: "edge", profileDirectory: temporary ? null : "Profile 14" }));
+    expect(t.launches.at(-1)?.browser).toBe("edge");
+    await t.session.close();
+    await t.c.close();
+  });
+
+  it("save without from_run uses the browser of the open session", async () => {
+    const t = await stack();
+    await t.session.openPage(await t.session.chromeFor({ ...t.base, task: "x", headed: true, browser: "brave" })(undefined));
+    await t.read();
+    view(await t.call(SAVE));
+    expect((t.kit.files.get("shop-eggs") as ScraperSpec).browser).toBe("brave");
+    await t.session.close();
+    await t.c.close();
+  });
+
   it("save without from_run keeps a temporary or named session profile", async () => {
     const t = await stack();
     await t.open();
@@ -388,7 +414,7 @@ describe("scraper run", () => {
     expect("navigator" in opts || "llm" in opts || "params" in opts).toBe(false);
     // A run opens a file: start URL only with JEV_MCP_ALLOW_FILE=1.
     expect(opts.allowFile).toBe(false);
-    expect(prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 14", geo });
+    expect(prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: "Profile 14", geo });
     expect(t.launches.at(-1)).toMatchObject({ profileDirectory: "Profile 14", headed: true });
     // The run kept its tab: read_page reads it.
     expect(t.session.page).toBe(t.page);
@@ -454,7 +480,7 @@ describe("scraper run", () => {
     delete file.geo;
     const prepare = vi.spyOn(t.session, "prepare");
     view(await t.call({ action: "run", name: "shop-eggs" }));
-    expect(prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: null, geo: null });
+    expect(prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: null, geo: null });
     await t.c.close();
   });
 
@@ -555,7 +581,7 @@ describe("the time cap of a run", () => {
   function tools(kit: ReturnType<typeof fakeKit>) {
     const s = readSession(shopRead());
     const runs = new RunManager({ start: async () => emptyResult("x", "act"), log: fakeLogger() });
-    const tool = new ScrapeTools({ scrape: { kit, session: s.session, base: s.base }, runs, env: {}, profiles: () => PROFILES, engine: "cdp", secret: () => KEY, now: () => Date.now() });
+    const tool = new ScrapeTools({ scrape: { kit, session: s.session, base: s.base }, runs, env: { JEV_CHROME_BIN: "/opt/chrome" }, profiles: () => PROFILES, engine: "cdp", secret: () => KEY, now: () => Date.now() });
     const spec = { ...(kit.files.get("x") as ScraperSpec) };
     return { tool, spec, args: ScraperArgs.parse({ action: "run", name: "x" }) };
   }

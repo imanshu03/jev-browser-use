@@ -15,7 +15,7 @@ function cfg(over: Partial<RunConfig> = {}): RunConfig {
   };
 }
 
-const KEY: SessionKey = { engine: "cdp", headed: true, profileDirectory: "Profile 14" };
+const KEY: SessionKey = { browser: "chrome", headed: true, profileDirectory: "Profile 14" };
 
 /** A tab that shows `url`. */
 function tab(url: string): FakePage {
@@ -50,7 +50,7 @@ function session(launch: (o: ChromeLaunchOptions) => Promise<Chrome>, url = "htt
   const log = fakeLogger();
   const opens: { chrome: Chrome; page: FakePage }[] = [];
   const s = new BrowserSession({
-    env: { HOME: "/tmp/jev-home" }, log, launch,
+    env: { HOME: "/tmp/jev-home", JEV_CHROME_BIN: "/opt/chrome" }, log, launch,
     open: async (c) => { const page = tab(url); opens.push({ chrome: c, page }); return page; },
   });
   return { s, log, opens };
@@ -75,7 +75,7 @@ describe("BrowserSession launch and reuse", () => {
     expect(l.calls).toHaveLength(1);
     expect(l.calls[0]).toEqual({
       browser: "chrome", headed: true, profileDirectory: "Profile 14", refreshProfile: true, chromeBin: "/opt/chrome",
-      commandTimeoutMs: 1234, env: { HOME: "/tmp/jev-home" }, log,
+      commandTimeoutMs: 1234, env: { HOME: "/tmp/jev-home", JEV_CHROME_BIN: "/opt/chrome" }, log,
     });
     // A second run with the same key also reuses it.
     await s.prepare(KEY);
@@ -92,7 +92,7 @@ describe("BrowserSession launch and reuse", () => {
     expect(l.calls[0]).not.toHaveProperty("profileDirectory");
     expect(l.calls[0]).not.toHaveProperty("refreshProfile");
     // The temporary profile key matches a later run without a directory.
-    await s.prepare({ engine: "chromium", headed: false, profileDirectory: null });
+    await s.prepare({ browser: "chromium", headed: false, profileDirectory: null });
     expect(s.chrome).toBe(l.chromes[0]);
   });
 
@@ -118,7 +118,7 @@ describe("BrowserSession launch and reuse", () => {
     const chromeFor = s.chromeFor(cfg());
     const open = await chromeFor("Profile 14");
     await expect(chromeFor("Profile 2")).rejects.toBeInstanceOf(ProfileMismatchError);
-    await expect(chromeFor(undefined)).rejects.toThrow(/open with profile Profile 14 \(cdp, headed\); the task needs a temporary profile/);
+    await expect(chromeFor(undefined)).rejects.toThrow(/open with profile Profile 14 \(chrome, headed\); the task needs a temporary profile/);
     expect(l.calls).toHaveLength(1);
     expect(l.chromes[0]!.closes).toBe(0);
     expect(s.chrome).toBe(open);
@@ -152,8 +152,8 @@ describe("BrowserSession launch and reuse", () => {
     expect(await s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 50 } }))("Profile 14")).toBe(open);
     await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 3 } }))("Profile 14")).rejects.toBeInstanceOf(ProfileMismatchError);
     await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 5 } }))("Profile 14")).rejects.toBeInstanceOf(ProfileMismatchError);
-    await expect(s.chromeFor(cfg())("Profile 14")).rejects.toThrow(/open with profile Profile 14 \(cdp, headed, geo 1,2\); the task needs profile Profile 14 \(cdp, headed\)/);
-    await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 5 } }))("Profile 14")).rejects.toThrow(/needs profile Profile 14 \(cdp, headed, geo 1,2 accuracy 5 m\)/);
+    await expect(s.chromeFor(cfg())("Profile 14")).rejects.toThrow(/open with profile Profile 14 \(chrome, headed, geo 1,2\); the task needs profile Profile 14 \(chrome, headed\)/);
+    await expect(s.chromeFor(cfg({ geo: { latitude: 1, longitude: 2, accuracy: 5 } }))("Profile 14")).rejects.toThrow(/needs profile Profile 14 \(chrome, headed, geo 1,2 accuracy 5 m\)/);
     expect(l.calls).toHaveLength(1);
     expect(s.chrome).toBe(open);
   });
@@ -173,7 +173,7 @@ describe("BrowserSession prepare", () => {
   });
 
   it.each([
-    ["the engine", { engine: "chromium" }],
+    ["the browser", { browser: "chromium" }],
     ["headed", { headed: false }],
     ["profileDirectory", { profileDirectory: "Profile 2" }],
     ["profileDirectory (temporary)", { profileDirectory: null }],

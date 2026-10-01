@@ -1,3 +1,4 @@
+import { defaultUserDataDir } from "../../src/fast/chrome.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -75,6 +76,35 @@ describe("parseArgs", () => {
 });
 
 describe("main", () => {
+  it("a scraper with no profile uses the saved browser's default profile list", async () => {
+    const { profile: _profile, ...spec } = loadSpec("necc-egg-prices");
+    saveScraper({ ...spec, browser: "edge" }, env);
+    const chromeProfiles = defaultUserDataDir(env, undefined, "chrome");
+    fs.mkdirSync(chromeProfiles, { recursive: true });
+    fs.writeFileSync(path.join(chromeProfiles, "Local State"), JSON.stringify({ profile: { info_cache: { "Profile 14": { name: "Parallelloop" } } } }));
+    const seen: { browser?: BrowserOptions } = {};
+    const deps = runDeps(result("ok"), seen);
+    delete deps.profiles;
+    expect(await main(["run", "necc-egg-prices"], io().io, deps)).toBe(0);
+    expect(seen.browser?.browser).toBe("edge");
+    expect(seen.browser?.profileDirectory).toBeUndefined();
+    const edgeProfiles = defaultUserDataDir(env, undefined, "edge");
+    fs.mkdirSync(edgeProfiles, { recursive: true });
+    fs.writeFileSync(path.join(edgeProfiles, "Local State"), JSON.stringify({ profile: { info_cache: { "Profile 2": { name: "Parallelloop" } } } }));
+    expect(await main(["run", "necc-egg-prices"], io().io, deps)).toBe(0);
+    expect(seen.browser?.profileDirectory).toBe("Profile 2");
+  });
+
+  it("run uses the browser stored in the scraper file", async () => {
+    saveScraper({ ...loadSpec("necc-egg-prices"), browser: "edge" }, env);
+    const seen: { browser?: BrowserOptions } = {};
+    expect(await main(["run", "necc-egg-prices"], io().io, runDeps(result("ok"), seen))).toBe(0);
+    expect(seen.browser).toMatchObject({ browser: "edge", profileDirectory: "Profile 14" });
+    env["JEV_BROWSER"] = "brave";
+    expect(await main(["run", "necc-egg-prices"], io().io, runDeps(result("ok"), seen))).toBe(0);
+    expect(seen.browser?.browser).toBe("brave");
+  });
+
   it("--help, no args, --version", async () => {
     const a = io();
     expect(await main(["--help"], a.io)).toBe(0);
@@ -223,6 +253,12 @@ describe("main", () => {
 });
 
 describe("main: new", () => {
+  it("new stores the selected browser for later replay", async () => {
+    env["JEV_BROWSER"] = "edge";
+    expect(await main(ARGS, io().io, newDeps([draft]))).toBe(0);
+    expect(loadScraper("shop", env).spec.browser).toBe("edge");
+  });
+
   it("an explicit temporary profile is stored when the default profile exists", async () => {
     expect(await main([...ARGS, "--profile", "none"], io().io, newDeps([draft]))).toBe(0);
     expect(loadScraper("shop", env).spec.profile).toBe("none");

@@ -7,6 +7,7 @@
 
 import type { Logger } from "../io.js";
 import type { PageRead, ReadOptions, ScrollState } from "./read-types.js";
+import type { BrowserKind } from "./chrome.js";
 
 /** One CDP connection: a pipe to a Chrome we launched, or a WebSocket to a Chrome we attached to. */
 export interface CdpClient {
@@ -28,8 +29,8 @@ export interface GeoPoint {
 }
 
 export interface ChromeLaunchOptions {
-  /** Browser binary and profile family. Attachment uses the existing browser. */
-  browser?: "chrome" | "chromium";
+  /** Browser binary and profile family. Absent: the first installed browser. Attachment uses the existing browser. */
+  browser?: BrowserKind;
   /** Show the window. `false` adds `--headless=new`. */
   headed: boolean;
   /** Chrome profile directory name inside the source user data dir, for example "Profile 14". Absent = fresh temporary profile. */

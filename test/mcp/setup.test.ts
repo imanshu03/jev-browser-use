@@ -250,7 +250,7 @@ describe("fastStarter", () => {
     const jev = { client: () => { throw new Error("no client in tests"); }, warm: vi.fn(async () => undefined), key: () => null, close: async () => undefined };
     const base = baseConfig({}, log);
     const oracle = fakeOracle([]);
-    const start = fastStarter({ session, jev: jev as never, base, env: {}, profiles: () => PROFILES, oracle: () => oracle });
+    const start = fastStarter({ session, jev: jev as never, base, env: { JEV_CHROME_BIN: "/opt/chrome" }, profiles: () => PROFILES, oracle: () => oracle });
     const hooks: RunHooks = { text: fakeText(), human: fakeHuman({ interactive: true }), signal: new AbortController().signal, log: fakeLogger(), hints: MCP_HINTS };
     const open = async (): Promise<Page> => {
       const c = await session.chromeFor({ ...base, task: "x" })(undefined);
@@ -285,21 +285,21 @@ describe("fastStarter", () => {
   it("a flag profile gives prepare(key); none gives a temporary key; no profile uses the workspace default", async () => {
     const t = setup();
     await t.start(input({ profile: "BP" }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 2", geo: null });
+    expect(t.prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: "Profile 2", geo: null });
     await t.start(input({ profile: "none", headed: false, engine: "chromium" }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "chromium", headed: false, profileDirectory: null, geo: null });
+    expect(t.prepare).toHaveBeenLastCalledWith({ browser: "chromium", headed: false, profileDirectory: null, geo: null });
     await t.start(input(), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 14", geo: null });
+    expect(t.prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: "Profile 14", geo: null });
   });
 
   it("the session key and the runner config have the geolocation of the input", async () => {
     const t = setup();
     const geo = { latitude: 12.9352, longitude: 77.6245, accuracy: 30 };
     await t.start(input({ profile: "none", geo }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: null, geo });
+    expect(t.prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: null, geo });
     expect(deps().cfg.geo).toEqual(geo);
     await t.start(input({ profile: "BP", geo: { latitude: 1, longitude: 2 } }), t.hooks);
-    expect(t.prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 2", geo: { latitude: 1, longitude: 2 } });
+    expect(t.prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: "Profile 2", geo: { latitude: 1, longitude: 2 } });
     await t.start(input({ profile: "BP" }), t.hooks);
     expect("geo" in deps().cfg).toBe(false);
   });
