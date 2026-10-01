@@ -161,6 +161,15 @@ describe("main", () => {
     expect(missing.err()).toContain("{month} has no value");
     expect(await main(["run", "necc-egg-prices", "--profile", "Nobody"], io().io, runDeps(result("ok")))).toBe(4);
   });
+  it("run: a file with no profile uses a temporary profile when this machine has no default profile", async () => {
+    const { profile: _profile, ...noProfile } = loadSpec("necc-egg-prices");
+    saveScraper(noProfile, env);
+    const seen: { opts?: RunScraperOptions; browser?: BrowserOptions } = {};
+    const a = io();
+    expect(await main(["run", "necc-egg-prices"], a.io, { ...runDeps(result("ok"), seen), profiles: [{ directory: "Profile 2", name: "BP" }] })).toBe(0);
+    expect(seen.browser?.profileDirectory).toBeUndefined();
+    expect(a.err()).toContain("no Parallelloop profile here; using a temporary profile");
+  });
   it("run: --profile none is a temporary profile; --no-heal and --geo reach the run", async () => {
     saveScraper(loadSpec("necc-egg-prices"), env);
     const seen: { opts?: RunScraperOptions; browser?: BrowserOptions } = {};
@@ -258,6 +267,12 @@ describe("main: new", () => {
     expect(await main(ARGS, a.io, deps)).toBe(0);
     expect(JSON.parse(a.out())).toMatchObject({ status: "ok", row_count: 4 });
     expect(page.reads.length).toBeGreaterThanOrEqual(3);
+  });
+  it("with no --profile, the file stores none when this machine has no default profile, and nothing when it has one", async () => {
+    expect(await main(ARGS, io().io, { ...newDeps([draft]), profiles: [{ directory: "Profile 2", name: "BP" }] })).toBe(0);
+    expect(loadScraper("shop", env).spec.profile).toBe("none");
+    expect(await main([...ARGS, "--force"], io().io, newDeps([draft]))).toBe(0);
+    expect(loadScraper("shop", env).spec.profile).toBeUndefined();
   });
   it("refuses an existing name without --force (exit 4); --force replaces it", async () => {
     expect(await main(ARGS, io().io, newDeps([draft]))).toBe(0);

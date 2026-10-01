@@ -74,7 +74,7 @@ async function stack(opts: { read?: PageRead; elicit?: (p: ElicitParams) => Elic
     return run;
   };
   const read = async (args: Record<string, unknown> = {}) => c.client.callTool({ name: "read_page", arguments: args });
-  return { ...s, kit, runs, c, held, call, browse, read, tick: (ms: number) => { clock += ms; } };
+  return { ...s, log, kit, runs, c, held, call, browse, read, tick: (ms: number) => { clock += ms; } };
 }
 
 const DRAFT = { set: "g1", fields: { name: { from: "slot", pick: [{ by: "key", key: "div>div.name" }, { by: "longest" }] }, price: { from: "slot", pick: [{ by: "key", key: "div>div.price" }, { by: "parse", parser: "price", struck: false }], parser: "price" } } };
@@ -442,6 +442,31 @@ describe("scraper run", () => {
     const prepare = vi.spyOn(t.session, "prepare");
     view(await t.call({ action: "run", name: "shop-eggs" }));
     expect(prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: null, geo: null });
+    await t.c.close();
+  });
+
+  it("a run on a temporary profile saves profile none, and the replay runs on a temporary profile", async () => {
+    const t = await stack();
+    const run = await t.browse({ profile: null }, { profile: "none" });
+    await t.read();
+    expect(view(await t.call({ ...SAVE, from_run: run }))).toMatchObject({ saved: true });
+    expect((t.kit.files.get("shop-eggs") as ScraperSpec).profile).toBe("none");
+    const prepare = vi.spyOn(t.session, "prepare");
+    view(await t.call({ action: "run", name: "shop-eggs" }));
+    expect(prepare).toHaveBeenLastCalledWith(expect.objectContaining({ profileDirectory: null }));
+    await t.c.close();
+  });
+
+  it("a file with no profile runs on a temporary profile when this machine has no default profile", async () => {
+    const t = await stack({ profiles: [{ directory: "Profile 2", name: "BP" }] });
+    await saved(t);
+    const file = t.kit.files.get("shop-eggs") as ScraperSpec;
+    delete file.profile;
+    delete file.geo;
+    const prepare = vi.spyOn(t.session, "prepare");
+    view(await t.call({ action: "run", name: "shop-eggs" }));
+    expect(prepare).toHaveBeenLastCalledWith(expect.objectContaining({ profileDirectory: null }));
+    expect(t.log.lines.some((l) => l.includes("no Parallelloop profile here; using a temporary profile"))).toBe(true);
     await t.c.close();
   });
 
