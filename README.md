@@ -227,7 +227,7 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 | `read (--url <url> \| <name\|path>) [--load] [--context]` | Prints what the page reader sees, after the steps of a scraper when you name one. `--load` scrolls first; `--context` prints the LLM page context. For debugging. |
 | `list`, `show <name\|path>`, `rm <name\|path>` | The saved scrapers, one file, and delete one file. |
 
-Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else Parallelloop), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
+Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else `Parallelloop` when it exists, else a temporary profile), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
 
 **Output.** stdout carries only the output; the log goes to stderr.
 
@@ -249,6 +249,8 @@ Common flags: `--headed` (show the window and allow the pause hand-off), `--geo 
 **The LLM.** The default is Claude Code headless with no tools (`claude -p`, model `claude-sonnet-5`), in an empty temporary directory, with no API key of this package in its environment. The page data goes to it only as marked untrusted data, and its answer is only parsed as JSON. Set `JEV_SCRAPE_MODEL` for another model, `JEV_SCRAPE_CLAUDE_BIN` for the binary (default `~/.local/bin/claude`, else `claude` on the PATH), `JEV_SCRAPE_LLM=text` to use the text model of `JEV_TEXT_MODEL` and `JEV_TEXT_API_KEY`, or `JEV_SCRAPE_LLM=off`. `JEV_SCRAPE_LLM_TIMEOUT_MS` (default 180000), `JEV_SCRAPE_CONTEXT_CHARS` (default 48000), and `JEV_SCRAPE_STEP_MS` (default 8000, the wait for each step's control) tune it.
 
 **Files.** Scrapers live in `$XDG_CONFIG_HOME/jev-browser/scrapers/<name>.json` (default `~/.config`), mode 600, or at a path that you give. Nothing else is stored: no rows and no pages. A file never holds a secret: `new` refuses a secret param (such as `password` or `otp`) and a password in the task. The `--geo` of `new` stays in the file, and later runs use it. A file holds header names, slot keys, field types, and up to 5 key names of the rows, never the rows.
+
+A scraper made on a temporary profile stores `"profile": "none"`. Replay uses a temporary profile even when `Parallelloop` is available. A file with no profile uses `Parallelloop` when it exists and a temporary profile otherwise. An unknown named profile remains an error.
 
 **Sign-in and captchas.** A run on a page with a sign-in wall or a captcha pauses in a headed run at a terminal, so that you can sign in or solve it in the window; else it exits 2. There is no bypass. Sign in once with `--headed` on the profile copy, and later runs use that session.
 

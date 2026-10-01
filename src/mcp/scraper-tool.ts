@@ -20,7 +20,7 @@ import { GATED_NOTE, beforeRepeat, boundParams, stepsFromRecords, urlTemplate } 
 import type { ScrapeBrowser } from "../scrape/runner.js";
 import { runScraper, shownParams } from "../scrape/runner.js";
 import type { Extract, HealEntry, LoadRule, Row, ScrapeResult, ScraperSpec, SpecBody } from "../scrape/spec.js";
-import { ExtractDraft, FIELD_RE, HISTORY_MAX, LOAD_DEFAULTS, NAME_RE, PARAM_RE, SpecError, Validate, fillUrl, parseDraft, placeholders, urlHost } from "../scrape/spec.js";
+import { ExtractDraft, FIELD_RE, HISTORY_MAX, LOAD_DEFAULTS, NAME_RE, PARAM_RE, SpecError, Validate, fillUrl, parseDraft, placeholders, scraperProfile, urlHost } from "../scrape/spec.js";
 import { deleteScraper, listScrapers, loadScraper, saveScraper, scraperPath } from "../scrape/store.js";
 import { suspectText } from "../scrape/untrusted.js";
 import { defaultValidate, mergeValidate, validateRows } from "../scrape/validate.js";
@@ -507,7 +507,9 @@ export class ScrapeTools {
     const history: HealEntry[] = old
       ? [...old.history, { at, level: "manual", reason: "MCP scraper save", from_version: old.version, previous: bodyOf(old) } satisfies HealEntry].slice(-HISTORY_MAX)
       : [{ at, level: "author", reason: "MCP scraper save", from_version: 0, previous: null }];
-    const profile = run?.result?.profile?.name;
+    // A run or a browser on a temporary profile saves "none": a replay must not open the default profile instead.
+    const open = this.d.scrape.session.chrome;
+    const profile = run?.result ? (run.result.profile?.name ?? "none") : open ? (open.profile.directory ?? "none") : undefined;
     const geo = run?.input?.geo ? geoOf(run.input.geo) : undefined;
     const spec: ScraperSpec = {
       kind: "jev-scraper", format: 1, name, version: old ? old.version + 1 : 1, created_at: old?.created_at ?? at, updated_at: at,
@@ -539,7 +541,8 @@ export class ScrapeTools {
     const { spec, path } = got;
     const engine = this.d.engine;
     const profiles = this.d.profiles(engine);
-    const want = spec.profile ?? DEFAULT_PROFILE_NAME;
+    const { want, fallback } = scraperProfile(spec.profile, profiles);
+    if (fallback) this.d.log?.info(`scraper ${spec.name}: no profile in the file and no ${DEFAULT_PROFILE_NAME} profile here; using a temporary profile`);
     const dir = profileDir(want, profiles);
     if (dir === undefined) return { error: `the scraper's profile "${want}" is not a Chrome profile here. Profiles: ${[...profiles.map((p) => `${p.name} (${p.directory})`), "none"].join(", ")}. Save the scraper again from a browse run on one of them` };
     const session = this.d.scrape.session;
