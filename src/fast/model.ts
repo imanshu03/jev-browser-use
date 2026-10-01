@@ -64,6 +64,8 @@ export interface Chrome {
   readonly pid?: number;
   /** Open a new tab on `url` and attach to it. Returns the target and session ids. */
   newTarget(url: string): Promise<{ targetId: string; sessionId: string }>;
+  /** Attach to a page that our tab opened and keep it under browser ownership. */
+  adoptTarget(targetId: string): Promise<{ targetId: string; sessionId: string }>;
   closeTarget(targetId: string): Promise<void>;
   /** Close every tab we own, then the browser (or only the connection when attached). Idempotent. */
   close(): Promise<void>;

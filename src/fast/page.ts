@@ -93,7 +93,8 @@ export function dialogAccepts(type: unknown): boolean {
 }
 
 export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page> {
-  const { targetId, sessionId } = await chrome.newTarget("about:blank");
+  let { targetId, sessionId } = await chrome.newTarget("about:blank");
+  const parents: { targetId: string; sessionId: string }[] = [];
   const client = chrome.client;
   const stats = { browserMs: 0, calls: 0 };
   let pendingSettle: Action | null | undefined; // undefined = nothing pending; null = generic settle
@@ -112,12 +113,12 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   // A JavaScript dialog blocks the renderer: no input event and no evaluation answers while it is open.
   // Answer it at once so a click that opens alert() or confirm() cannot hang the run.
   const offDialog = client.on("Page.javascriptDialogOpening", (params, sid) => {
-    if (sid !== sessionId) return;
+    if (sid !== sessionId && !parents.some((p) => p.sessionId === sid)) return;
     const type = params["type"];
     const accept = dialogAccepts(type);
     const message = String(params["message"] ?? "").replace(/\s+/g, " ").slice(0, 200);
     opts.log.warn(`dialog ${String(type)} ${accept ? "accepted" : "dismissed"}: ${message}`);
-    call("Page.handleJavaScriptDialog", { accept }).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
+    call("Page.handleJavaScriptDialog", { accept }, sid).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
   });
   const offRequest = client.on("Network.requestWillBeSent", (params, sid) => {
     if (sid !== sessionId || !net.armed) return;
@@ -152,11 +153,11 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   // Target events come only with discovery on. Only tabs whose opener is this tab are used, so a user's own tabs (--cdp) are never touched.
   await client.send("Target.setDiscoverTargets", { discover: true }).catch((e: Error) => opts.log.debug(`target discovery not enabled: ${e.message}`));
 
-  async function call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  async function call(method: string, params: Record<string, unknown> = {}, sid = sessionId): Promise<Record<string, unknown>> {
     const start = Date.now();
     stats.calls += 1;
     try {
-      return await client.send(method, params, sessionId);
+      return await client.send(method, params, sid);
     } finally {
       stats.browserMs += Date.now() - start;
     }
@@ -205,10 +206,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     else await evaluate(settleScript(action), true);
   }
 
-  /**
-   * The run reads one tab. When an input opened new tabs, wait up to OPENED_URL_MS for a URL, close them, and load the
-   * last URL in this tab with this page as referrer. A page that needs window.opener (a sign-in popup) loses it.
-   */
+  /** Follow the opened page without repeating its request or losing its document and opener. */
   async function followOpened(): Promise<void> {
     if (opened.size === 0) return;
     const blank = (u: string): boolean => u === "" || u === "about:blank";
@@ -216,20 +214,20 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     while (opened.size > 0 && [...opened.values()].every(blank) && Date.now() < deadline) await settleSleep(20);
     const tabs = [...opened.entries()];
     opened.clear();
+    const next = [...tabs].reverse().find(([, url]) => !blank(url));
     for (const [id] of tabs) {
       handled.add(id);
-      await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
+      if (id !== next?.[0]) await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
     }
-    const url = tabs.map(([, u]) => u).reverse().find((u) => !blank(u));
-    if (url === undefined) {
+    if (!next) {
       if (tabs.length > 0) opts.log.warn(`closed ${tabs.length} new tab(s) that had no URL after ${OPENED_URL_MS} ms`);
       return;
     }
-    const from = await evaluate(LOCATION_SCRIPT);
-    const referrer = typeof from.value === "string" && /^https?:/.test(from.value) ? from.value : undefined;
-    opts.log.info(`the action opened a new tab; loading ${url.slice(0, 160)} in the run's tab`);
-    const res = await call("Page.navigate", { url, ...(referrer ? { referrer } : {}) });
-    if (typeof res["errorText"] === "string" && res["errorText"]) { opts.log.warn(`new tab URL did not load: ${res["errorText"]}`); return; }
+    const adopted = await chrome.adoptTarget(next[0]);
+    parents.push({ targetId, sessionId });
+    ({ targetId, sessionId } = adopted);
+    acceptedDoc = null;
+    opts.log.info(`the action opened a new tab; following ${next[1].slice(0, 160)}`);
     await waitReady(opts.settleTimeoutMs);
   }
 
@@ -692,13 +690,18 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
     async back(timeoutMs) {
       const previous = await previousEntry();
-      if (!previous) return;
-      await call("Page.navigateToHistoryEntry", { entryId: previous.id });
+      if (!previous) {
+        const parent = parents.pop();
+        if (!parent) return;
+        await chrome.closeTarget(targetId);
+        ({ targetId, sessionId } = parent);
+        acceptedDoc = null;
+      } else await call("Page.navigateToHistoryEntry", { entryId: previous.id });
       await waitReady(timeoutMs);
     },
 
     async canGoBack() {
-      return (await previousEntry()) !== null;
+      return (await previousEntry()) !== null || parents.length > 0;
     },
 
     async url() {
@@ -777,6 +780,7 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       for (const id of opened.keys()) await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
       opened.clear();
       await chrome.closeTarget(targetId);
+      for (const parent of parents.splice(0)) await chrome.closeTarget(parent.targetId);
     },
   };
   return page;

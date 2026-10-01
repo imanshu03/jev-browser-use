@@ -83,6 +83,8 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Plugin bundle build and development launcher | [scripts/build-mcp.mjs](scripts/build-mcp.mjs), [bin/jev-mcp.js](bin/jev-mcp.js) |
 | Plugin manifests, MCP configurations, skill, marketplaces | [plugin/](plugin/), [.claude-plugin/marketplace.json](.claude-plugin/marketplace.json), [.agents/plugins/marketplace.json](.agents/plugins/marketplace.json) |
 
+When an action opens a page target, the page layer attaches to that target through the same CDP connection. It keeps the opened document, request, and opener. Parent targets stay under browser ownership. Back returns to the parent when the opened tab has no earlier web page; close removes the active tab and its parents. Attach mode follows only targets opened by the run.
+
 The direct loop depends on the `Page`, `Chrome`, and `Oracle` interfaces. Browser modules perform I/O; policy modules construct questions and interpret answers. Keep this separation so decision tests can run without Chrome or the API.
 
 The MCP server does not change the loop. It gives `FastRunner` its own `Human`, and also a `TextSource`, an `AbortSignal`, `RunnerHints`, and `fromAssistant: true`. The CLI and chat give no `AbortSignal`, `RunnerHints`, or `fromAssistant`, and a `TextSource` only when the text model is set (**Text model**, section 8). Without it their requests and hint texts stay the same. Only `src/mcp/server.ts` and `src/mcp/main.ts` import the MCP SDK. `runs.ts`, `view.ts`, `setup.ts`, and `timers.ts` have no SDK imports, so tests can use them without a client.
