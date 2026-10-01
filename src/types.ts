@@ -1,4 +1,5 @@
 // Shared types and constants. No logic lives here.
+import type { BrowserKind } from "./fast/chrome.js";
 import type { GeoPoint } from "./fast/model.js";
 
 export type Engine = "cdp" | "chromium" | "vercel";
@@ -192,6 +193,8 @@ export interface RunConfig {
   goal?: Goal;
   /** Which engine runs the task. The CLI fills it; absent means the CLI default. */
   engine?: Engine;
+  /** Direct engines: the browser to launch (`--browser`). Absent: Chromium for engine chromium, else the first installed browser. */
+  browser?: BrowserKind;
   /** Fast engine: copy the Chrome profile again even when a copy exists. */
   refreshProfile?: boolean;
   /** Fast engine: Chrome binary to launch. */

@@ -31,6 +31,7 @@ function chromeWith(snapshots: ReturnType<typeof rawSnapshot>[]): { chrome: Chro
   const chrome: Chrome = {
     client, userDataDir: null, profile: { directory: null, copyDir: null, copied: false, copyMs: 0 }, launchMs: 0,
     async newTarget() { return { targetId: "t1", sessionId: "s1" }; },
+    async adoptTarget(targetId) { return { targetId, sessionId: `s-${targetId}` }; },
     async closeTarget() { /* nothing */ },
     async close() { /* nothing */ },
   };
@@ -98,6 +99,7 @@ function scriptedChrome(answer: (expression: string) => unknown | (() => unknown
   const chrome: Chrome = {
     client, userDataDir: null, profile: { directory: null, copyDir: null, copied: false, copyMs: 0 }, launchMs: 0,
     async newTarget() { return { targetId: "t1", sessionId: "s1" }; },
+    async adoptTarget(targetId) { return { targetId, sessionId: `s-${targetId}` }; },
     async closeTarget() { /* nothing */ },
     async close() { /* nothing */ },
   };
@@ -105,6 +107,79 @@ function scriptedChrome(answer: (expression: string) => unknown | (() => unknown
 }
 
 const cdpError = (message: string) => Object.assign(new Error(message), { name: "CdpError", method: "Runtime.evaluate" });
+
+describe("openPage new tabs", () => {
+  const home = "https://example.test/home";
+  const answer = (e: string) => e === SNAPSHOT_SCRIPT ? rawSnapshot(home, "complete", "home") : e === "location.href" ? home : e === "document.readyState" ? "complete" : null;
+  const tab = (targetId: string, url: string, openerId?: string) => ({ targetInfo: { targetId, type: "page", url, ...(openerId ? { openerId } : {}) } });
+
+  it("turns on target discovery and follows the opened document without another navigation", async () => {
+    const c = scriptedChrome(answer);
+    const log = fakeLogger();
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log });
+    expect(c.sent.some((s) => s.method === "Target.setDiscoverTargets" && s.params["discover"] === true)).toBe(true);
+    c.client.emit("Target.targetCreated", tab("p1", "about:blank", "t1"));
+    c.client.emit("Target.targetInfoChanged", tab("p1", "https://example.test/pfz", "t1"));
+    await page.observe();
+    expect(c.sent.filter((s) => s.method === "Target.closeTarget")).toEqual([]);
+    const nav = c.sent.filter((s) => s.method === "Page.navigate");
+    expect(nav).toEqual([]);
+    expect(c.sent.some((s) => s.method === "Runtime.evaluate" && s.sessionId === "s-p1")).toBe(true);
+    expect(await page.canGoBack!()).toBe(true);
+    await page.back(200);
+    expect(c.sent.some((s) => s.method === "Runtime.evaluate" && s.sessionId === "s1")).toBe(true);
+    expect(log.lines.some((l) => /opened a new tab; following https:\/\/example.test\/pfz/.test(l))).toBe(true);
+    // A late event of the closed tab does not load it again.
+    c.client.emit("Target.targetInfoChanged", tab("p1", "https://example.test/pfz", "t1"));
+    await page.observe();
+    expect(c.sent.filter((s) => s.method === "Page.navigate")).toHaveLength(0);
+  });
+
+  it("does not offer Back to a parent tab that has closed", async () => {
+    const c = scriptedChrome(answer);
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log: fakeLogger() });
+    c.client.emit("Target.targetCreated", tab("p1", "https://example.test/pfz", "t1"));
+    await page.observe();
+    expect(await page.canGoBack!()).toBe(true);
+    c.client.emit("Target.targetDestroyed", { targetId: "t1" });
+    expect(await page.canGoBack!()).toBe(false);
+    await page.back(200);
+    await page.close();
+  });
+
+  it("never touches tabs that another tab opened, nor non-page targets", async () => {
+    const c = scriptedChrome(answer);
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log: fakeLogger() });
+    c.client.emit("Target.targetCreated", tab("u1", "https://user.test/", "user-tab"));
+    c.client.emit("Target.targetCreated", tab("u2", "https://user.test/2"));
+    c.client.emit("Target.targetCreated", { targetInfo: { targetId: "w1", type: "service_worker", url: "https://example.test/sw.js", openerId: "t1" } });
+    await page.observe();
+    expect(c.sent.some((s) => s.method === "Target.closeTarget" || s.method === "Page.navigate")).toBe(false);
+  });
+
+  it("closes a tab that keeps no URL, warns, and stays on the page", async () => {
+    const c = scriptedChrome(answer);
+    const log = fakeLogger();
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log });
+    c.client.emit("Target.targetCreated", tab("p2", "about:blank", "t1"));
+    const obs = await page.observe();
+    expect(obs.url).toBe(home);
+    expect(c.sent.filter((s) => s.method === "Target.closeTarget").map((s) => s.params["targetId"])).toEqual(["p2"]);
+    expect(c.sent.some((s) => s.method === "Page.navigate")).toBe(false);
+    expect(log.lines.some((l) => /closed 1 new tab\(s\) that had no URL/.test(l))).toBe(true);
+  });
+
+  it("forgets a tab that closed by itself, and close() closes a tab that is still open", async () => {
+    const c = scriptedChrome(answer);
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log: fakeLogger() });
+    c.client.emit("Target.targetCreated", tab("p3", "https://example.test/a", "t1"));
+    c.client.emit("Target.targetDestroyed", { targetId: "p3" });
+    c.client.emit("Target.targetCreated", tab("p4", "https://example.test/b", "t1"));
+    await page.close();
+    expect(c.sent.filter((s) => s.method === "Target.closeTarget").map((s) => s.params["targetId"])).toEqual(["p4"]);
+    expect(c.handlers.get("Target.targetCreated")?.size).toBe(0);
+  });
+});
 
 describe("openPage dialogs", () => {
   it("accepts alert and beforeunload, dismisses confirm and prompt, logs the message, ignores other sessions, unsubscribes on close", async () => {

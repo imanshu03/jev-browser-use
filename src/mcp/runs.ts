@@ -8,6 +8,7 @@
 // ran with no dialog holds its audit.
 import { randomBytes } from "node:crypto";
 import { flatText, sanitizeText } from "../fast/generate.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import type { GeoPoint } from "../fast/model.js";
 import { cutText } from "../fast/policy.js";
 import type { ConfirmDetail, Human, Logger, PauseKind, PauseResult, RunnerHints, TextReply, TextRequest, TextSource, TextWriteOptions } from "../io.js";
@@ -20,7 +21,7 @@ export const RUN_STATUSES = ["running", "needs_text", "confirming", "paused", "s
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export interface BrowseInput {
-  task: string; url?: string; profile?: string; headed: boolean; engine?: "cdp" | "chromium";
+  task: string; url?: string; profile?: string; headed: boolean; engine?: "cdp" | "chromium"; browser?: BrowserKind;
   goal?: Goal; vars?: Record<string, string>; max_steps?: number; confirm: "auto" | "always" | "never" | "autonomous"; dry_run: boolean;
   /** With confirm "autonomous" only: the words of the user's own message that turn the mode on. */
   user_said?: string;

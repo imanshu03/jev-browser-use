@@ -29,11 +29,13 @@ Each direct engine uses one Chrome DevTools Protocol (CDP) connection.
 
 | Engine | Implementation | Binary selection | Source profiles and copy storage |
 |---|---|---|---|
-| `cdp` (default) | `FastRunner`, direct CDP | `--chrome-bin`, then `JEV_CHROME_BIN`, then Chrome discovery | Chrome source profiles; copies under `jev-browser/chrome` |
-| `chromium` | `FastRunner`, direct CDP | `--chrome-bin`, then `JEV_CHROMIUM_BIN`, then Chromium discovery | Chromium source profiles; copies under `jev-browser/chromium` |
+| `cdp` (default) | `FastRunner`, direct CDP | `--browser` (or `JEV_BROWSER`), else the first browser found (Chrome, Edge, Brave, Chromium); then `--chrome-bin`, the browser's `JEV_*_BIN`, or discovery | The selected browser's source profiles; copies under `jev-browser/<browser>` |
+| `chromium` | Same as `cdp --browser chromium` | `--chrome-bin`, then `JEV_CHROMIUM_BIN`, then Chromium discovery | Chromium source profiles; copies under `jev-browser/chromium` |
 | `vercel` | `Runner`, `agent-browser` CLI | `JEV_BROWSER_BIN` or the package-local CLI | Profile handling belongs to `agent-browser` |
 
-The configuration root for copies is `$XDG_CONFIG_HOME` or `~/.config`. On macOS and Linux, `cdp` discovery can fall back to Chromium. The selected engine still determines source profiles and copy storage, including when a binary override is used. Chromium discovery only checks Chromium locations. The direct engines require an installed browser and do not download one.
+Scraper files can store the source browser. Replay uses that browser for profile lookup, launch, and Jev navigation. `JEV_BROWSER` can override the stored browser in the scraper CLI. Files with no browser keep the default selection rules.
+
+The configuration root for copies is `$XDG_CONFIG_HOME` or `~/.config`. The selected browser determines source profiles and copy storage, including when a binary override is used. Discovery of a named browser checks only that browser's locations. The direct engines require an installed browser and do not download one.
 
 The one-shot `--cdp` flag attaches to an existing browser for either direct engine. Attachment skips binary selection and profile copying. Chat chooses its engine at startup and does not expose `--cdp` or an engine-switch command.
 
@@ -64,7 +66,7 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Vercel extraction, answer selection, verification | [src/extract.ts](src/extract.ts) |
 | Assistant-written text: field selection, the text request, reply checks, sanitizer | [src/fast/generate.ts](src/fast/generate.ts) |
 | Date fields: which task date fits a field, the part order, the date gate, the calendar range check | [src/fast/dates.ts](src/fast/dates.ts) |
-| One Chrome and one tab kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
+| One browser and its active page kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
 | MCP entry: stdio, stderr log, lazy setup, shutdown | [src/mcp/main.ts](src/mcp/main.ts) |
 | MCP tools, dialogs, and the rule for interactive sessions | [src/mcp/server.ts](src/mcp/server.ts) |
 | MCP run state, hand-offs, cancel, finished runs | [src/mcp/runs.ts](src/mcp/runs.ts) |
@@ -82,6 +84,8 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Scraper files, `jev-scrape` arguments, browser, output | [src/scrape/store.ts](src/scrape/store.ts), [src/scrape/cli.ts](src/scrape/cli.ts), [src/scrape/launch.ts](src/scrape/launch.ts), [src/scrape/csv.ts](src/scrape/csv.ts), [bin/jev-scrape.js](bin/jev-scrape.js) |
 | Plugin bundle build and development launcher | [scripts/build-mcp.mjs](scripts/build-mcp.mjs), [bin/jev-mcp.js](bin/jev-mcp.js) |
 | Plugin manifests, MCP configurations, skill, marketplaces | [plugin/](plugin/), [.claude-plugin/marketplace.json](.claude-plugin/marketplace.json), [.agents/plugins/marketplace.json](.agents/plugins/marketplace.json) |
+
+When an action opens a page target, the page layer attaches to that target through the same CDP connection. It keeps the opened document, request, and opener. Parent targets stay under browser ownership. Back returns to the parent when the opened tab has no earlier web page; close removes the active tab and its parents. Attach mode follows only targets opened by the run.
 
 The direct loop depends on the `Page`, `Chrome`, and `Oracle` interfaces. Browser modules perform I/O; policy modules construct questions and interpret answers. Keep this separation so decision tests can run without Chrome or the API.
 

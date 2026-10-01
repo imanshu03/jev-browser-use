@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>New tab fixture</title>
+</head>
+<body>
+  <h1>New tab fixture</h1>
+  <p><a href="page2.html?via=blank" target="_blank">Open page two in a new tab</a></p>
+  <p><a href="page2.html?via=noopener" target="_blank" rel="noopener noreferrer">Open page two without opener</a></p>
+  <p><button type="button" onclick="window.open('page2.html?via=script')">Open page two with script</button></p>
+  <p><button type="button" onclick="window.open('')">Open an empty window</button></p>
+</body>
+</html>

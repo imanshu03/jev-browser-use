@@ -4,8 +4,9 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { randomBytes } from "node:crypto";
 import type { ProfileEntry } from "../browser.js";
-import { parseGeo as parseCliGeo, textModelDeps } from "../cli.js";
-import { LAUNCH_WAIT_MS, launchChrome } from "../fast/chrome.js";
+import { browserKind, parseGeo as parseCliGeo, textModelDeps } from "../cli.js";
+import { LAUNCH_WAIT_MS, browserOf, launchChrome } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import type { Chrome, ChromeLaunchOptions, GeoPoint, Page, PageOptions } from "../fast/model.js";
 import { openPage } from "../fast/page.js";
 import type { Human, Logger } from "../io.js";
@@ -37,8 +38,16 @@ export function parseGeo(text: string): GeoPoint {
   return geo;
 }
 
+/** Select JEV_BROWSER, the saved browser, the Chromium engine alias, or the first installed browser. */
+export function envBrowser(env: NodeJS.ProcessEnv, saved?: BrowserKind): BrowserKind | undefined {
+  const named = env["JEV_BROWSER"];
+  return browserOf({ engine: env["JEV_BROWSER_ENGINE"], ...(named ? { browser: browserKind(named, "JEV_BROWSER") } : saved ? { browser: saved } : {}) }, env);
+}
+
 export interface BrowserOptions {
   headed: boolean;
+  /** The browser to launch. Absent: the first installed one. */
+  browser?: BrowserKind;
   /** The profile directory ("Profile 14"); absent is a temporary profile. */
   profileDirectory?: string;
   geo?: GeoPoint;
@@ -64,7 +73,7 @@ export function cliBrowser(o: BrowserOptions, deps: BrowserDeps = {}): ScrapeBro
   const start = (): Promise<Chrome> => {
     if (closed) return Promise.reject(new Error("the browser is closed"));
     launching ??= launch({
-      headed: o.headed, ...(o.profileDirectory ? { profileDirectory: o.profileDirectory } : {}), ...(o.geo ? { geolocation: o.geo } : {}),
+      headed: o.headed, ...(o.browser ? { browser: o.browser } : {}), ...(o.profileDirectory ? { profileDirectory: o.profileDirectory } : {}), ...(o.geo ? { geolocation: o.geo } : {}),
       env: o.env, log: o.log, commandTimeoutMs: 30_000,
     }).then((c) => { chrome = c; return c; });
     return launching;
@@ -86,8 +95,10 @@ export function cliBrowser(o: BrowserOptions, deps: BrowserDeps = {}): ScrapeBro
 }
 
 /** The RunConfig that L2 and `jev-scrape new` start from. */
-export function navBase(env: NodeJS.ProcessEnv, o: { headed: boolean; maxSteps?: number; logLevel?: "info" | "debug"; logJson?: boolean }): RunConfig {
+export function navBase(env: NodeJS.ProcessEnv, o: { headed: boolean; maxSteps?: number; logLevel?: "info" | "debug"; logJson?: boolean }, saved?: BrowserKind): RunConfig {
+  const browser = envBrowser(env, saved);
   return {
+    ...(browser ? { browser } : {}),
     task: "", headed: o.headed, maxSteps: o.maxSteps ?? 25, stepTimeoutMs: 30_000, runTimeoutMs: 600_000, pauseTimeoutMs: 300_000,
     confirm: "auto", dryRun: false, session: `jev-scrape-${randomBytes(4).toString("hex")}`, model: env["TYPESAFE_DEFAULT_MODEL"] ?? "jev-latest",
     logLevel: o.logLevel ?? "info", logJson: o.logJson ?? false, keepOpen: true, agentBrowserBin: "", vars: {}, engine: "cdp",

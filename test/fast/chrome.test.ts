@@ -28,8 +28,9 @@ describe("findChrome", () => {
     const bin = findChrome({ PATH: "/nowhere:/usr/bin" }, { platform: "linux", exists: (p) => p === "/usr/bin/chromium" });
     expect(bin).toBe("/usr/bin/chromium");
   });
-  it("throws a chrome not found message when none exists", () => {
-    expect(() => findChrome({ PATH: "" }, { platform: "linux", exists: () => false })).toThrow(/^chrome not found/);
+  it("names every supported browser when none exists, and tells the agent not to switch engines", () => {
+    expect(() => findChrome({ PATH: "" }, { platform: "linux", exists: () => false })).toThrow(/^no supported browser found: install Google Chrome, Microsoft Edge, Brave, or Chromium.*Other engines need an installed browser too$/);
+    expect(() => findChrome({ PATH: "" }, { browser: "edge", platform: "darwin", exists: () => false })).toThrow(/^edge not found: install Microsoft Edge, or set JEV_EDGE_BIN/);
   });
 });
 
@@ -242,6 +243,12 @@ describe("attachTarget", () => {
     expect(sent.map((s) => s.method)).not.toContain("Emulation.setDeviceMetricsOverride");
     expect(sent.filter((s) => s.sessionId === "S").map((s) => s.method)).toEqual(["Page.enable", "Emulation.setFocusEmulationEnabled"]);
   });
+  it("attaches to an existing target without creating a page or sending its request again", async () => {
+    const { c, sent } = client();
+    expect(await attachTarget(c, "", { headed: false, attached: true }, "opened")).toEqual({ targetId: "opened", sessionId: "S" });
+    expect(sent.some((x) => x.method === "Target.createTarget" || x.method === "Page.navigate")).toBe(false);
+    expect(sent.find((x) => x.method === "Target.attachToTarget")?.params).toEqual({ targetId: "opened", flatten: true });
+  });
   it("a headless user agent goes out without HeadlessChrome; a headed one keeps Chrome's own", async () => {
     const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.8037.57 Safari/537.36";
     expect(plainUserAgent(ua)).toBe(ua.replace("HeadlessChrome", "Chrome"));
@@ -250,7 +257,7 @@ describe("attachTarget", () => {
     const { c, sent } = client();
     await attachTarget(c, "about:blank", { headed: false, attached: false, userAgent: "UA" });
     expect(sent.find((s) => s.method === "Emulation.setUserAgentOverride")?.params).toEqual({ userAgent: "UA" });
-    const meta = userAgentMetadata("HeadlessChrome/154.0.8037.57", false, "darwin", "arm64");
+    const meta = userAgentMetadata("HeadlessChrome/154.0.8037.57", "Google Chrome", "darwin", "arm64");
     const withHints = client();
     await attachTarget(withHints.c, "about:blank", { headed: false, attached: false, userAgent: "UA", ...(meta ? { userAgentMetadata: meta } : {}) });
     expect(withHints.sent.find((s) => s.method === "Emulation.setUserAgentOverride")?.params).toEqual({ userAgent: "UA", userAgentMetadata: meta });
@@ -260,18 +267,18 @@ describe("attachTarget", () => {
   });
   it("the client hints of the override follow Chrome's own brand list: Chrome 154 on macOS sends Chromium, Google Chrome, Not A(Brand", () => {
     // Headless Chrome 154 with no override sent sec-ch-ua: "Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99".
-    expect(userAgentMetadata("HeadlessChrome/154.0.8037.57", false, "darwin", "arm64")).toEqual({
+    expect(userAgentMetadata("HeadlessChrome/154.0.8037.57", "Google Chrome", "darwin", "arm64")).toEqual({
       brands: [{ brand: "Chromium", version: "154" }, { brand: "Google Chrome", version: "154" }, { brand: "Not A(Brand", version: "99" }],
       fullVersionList: [{ brand: "Chromium", version: "154.0.8037.57" }, { brand: "Google Chrome", version: "154.0.8037.57" }, { brand: "Not A(Brand", version: "99.0.0.0" }],
       platform: "macOS", platformVersion: "", architecture: "arm", model: "", mobile: false, bitness: "64", wow64: false, formFactors: ["Desktop"],
     });
-    expect(userAgentMetadata("HeadlessChrome/154.0.8037.57", false, "darwin", "arm64", "26.6.2")?.platformVersion).toBe("26.6.2");
+    expect(userAgentMetadata("HeadlessChrome/154.0.8037.57", "Google Chrome", "darwin", "arm64", "26.6.2")?.platformVersion).toBe("26.6.2");
     // Another seed: another GREASE brand, version, and order. Chromium has no "Google Chrome".
-    const m = userAgentMetadata("HeadlessChrome/155.0.1.2", true, "linux", "x64");
+    const m = userAgentMetadata("HeadlessChrome/155.0.1.2", null, "linux", "x64");
     expect(m?.brands).toEqual([{ brand: "Chromium", version: "155" }, { brand: "Not(A:Brand", version: "24" }]);
     expect(m).toMatchObject({ platform: "Linux", architecture: "x86", bitness: "64" });
-    expect(userAgentMetadata("HeadlessChrome", false)).toBeNull();
-    expect(userAgentMetadata(undefined, false)).toBeNull();
+    expect(userAgentMetadata("HeadlessChrome", "Google Chrome")).toBeNull();
+    expect(userAgentMetadata(undefined, "Google Chrome")).toBeNull();
   });
   it("launched headless: foreground tab with the fixed viewport; headed: no viewport override", async () => {
     const { c, sent } = client();

@@ -24,6 +24,7 @@ function scriptedChrome(answer: (expression: string) => unknown) {
   const chrome: Chrome = {
     client, userDataDir: null, profile: { directory: null, copyDir: null, copied: false, copyMs: 0 }, launchMs: 0,
     async newTarget() { return { targetId: "t1", sessionId: "s1" }; },
+    async adoptTarget(targetId) { return { targetId, sessionId: `s-${targetId}` }; },
     async closeTarget() { /* nothing */ },
     async close() { /* nothing */ },
   };

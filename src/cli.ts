@@ -5,7 +5,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBrowser } from "./browser.js";
-import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
+import { BROWSER_KINDS, LAUNCH_WAIT_MS, browserOf, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
+import type { BrowserKind } from "./fast/chrome.js";
 import { FastRunner } from "./fast/loop.js";
 import type { Chrome, GeoPoint } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
@@ -26,9 +27,10 @@ export const USAGE = `jev-browser "<task>" [options]
 
 Options:
   --engine <cdp|chromium|vercel>     cdp: direct Chrome CDP. chromium: Chromium over CDP. vercel: agent-browser. Default: cdp (env JEV_BROWSER_ENGINE).
+  --browser <chrome|edge|brave|chromium>  cdp: the browser to launch (env JEV_BROWSER). Default: the first installed, in that order.
   --profile <name|dir|none>  Chrome profile. Overrides a profile named in the task. Default: Parallelloop. none: a temporary profile.
   --refresh-profile          cdp/chromium: copy the browser profile again, even when a copy exists.
-  --chrome-bin <path>        cdp/chromium: browser binary override (env JEV_CHROME_BIN / JEV_CHROMIUM_BIN).
+  --chrome-bin <path>        cdp/chromium: browser binary override (env JEV_CHROME_BIN / JEV_EDGE_BIN / JEV_BRAVE_BIN / JEV_CHROMIUM_BIN).
   --url <start url>          Start page. Overrides URL resolution.
   --goal <act|extract|check> Skip the goal question.
   --headed                   Show the window. Enables the pause hand-off.
@@ -78,6 +80,19 @@ export function parseGeo(value: string, flag = "--geo"): GeoPoint {
   return { latitude: lat, longitude: lon, ...(acc !== undefined ? { accuracy: acc } : {}) };
 }
 
+/** A `--browser` or JEV_BROWSER value. */
+export function browserKind(value: string, flag: string): BrowserKind {
+  const v = value.toLowerCase();
+  if (!(BROWSER_KINDS as readonly string[]).includes(v)) throw new UsageError(`${flag} must be ${BROWSER_KINDS.join(", ")}`);
+  return v as BrowserKind;
+}
+
+/** The `browser` launch option of a run; absent when no browser is installed, so the launch reports that. */
+export function browserOpt(cfg: RunConfig, env: NodeJS.ProcessEnv): { browser?: BrowserKind } {
+  const b = browserOf(cfg, env);
+  return b ? { browser: b } : {};
+}
+
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
   const positional: string[] = [];
   const envEngine = env["JEV_BROWSER_ENGINE"];
@@ -89,6 +104,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
     agentBrowserBin: env["JEV_BROWSER_BIN"] ?? path.join(packageDir(), "node_modules", ".bin", "agent-browser"), vars: {},
   };
   if (env["AGENT_BROWSER_PROFILE"]) cfg.profile = env["AGENT_BROWSER_PROFILE"];
+  const envBrowser = env["JEV_BROWSER"];
+  if (envBrowser) cfg.browser = browserKind(envBrowser, "JEV_BROWSER");
   const next = (i: number, flag: string): string => {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) throw new UsageError(`${flag} needs a value`);
@@ -108,6 +125,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
         if (e !== "cdp" && e !== "chromium" && e !== "vercel") throw new UsageError("--engine must be cdp, chromium, or vercel");
         cfg.engine = e; break;
       }
+      case "--browser": cfg.browser = browserKind(next(i, a), a); i++; break;
       case "--refresh-profile": cfg.refreshProfile = true; break;
       case "--chrome-bin": cfg.chromeBin = next(i, a); i++; break;
       case "--profile": cfg.profile = next(i, a); i++; break;
@@ -151,6 +169,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): RunConfig {
       default: throw new UsageError(`unknown flag ${a}`);
     }
   }
+  // --engine chromium is the old name of --browser chromium.
+  if (cfg.engine === "chromium" && cfg.browser !== undefined && cfg.browser !== "chromium") throw new UsageError(`--engine chromium launches Chromium; use --engine cdp --browser ${cfg.browser}`);
   // The vercel engine has no audit of the actions that a run does with no dialog.
   if (cfg.confirm === "autonomous" && cfg.engine === "vercel") throw new UsageError("--confirm autonomous needs --engine cdp or chromium");
   // agent-browser has no geolocation override.
@@ -206,7 +226,7 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
   let launching: Promise<Chrome> | null = null;
   const launch = async (profileDirectory: string | undefined): Promise<Chrome> => {
     launching = launchChrome({
-      browser: cfg.engine === "chromium" ? "chromium" : "chrome",
+      ...browserOpt(cfg, io.env),
       headed: cfg.headed, ...(profileDirectory ? { profileDirectory } : {}), ...(cfg.refreshProfile ? { refreshProfile: true } : {}),
       ...(cfg.cdp !== undefined ? { cdpPort: cfg.cdp } : {}), ...(cfg.chromeBin ? { chromeBin: cfg.chromeBin } : {}),
       ...(cfg.geo ? { geolocation: cfg.geo } : {}),
@@ -220,7 +240,7 @@ async function realRun(cfg: RunConfig, io: MainIo): Promise<RunResult> {
     if (chrome) await chrome.close();
   };
   const runner = fast
-    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, cfg.engine === "chromium" ? "chromium" : "chrome")), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL), ...textModelDeps(io.env, log) })
+    ? new FastRunner({ cfg, profiles: listProfiles(defaultUserDataDir(io.env, undefined, browserOf(cfg, io.env))), chrome: launch, openPage: (c) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log }), oracle, human, log, warm: () => transport.warm(client.baseURL), ...textModelDeps(io.env, log) })
     : new Runner({ cfg, browserFor, oracle, human, log });
   let interrupted = false;
   const onSigint = () => {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { SCRAPE_EXIT, SpecError, fillTemplate, fillUrl, parseDraft, parseScraper, placeholders } from "../../src/scrape/spec.js";
+import { SCRAPE_EXIT, SpecError, fillTemplate, fillUrl, parseDraft, parseScraper, placeholders, scraperProfile } from "../../src/scrape/spec.js";
 import { FIXTURES, clone } from "./fakes.js";
 
 const raw = (name: string): Record<string, unknown> => JSON.parse(fs.readFileSync(path.join(FIXTURES, `${name}.json`), "utf8")) as Record<string, unknown>;
@@ -97,5 +97,15 @@ describe("templates", () => {
   });
   it("exit codes", () => {
     expect(SCRAPE_EXIT).toEqual({ ok: 0, blocked: 2, failed: 3, usage: 4 });
+  });
+});
+
+describe("scraperProfile", () => {
+  const BP = { directory: "Profile 2", name: "BP" };
+  it("keeps the file's profile, else the default when it exists, else none", () => {
+    expect(scraperProfile("BP", [BP])).toEqual({ want: "BP", fallback: false });
+    expect(scraperProfile("none", [])).toEqual({ want: "none", fallback: false });
+    expect(scraperProfile(undefined, [BP, { directory: "Profile 14", name: "Parallelloop" }])).toEqual({ want: "Parallelloop", fallback: false });
+    expect(scraperProfile(undefined, [BP])).toEqual({ want: "none", fallback: true });
   });
 });

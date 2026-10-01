@@ -19,24 +19,32 @@ cp .env.example .env
 
 Set `TYPESAFE_API_KEY` in `.env` before running a one-shot task. [.env.example](.env.example) describes the required key and optional engine, model, profile, binary, and storage settings. Chat can ask for and save a key when the environment key is empty. Existing shell environment values take priority over `.env`.
 
-Node 22 or later. Install Google Chrome for `cdp` or Chromium for `chromium`. `agent-browser` ships with the package for the `vercel` engine.
+Node 22 or later. The direct engines need one installed Chromium-family browser: Google Chrome, Microsoft Edge, Brave, or Chromium. `agent-browser` ships with the package for the `vercel` engine.
 
 ## Engines
 
 | Engine | Browser control |
 |---|---|
-| `cdp` (default) | Controls installed Chrome directly through the Chrome DevTools Protocol. |
-| `chromium` | Launches installed Chromium and controls it through the same CDP implementation. |
+| `cdp` (default) | Controls an installed browser (Chrome, Edge, Brave, or Chromium) directly through the Chrome DevTools Protocol. |
+| `chromium` | The same as `cdp --browser chromium`. |
 | `vercel` | Uses Vercel's `agent-browser` CLI. |
 
 Select an engine with `--engine` in either CLI or chat, or set `JEV_BROWSER_ENGINE`. The flag overrides a valid environment setting. The old names `fast` and `legacy` are no longer accepted. The `cdp` and `chromium` engines share the same decision and browser-control code.
 
-Use `--chrome-bin <path>` to override the direct engine's browser binary. Otherwise `cdp` uses `JEV_CHROME_BIN` and Chrome discovery; `chromium` uses `JEV_CHROMIUM_BIN` and Chromium discovery. On macOS and Linux, `cdp` discovery can fall back to Chromium if Chrome is absent. The selected engine still determines the source profile directory. Chromium discovery only checks Chromium locations. Install Chromium before using this option; the CLI does not download it.
+### Browsers
 
-Chromium uses its own source profiles and stores copies under `~/.config/jev-browser/chromium`. Chrome copies stay under `~/.config/jev-browser/chrome`. The copy root uses `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. With the one-shot `--cdp <port>` flag, either direct engine uses the browser at that port and opens an owned tab. The selected engine does not change the attached browser binary or profile.
+Select the browser with `--browser <chrome|edge|brave|chromium>` in either CLI or chat, `JEV_BROWSER`, or the MCP `browse` argument `browser`. Without one, the direct engine uses the first browser that it finds:
+
+1. A browser whose binary override is set: `JEV_CHROME_BIN`, `JEV_EDGE_BIN`, `JEV_BRAVE_BIN`, or `JEV_CHROMIUM_BIN`.
+2. The first installed browser, in the order Chrome, Edge, Brave, Chromium. On macOS the CLI looks in `/Applications` and `~/Applications`, on Windows in the program folders, and on Linux on `PATH`.
+
+`--chrome-bin <path>` overrides the binary of the selected browser. The CLI never downloads a browser. When it finds none, the run fails with `no supported browser found: install Google Chrome, Microsoft Edge, Brave, or Chromium ...`. Another engine does not fix this error, because every engine needs an installed browser. To use a browser at an unusual path, such as Playwright's Chrome for Testing, set `JEV_CHROMIUM_BIN` to its binary.
+
+Each browser works with profiles in the same way. When the task or `--profile` names a profile, the run copies it from that browser's own profile folder (for example `~/Library/Application Support/Microsoft Edge` on macOS) to `~/.config/jev-browser/<browser>/<profile>`, and launches the browser on the copy. Otherwise the run uses a temporary profile. The copy root uses `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. With the one-shot `--cdp <port>` flag, either direct engine uses the browser at that port and opens an owned tab. The selected engine does not change the attached browser binary or profile.
 
 ```sh
 ./bin/jev-browser.js "open wikipedia.org" --engine cdp --profile none
+./bin/jev-browser.js "open wikipedia.org" --browser edge --profile "Work"
 ./bin/jev-browser.js "open wikipedia.org" --engine chromium --profile none
 ./bin/jev-browser.js "open wikipedia.org" --engine vercel --profile none
 ```
@@ -114,6 +122,7 @@ Rules for both direct engines:
 - When Jev splits between pressing Enter and clicking the form's submit button (for example "Send"), the engine adds the two probabilities and clicks the button when the sum passes the Enter limit. Only the button that Enter would press qualifies: in a single-line field, the default button (the first submit control) of its form; in a textarea or editor, the default button or a send button of its form; for a form without submit controls, a button in the same form or dialog. The click still needs its own target confidence and confirmation, and it keeps the risk of the Enter: a destructive Enter stays a destructive click. An Enter that picks a highlighted option never becomes a click on the submit button.
 - In plugin runs, the assistant writes one text per field in a run. A second request for the same field re-asks Jev instead, so a sent message is not written and sent again. After a send took the field's text out of the page, a second request for that field blocks with `needs_text` and a hint to call `browse` again for the next text. When a fill did not stay (the editor dropped the text and the field is empty), the same text goes in one time more, with no new request, if nothing was clicked since. A text that the page moves to a pop-out, or to which it adds a signature, keeps this rule in its new field. A composer that the page replaces with a new element after a send counts as a new field: its text gets a new request and its own dialog.
 - `--step-timeout` sets the timeout of every CDP command.
+- When an action opens a new tab (a `target="_blank"` link or `window.open`), the engine follows that tab without sending its request again. Form data, page state, and `window.opener` remain available. The parent tab stays open; Back returns to it when the new tab has no earlier page. The engine waits up to 2 s for a URL and closes a tab that stays blank. It closes its tabs when the page closes. With `--cdp`, tabs that the user opened stay unchanged.
 - A JavaScript dialog (`alert`, `confirm`, `prompt`, `beforeunload`) is answered at once: alerts and `beforeunload` prompts are accepted, `confirm` and `prompt` dialogs are dismissed. The message goes to the log.
 - A copied profile has one owner at a time. A second launch or refresh fails while that profile is in use. The owner holds `<copy>.jev-lock` until the browser exits. After a forced stop, a lock can remain. Check that no browser process uses the copy before you remove the lock. Existing Chrome singleton locks are preserved.
 - A native search submit button with the plain label `SEND` or `Submit` needs no confirmation when all text fields in its form are search fields. The check includes fields outside the viewport and fields linked by the `form` attribute. Other Send controls, Save buttons, and forms with message or credential fields keep their confirmation rules.
@@ -150,7 +159,7 @@ To change the saved key, start with `--reset-key`, or type `/key` in the chat. W
 
 Chat mode shows the browser window by default. Use `--headless` to hide it.
 
-The browser stays open between tasks. When a task names no URL and no known site, it continues on the current page. With `cdp` or `chromium`, chat keeps one browser and one tab. `/close`, `/headed`, `/profile`, `/quit`, Ctrl-C, and the end of input close the browser.
+The browser stays open between tasks. When a task names no URL and no known site, it continues on the current page. With `cdp` or `chromium`, chat keeps one browser and one active page. `/close`, `/headed`, `/profile`, `/quit`, Ctrl-C, and the end of input close the browser.
 
 ### Commands
 
@@ -228,7 +237,9 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 | `read (--url <url> \| <name\|path>) [--load] [--context]` | Prints what the page reader sees, after the steps of a scraper when you name one. `--load` scrolls first; `--context` prints the LLM page context. For debugging. |
 | `list`, `show <name\|path>`, `rm <name\|path>` | The saved scrapers, one file, and delete one file. |
 
-Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else Parallelloop), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
+Common flags: `--headed` (show the window and allow the pause hand-off), `--geo lat,lon[,accuracy]` (the location that pages get from the geolocation API), `--profile <name|dir|none>` (default: the profile in the file, else `Parallelloop` when it exists, else a temporary profile), `--out <file>`, `--format json|csv`, `--log-level info|debug`, `--log-json`.
+
+A new scraper stores its browser with its profile. MCP replay uses the stored browser. The CLI also uses it unless `JEV_BROWSER` selects another browser. The browser profile list and the Jev navigator use the same selection. Older files with no browser use the current default.
 
 **Output.** stdout carries only the output; the log goes to stderr.
 
@@ -250,6 +261,8 @@ Common flags: `--headed` (show the window and allow the pause hand-off), `--geo 
 **The LLM.** The default is Claude Code headless with no tools (`claude -p`, model `claude-sonnet-5`), in an empty temporary directory, with no API key of this package in its environment. The page data goes to it only as marked untrusted data, and its answer is only parsed as JSON. Set `JEV_SCRAPE_MODEL` for another model, `JEV_SCRAPE_CLAUDE_BIN` for the binary (default `~/.local/bin/claude`, else `claude` on the PATH), `JEV_SCRAPE_LLM=text` to use the text model of `JEV_TEXT_MODEL` and `JEV_TEXT_API_KEY`, or `JEV_SCRAPE_LLM=off`. `JEV_SCRAPE_LLM_TIMEOUT_MS` (default 180000), `JEV_SCRAPE_CONTEXT_CHARS` (default 48000), and `JEV_SCRAPE_STEP_MS` (default 8000, the wait for each step's control) tune it.
 
 **Files.** Scrapers live in `$XDG_CONFIG_HOME/jev-browser/scrapers/<name>.json` (default `~/.config`), mode 600, or at a path that you give. Nothing else is stored: no rows and no pages. A file never holds a secret: `new` refuses a secret param (such as `password` or `otp`) and a password in the task. The `--geo` of `new` stays in the file, and later runs use it. A file holds header names, slot keys, field types, and up to 5 key names of the rows, never the rows.
+
+A scraper made on a temporary profile stores `"profile": "none"`. Replay uses a temporary profile even when `Parallelloop` is available. A file with no profile uses `Parallelloop` when it exists and a temporary profile otherwise. An unknown named profile remains an error.
 
 **Sign-in and captchas.** A run on a page with a sign-in wall or a captcha pauses in a headed run at a terminal, so that you can sign in or solve it in the window; else it exits 2. There is no bypass. Sign in once with `--headed` on the profile copy, and later runs use that session.
 
@@ -301,7 +314,7 @@ If you do not use the Codex plugin, add the server to the Codex `config.toml`. R
 command = "node"
 args = ["<repo>/plugin/dist/jev-mcp.mjs"]
 env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "JEV_BROWSER_CONFIG", "XDG_CONFIG_HOME",
-  "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_CHROME_BIN", "JEV_CHROMIUM_BIN",
+  "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_BROWSER", "JEV_CHROME_BIN", "JEV_EDGE_BIN", "JEV_BRAVE_BIN", "JEV_CHROMIUM_BIN",
   "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
@@ -434,7 +447,7 @@ In its default approval mode, Codex asks before `browse`, `continue`, and `scrap
 | `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for every `continue` call, also in bypass mode. The server reads it at startup. Codex does not use it. |
 | `JEV_MCP_AUTONOMOUS` | `0` turns off [autonomous mode](#autonomous-mode): `browse` refuses `confirm: "autonomous"`. |
 
-The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_CHROME_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
+The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, `JEV_BROWSER_ENGINE`, `JEV_BROWSER_MAX_STEPS`, `AGENT_BROWSER_PROFILE`, `JEV_BROWSER`, `JEV_CHROME_BIN`, `JEV_EDGE_BIN`, `JEV_BRAVE_BIN`, `JEV_CHROMIUM_BIN`, `JEV_BROWSER_CONFIG`, and `XDG_CONFIG_HOME`. `JEV_BROWSER_ENGINE=vercel` or an unknown engine gives `cdp` and a warning. A `JEV_BROWSER_MAX_STEPS` value that is not a number from 1 to 100 gives 25 and a warning. The server ignores `AGENT_BROWSER_SESSION`.
 
 ### Plugin limits
 
@@ -444,7 +457,7 @@ The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT
 - Unsent text of more than 6,000 characters blocks the action with `needs_confirmation`, because one dialog cannot show it. Autonomous mode shows no dialog, so it does not block there.
 - One result is at most about 7,000 tokens. The server cuts the page text first, then the older step lines (down to 3), then answer strings (to 2,000 characters), then the audit of an autonomous run (texts, field lists, and old entries).
 - The server keeps the last 10 finished runs. A restart forgets them.
-- Chrome stays open between runs, with one tab. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
+- Chrome stays open between runs, with one active page and any parent tabs that it opened. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
 - `cancel` waits 5 s for the run to stop, then closes Chrome.
 - After a run ends, the server keeps the Jev connection warm for 10 minutes.
 

@@ -14,6 +14,8 @@ import type { CallToolResult, ServerContext } from "@modelcontextprotocol/server
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import type { ProfileEntry } from "../browser.js";
+import { BROWSER_KINDS, browserOf } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import type { Logger } from "../io.js";
 import { MCP, MCP_ENV } from "./limits.js";
 import type { BrowseInput, Run, RunManager } from "./runs.js";
@@ -21,15 +23,17 @@ import { BusyError, StaleRequestError, UnknownRunError, stripKey } from "./runs.
 import { ReadView } from "./read-view.js";
 import type { ScrapeDeps, ToolOut } from "./scraper-tool.js";
 import { ReadArgs, ScrapeTools, ScraperArgs, ScraperView } from "./scraper-tool.js";
-import { NoKeyError, checkAutonomy, checkInput } from "./setup.js";
+import { NoKeyError, browserChoice, checkAutonomy, checkInput } from "./setup.js";
 import { CONFIRM_SCHEMA, RunView, TOOL_NAMES, confirmMessage, viewOf } from "./view.js";
 
 export interface ServerDeps {
   runs: RunManager; closeBrowser(): Promise<boolean>; version: string;
-  env: NodeJS.ProcessEnv; profiles: (engine: "cdp" | "chromium") => ProfileEntry[];
+  env: NodeJS.ProcessEnv; profiles: (browser: BrowserKind | undefined) => ProfileEntry[];
   secret?: () => string | null; now?: () => number;
   /** The engine of a browse input that names none. Its profiles are checked. Default cdp. */
   engine?: "cdp" | "chromium";
+  /** The browser of a browse input that names none (JEV_BROWSER). Absent: the first installed browser. */
+  browser?: BrowserKind;
   log?: Logger;
   /** The scrape kit, the browser session, and the base config of read_page and scraper. Absent: both tools refuse. */
   scrape?: ScrapeDeps;
@@ -44,6 +48,8 @@ const BrowseArgs = z.strictObject({
   profile: z.string().min(1).max(100).optional(),
   headed: z.boolean().default(true),
   engine: z.enum(["cdp", "chromium"]).optional(),
+  browser: z.enum(BROWSER_KINDS).optional()
+    .describe("The browser to launch. Leave it out: the server's default, else the first installed of chrome, edge, brave, chromium."),
   goal: z.enum(["act", "extract", "check"]).optional()
     .describe("act: change the page (click, type, submit). extract: read a value from the page. check: answer yes or no. Always pass it."),
   vars: z.record(z.string().regex(/^[a-z0-9_]{1,40}$/), z.string().max(2000)).optional(),
@@ -80,6 +86,7 @@ function browseInput(a: z.infer<typeof BrowseArgs>): BrowseInput {
   if (a.url !== undefined) input.url = a.url;
   if (a.profile !== undefined) input.profile = a.profile;
   if (a.engine !== undefined) input.engine = a.engine;
+  if (a.browser !== undefined) input.browser = a.browser;
   if (a.goal !== undefined) input.goal = a.goal;
   if (a.vars !== undefined) input.vars = a.vars;
   if (a.max_steps !== undefined) input.max_steps = a.max_steps;
@@ -115,7 +122,7 @@ export function buildServer(deps: ServerDeps): McpServer {
   };
 
   const tools = deps.scrape
-    ? new ScrapeTools({ scrape: deps.scrape, runs: deps.runs, env: deps.env, profiles: deps.profiles, engine: deps.engine ?? "cdp", secret, now, ...(deps.log ? { log: deps.log } : {}) })
+    ? new ScrapeTools({ scrape: deps.scrape, runs: deps.runs, env: deps.env, profiles: deps.profiles, engine: deps.engine ?? "cdp", ...(deps.browser ? { browser: deps.browser } : {}), secret, now, ...(deps.log ? { log: deps.log } : {}) })
     : null;
 
   const ok = (run: Run): CallToolResult => {
@@ -177,7 +184,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       if (busy) return wrong(busy);
       const input = browseInput(args);
       // The profile list is read only to check a profile that the input names.
-      const bad = checkInput(input, deps.env, input.profile !== undefined ? deps.profiles(input.engine ?? deps.engine ?? "cdp") : []) ?? checkAutonomy(input, deps.env);
+      const bad = checkInput(input, deps.env, input.profile !== undefined ? deps.profiles(browserOf(browserChoice(input, { engine: deps.engine, browser: deps.browser }), deps.env)) : []) ?? checkAutonomy(input, deps.env);
       if (bad) return wrong(bad);
       const run = deps.runs.start(input, { interactive: interactive() });
       return await settle(run.id, args.wait_s, t0, ctx);
