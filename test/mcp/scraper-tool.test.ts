@@ -342,6 +342,19 @@ describe("scraper save", () => {
 });
 
 describe("scraper run", () => {
+  it("save without from_run keeps a temporary or named session profile", async () => {
+    const t = await stack();
+    await t.open();
+    await t.read();
+    view(await t.call(SAVE));
+    expect((t.kit.files.get("shop-eggs") as ScraperSpec).profile).toBe("none");
+    t.session.chrome!.profile.directory = "Profile 2";
+    view(await t.call({ ...SAVE, overwrite: true }));
+    expect((t.kit.files.get("shop-eggs") as ScraperSpec).profile).toBe("Profile 2");
+    await t.session.close();
+    await t.c.close();
+  });
+
   const rows = (n: number): Row[] => Array.from({ length: n }, (_, i) => ({ name: `Product ${i} ${"x".repeat(1 + (i % 30))}`, price: 10 + i, in_stock: i % 3 !== 0, mrp: i % 2 ? null : 20 + i }));
 
   it("replays on the session page with heal code, no navigator, and no LLM; the rows fit the budget and the cursor gives the rest once", async () => {

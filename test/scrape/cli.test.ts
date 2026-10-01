@@ -223,6 +223,11 @@ describe("main", () => {
 });
 
 describe("main: new", () => {
+  it("an explicit temporary profile is stored when the default profile exists", async () => {
+    expect(await main([...ARGS, "--profile", "none"], io().io, newDeps([draft]))).toBe(0);
+    expect(loadScraper("shop", env).spec.profile).toBe("none");
+  });
+
   const RES = "https://shop.example/s?q=eggs";
   const draft = JSON.stringify({
     set: "g2",
