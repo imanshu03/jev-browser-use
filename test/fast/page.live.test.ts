@@ -1641,3 +1641,48 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("opened documents keep their re
     });
   }
 });
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("search form facts (live Chrome)", () => {
+  let chrome: Chrome;
+  let page: Page;
+  const fixture = pathToFileURL(path.join(FIXTURES, "search-submit.html")).href;
+  const log = fakeLogger();
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+  });
+
+  it("a password field added after observation cancels a pending search click", async () => {
+    await page.navigate(`${fixture}?case=search`, NAV_MS);
+    const obs = await page.observe();
+    const button = obs.actions.find((a) => a.role === "button" && a.label === "SEND")!;
+    expect(button.searchOnly).toBe(true);
+    const targets = await chrome.client.send("Target.getTargets");
+    const target = (targets["targetInfos"] as { targetId: string; url: string }[]).find((t) => t.url === obs.url)!;
+    const attached = await chrome.client.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    try {
+      await chrome.client.send("Runtime.evaluate", { expression: "document.getElementById('search').insertAdjacentHTML('beforeend','<input type=password style=display:none>')" }, String(attached["sessionId"]));
+      expect(await page.fresh(obs, button)).toBe(false);
+    } finally {
+      await chrome.client.send("Target.detachFromTarget", { sessionId: attached["sessionId"] });
+    }
+  });
+
+  it.each(["search", "save", "button", "offscreen", "password", "recipient", "external"])("checks all fields and the submit type for %s", async (testCase) => {
+    await page.navigate(`${fixture}?case=${testCase}`, NAV_MS);
+    const obs = await page.observe();
+    const button = obs.actions.find((a) => a.role === "button" && a.label === (testCase === "save" ? "Save" : "SEND"));
+    expect(button).toBeDefined();
+    expect(button?.submitControl).toBe(testCase !== "button");
+    expect(button?.searchOnly).toBe(["search", "save", "button"].includes(testCase));
+    if (testCase === "offscreen") expect(obs.actions.some((a) => a.label === "Email")).toBe(false);
+    await page.act(find(obs, "click", "Open Search..."), obs);
+    expect((await page.observe()).focus?.searchOnly).toBe(button?.searchOnly);
+  });
+});

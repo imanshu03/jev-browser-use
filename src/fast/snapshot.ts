@@ -144,7 +144,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const pick=editable ? cache.pick(e) : null, atoms=editable ? atomsOf(e) : null, popup=popupChain(e);
     return {node:identity(e),label:name(e),role:role(e),submitLabel:submits.map(b=>name(b)).join(' | '),
       editable,value:editable ? ('value' in e ? String(e.value) : e.innerText) : '',
-      form:owner ? formId(owner) : null,submitDefault:controls[0] && !controls[0].matches(':disabled') ? name(controls[0]) : '',
+      form:owner ? formId(owner) : null,searchOnly:searchOnly(owner),submitDefault:controls[0] && !controls[0].matches(':disabled') ? name(controls[0]) : '',
       multiline:e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true',
       ...(pick?.option ? {enterOption:{node:identity(pick.option),label:name(pick.option)}} : {}),
       ...(atoms?.mentions.length ? {mentions:atoms.mentions} : {}),...(popup.length ? {popup} : {})};
@@ -181,13 +181,14 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     [...document.querySelectorAll('input,textarea,select,[contenteditable]')].filter(safe)
       .map(e=>[identity(e),e.isContentEditable ? e.innerText : e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly]),
     (cache.scrollers||[]).map(e=>[identity(e),e.scrollTop,e.scrollHeight,e.clientHeight,e.isConnected])];
-  cache.guard=e=>{
+  cache.guard=(e,observed=false)=>{
     if (!e?.isConnected || !visible(e)) return null;
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
     return [identity(e),role(e),name(e),e.isContentEditable ? e.innerText : e.value??null,e.checked??null,e.selectedIndex??null,
       e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
-      e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
+      e.getAttribute('href'),scope?.innerText?.slice(0,6000)||'',
+      observed ? searchFact(owner(e)) : searchOnly(owner(e)),!!e.form && ['submit','image'].includes(e.type)];
   };
   // Enter acts on the suggestion popup of the focused field too: an Enter decided on an old popup is stale.
   cache.keyGuard=()=>{
@@ -323,6 +324,24 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   };
   const writable=e=>!e.readOnly && e.getAttribute('aria-readonly')!=='true';
   const owner=e=>e.form||e.closest('form,[role="form"],dialog,[role="dialog"]');
+  const searchOnly=form=>{
+    if (!form) return false;
+    const fields=[...document.querySelectorAll(selector)].filter(e=>owner(e)===form &&
+      !e.matches(':disabled') && !e.closest('[aria-disabled="true"]') && e.type!=='hidden' &&
+      (['textbox','searchbox','spinbutton'].includes(role(e)) || role(e)==='combobox' && e.tagName!=='SELECT' || ['password','file'].includes(e.type)));
+    return fields.length>0 && fields.every(e=>{
+      const box=role(e)==='searchbox' || role(e)==='combobox';
+      const multiline=e.tagName==='TEXTAREA' || e.isContentEditable || e.getAttribute('aria-multiline')==='true';
+      return (!multiline || box) && !['password','file'].includes(e.type) &&
+        (role(e)==='searchbox' || e.type==='search' || /\bsearch\b/i.test(name(e)));
+    });
+  };
+  const searchForms=new Map();
+  const searchFact=form=>{
+    if (!form) return false;
+    if (!searchForms.has(form)) searchForms.set(form,searchOnly(form));
+    return searchForms.get(form);
+  };
   // Rule B: the text of a pointer row, or null. A pointer row is a clickable element with no native or ARIA control role
   // (a location suggestion on a quick-commerce site). Page script can see its click handler: an onclick function (React
   // puts one on each element with an onClick prop) or the React props. It is not a control of "sel", is not inside one, and
@@ -496,7 +515,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
     const native=e.tagName==='INPUT' && e.type in NATIVE_DATE;
     const base={node:identity(e),role:rname,label:native ? (name(e)||'Date')+' ('+NATIVE_DATE[e.type]+')' : name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height},
-      form,
+      form,searchOnly:searchFact(owner(e)),submitControl:!!e.form && ['submit','image'].includes(e.type),
       multiline:e.tagName==='TEXTAREA'||e.isContentEditable||e.getAttribute('aria-multiline')==='true',
       ...(e.tagName==='INPUT'?{inputType:String(e.type).toLowerCase()}:{}),
       ...(e.getAttribute('autocomplete')?{autocomplete:e.getAttribute('autocomplete').toLowerCase()}:{}),
@@ -567,7 +586,7 @@ export const SNAPSHOT_SCRIPT: string = String.raw`(() => {
   // documentElement is then the viewport height, so no scroll_down would show.
   const text=words.join('\n').slice(0,6000), height=(document.scrollingElement||document.documentElement).scrollHeight;
   const page_key=cache.pageKey(), guards={};
-  for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
+  for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node),true);
   // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
   const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
