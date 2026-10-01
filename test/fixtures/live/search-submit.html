@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Search submit checks</title></head><body>
+<script>
+const testCase = new URL(location.href).searchParams.get('case');
+const extra = testCase === 'offscreen' ? '<input aria-label="Email" style="display:block;margin-top:2000px">'
+  : testCase === 'password' ? '<input type="password" aria-label="Password">'
+  : testCase === 'recipient' ? '<input role="combobox" aria-label="Recipients">' : '';
+const label = testCase === 'save' ? 'Save' : 'SEND';
+const type = testCase === 'button' ? 'button' : 'submit';
+document.body.innerHTML = '<form id="search"><input placeholder="Search..." value="fish"><button type="'+type+'">'+label+'</button>'+extra+'</form>';
+if (testCase === 'external') document.body.insertAdjacentHTML('beforeend', '<input form="search" aria-label="Message" style="display:none">');
+</script>
+</body></html>

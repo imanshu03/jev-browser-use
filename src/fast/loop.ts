@@ -382,24 +382,24 @@ export function searchField(obs: Observation, focused: Action | undefined): bool
   return role === "searchbox" || focused?.inputType === "search" || SEARCH_LABEL.test(f.label);
 }
 
-/** Destructive words that the button of a search form can carry: CMFRI's search box submits with "SEND". */
-const SEARCH_BUTTON_WORDS = DESTRUCTIVE_WORDS.filter((w) => w !== "send");
-
-/**
- * A click on the button of a search form runs the search, as Enter in its field does: navigational. Every text field of
- * the button's form is a single-line search field, and the label has no destructive word other than "send".
- */
-export function searchFormButton(action: Action, label: string, obs: Observation): boolean {
-  const form = action.form ?? null;
-  return action.kind === "click" && form !== null && !hit(label, SEARCH_BUTTON_WORDS) && searchForm(form, obs);
+/** Only a plain Send or Submit label can use the search exception. */
+function searchSubmitLabel(label: string): boolean {
+  return /^(?:send|submit)$/i.test(label.trim()) || riskOf("CLICK", label) === "navigational";
 }
 
-/** Every text field of the form is a single-line search field, and it has at least one. */
+/** A native submit button can run without confirmation when the full form contains search fields only. */
+export function searchFormButton(action: Action, label: string, obs: Observation): boolean {
+  const form = action.form ?? null;
+  return action.kind === "click" && action.submitControl === true && action.searchOnly === true &&
+    form !== null && searchSubmitLabel(label) && searchForm(form, obs);
+}
+
+/** Check the observed fields as well as the full-form fact from the snapshot. */
 function searchForm(form: number, obs: Observation): boolean {
   const fields = obs.actions.filter((a) => a.kind === "fill" && (a.form ?? null) === form);
   return fields.length > 0 && fields.every((f) => {
     const box = f.role === "searchbox" || f.role === "combobox";
-    return (f.multiline !== true || box) && (box || f.inputType === "search" || SEARCH_LABEL.test(f.label));
+    return (f.multiline !== true || box) && (f.role === "searchbox" || f.inputType === "search" || SEARCH_LABEL.test(f.label));
   });
 }
 
@@ -1407,7 +1407,9 @@ export class FastRunner {
       // field runs the search, as a click on a link does: navigational, while no name says more and no option is picked.
       // In a form of search fields only, a submit name or "send" (CMFRI's "SEND") does not say more.
       const own = riskOf("CLICK", label);
-      const search = !pick && searchField(obs, focused) && (own === "navigational" || (focusForm != null && !hit(label, SEARCH_BUTTON_WORDS) && searchForm(focusForm, obs)));
+      const search = !pick && searchField(obs, focused) && (own === "navigational" ||
+        (focusForm != null && obs.focus?.searchOnly === true && riskOf("CLICK", obs.focus.label) === "navigational" &&
+          (obs.focus.submitLabel ?? "").split("|").every(searchSubmitLabel) && searchForm(focusForm, obs)));
       const risk: RiskClass = search ? "navigational" : own === "destructive" ? "destructive" : "submit";
       ctx.risk = risk;
       ctx.action = "press_key";

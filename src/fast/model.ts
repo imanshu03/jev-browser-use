@@ -159,7 +159,11 @@ export interface Action {
   delta?: number;                     // scroll pixels
   rect?: { x: number; y: number; w: number; h: number };
   // Field facts for assistant-written text. Set by the snapshot; never sent to Jev.
-  form?: number | null;               // identity(e.form || e.closest('form,[role="form"],dialog,[role="dialog"]'))
+  form?: number | null;
+  /** The full form has search fields only, including fields outside the viewport. */
+  searchOnly?: boolean;
+  /** A native submit control of this form. */
+  submitControl?: boolean;
   multiline?: boolean;                // TEXTAREA, isContentEditable, or aria-multiline="true"
   maxLength?: number;                 // INPUT/TEXTAREA maxLength when > 0
   inputType?: string;                 // INPUT type, lowercased; absent for other tags
@@ -237,6 +241,8 @@ export interface Observation {
     node: number; label: string; role: string | null; submitLabel: string; editable?: boolean; value?: string;
     /** The form or dialog of the focused element, with the same identity as `Action.form`. Never sent to Jev. */
     form?: number | null;
+    /** The full form has search fields only, including fields outside the viewport. */
+    searchOnly?: boolean;
     /** The name of the form's default button: its first submit control in tree order. "" when that control is disabled. Never sent to Jev. */
     submitDefault?: string;
     /** The focused element is a textarea, a contenteditable, or aria-multiline. Never sent to Jev. */
