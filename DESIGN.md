@@ -64,7 +64,7 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Vercel extraction, answer selection, verification | [src/extract.ts](src/extract.ts) |
 | Assistant-written text: field selection, the text request, reply checks, sanitizer | [src/fast/generate.ts](src/fast/generate.ts) |
 | Date fields: which task date fits a field, the part order, the date gate, the calendar range check | [src/fast/dates.ts](src/fast/dates.ts) |
-| One Chrome and one tab kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
+| One browser and its active page kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
 | MCP entry: stdio, stderr log, lazy setup, shutdown | [src/mcp/main.ts](src/mcp/main.ts) |
 | MCP tools, dialogs, and the rule for interactive sessions | [src/mcp/server.ts](src/mcp/server.ts) |
 | MCP run state, hand-offs, cancel, finished runs | [src/mcp/runs.ts](src/mcp/runs.ts) |

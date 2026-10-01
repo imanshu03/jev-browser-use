@@ -150,7 +150,7 @@ To change the saved key, start with `--reset-key`, or type `/key` in the chat. W
 
 Chat mode shows the browser window by default. Use `--headless` to hide it.
 
-The browser stays open between tasks. When a task names no URL and no known site, it continues on the current page. With `cdp` or `chromium`, chat keeps one browser and one tab. `/close`, `/headed`, `/profile`, `/quit`, Ctrl-C, and the end of input close the browser.
+The browser stays open between tasks. When a task names no URL and no known site, it continues on the current page. With `cdp` or `chromium`, chat keeps one browser and one active page. `/close`, `/headed`, `/profile`, `/quit`, Ctrl-C, and the end of input close the browser.
 
 ### Commands
 
@@ -444,7 +444,7 @@ The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT
 - Unsent text of more than 6,000 characters blocks the action with `needs_confirmation`, because one dialog cannot show it. Autonomous mode shows no dialog, so it does not block there.
 - One result is at most about 7,000 tokens. The server cuts the page text first, then the older step lines (down to 3), then answer strings (to 2,000 characters), then the audit of an autonomous run (texts, field lists, and old entries).
 - The server keeps the last 10 finished runs. A restart forgets them.
-- Chrome stays open between runs, with one tab. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
+- Chrome stays open between runs, with one active page and any parent tabs that it opened. A run with another engine, window mode, or profile closes it and launches a new one. Chrome closes on `close_browser`, after 30 minutes with no run, and when the server exits. While the server keeps a profile copy open, a CLI or chat run on the same profile fails. Call `close_browser` first, or use `profile: "none"`.
 - `cancel` waits 5 s for the run to stop, then closes Chrome.
 - After a run ends, the server keeps the Jev connection warm for 10 minutes.
 
