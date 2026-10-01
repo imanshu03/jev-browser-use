@@ -5,6 +5,7 @@
 // Contract of the scrape kit (see /tmp/jevscrape/build/SPEC.md, section C). The scrape-core unit owns this file and may
 // add optional fields; it must not rename or remove an exported name or a field, because the MCP tools use them.
 import * as z from "zod";
+import { DEFAULT_PROFILE_NAME } from "../types.js";
 
 /** Exit codes of jev-scrape. */
 export const SCRAPE_EXIT = { ok: 0, blocked: 2, failed: 3, usage: 4 } as const;
@@ -307,7 +308,7 @@ export const ScraperSpec = z.strictObject({
   want: z.string().max(2000),
   /** Param defaults. A run can override each one. */
   params: z.record(ParamName, z.string().max(500)),
-  /** The Chrome profile name or directory. Default "Parallelloop". */
+  /** The Chrome profile name or directory; "none" is a temporary profile. Absent: "Parallelloop" when it exists, else "none". */
   profile: z.string().min(1).max(100).optional(),
   browser: z.enum(["chrome", "edge", "brave", "chromium"]).optional(),
   geo: GeoSchema.optional(),
@@ -419,4 +420,15 @@ export function parseDraft(data: unknown): ExtractDraft {
 /** zod issues as `path: message` lines, at most 12. */
 export function issuesText(e: z.ZodError): string {
   return e.issues.slice(0, 12).map((i) => `${i.path.length > 0 ? i.path.join(".") : "(root)"}: ${i.message}`).join("\n");
+}
+
+/**
+ * The profile that a scraper opens: the file's profile, else the default profile when this machine has it, else "none"
+ * (a temporary profile). `fallback` is true when the default profile is missing, so the caller can log the choice.
+ */
+export function scraperProfile(profile: string | undefined, profiles: readonly { name: string; directory: string }[]): { want: string; fallback: boolean } {
+  if (profile !== undefined) return { want: profile, fallback: false };
+  const low = DEFAULT_PROFILE_NAME.toLowerCase();
+  const known = profiles.some((p) => p.name.toLowerCase() === low || p.directory.toLowerCase() === low);
+  return known ? { want: DEFAULT_PROFILE_NAME, fallback: false } : { want: "none", fallback: true };
 }
