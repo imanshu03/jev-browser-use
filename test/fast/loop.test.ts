@@ -2,7 +2,7 @@ import type { ChoiceQuestion, Questions } from "@typesafe-ai/sdk";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { FastRunner, actionKey, riskOf, searchField } from "../../src/fast/loop.js";
+import { FastRunner, actionKey, riskOf, searchField, searchFormButton } from "../../src/fast/loop.js";
 import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
 import type { Action, DateInfo, Observation, Page, Popup, TokenFacts, UnsentText } from "../../src/fast/model.js";
@@ -4539,6 +4539,58 @@ describe("GO_BACK and Enter in a search field (ported behavior of browser-use/je
     expect(f({ label: "Search or ask AI anything...", multiline: true })).toBe(false);
     expect(f({ label: "Email" })).toBe(false);
     expect(f({ label: "Research notes" })).toBe(false);
+  });
+
+  // CMFRI's home page: <input name="search_home" placeholder="Search..."> and <input type="submit" value="SEND"> in one form.
+  const CMFRI = obs("https://www.cmfri.org.in/", [
+    el("e1", "fill", "Search...", "textbox", { form: 7, value: "landings" }),
+    el("e2", "click", "SEND", "button", { form: 7 }),
+    el("e3", "click", "Home", "link"),
+  ], "CMFRI");
+
+  it("searchFormButton: a form whose only text fields are single-line search fields; no destructive word but send", () => {
+    const send = CMFRI.actions[1] as Action;
+    expect(searchFormButton(send, "SEND", CMFRI)).toBe(true);
+    expect(searchFormButton(send, "Search", obs(CMFRI.url, [el("e1", "fill", "q", "searchbox", { form: 7 }), send], "x"))).toBe(true);
+    expect(searchFormButton(send, "Go", obs(CMFRI.url, [el("e1", "fill", "q", "textbox", { form: 7, inputType: "search" }), send], "x"))).toBe(true);
+    // A real destructive word, another field in the form, a message field, no form, or a field in another form: not a search.
+    expect(searchFormButton(send, "Delete", CMFRI)).toBe(false);
+    expect(searchFormButton(send, "SEND", obs(CMFRI.url, [...CMFRI.actions, el("e4", "fill", "Email", "textbox", { form: 7 })], "x"))).toBe(false);
+    expect(searchFormButton(send, "Send", obs(CMFRI.url, [el("e1", "fill", "Search or ask AI anything...", "textbox", { form: 7, multiline: true }), send], "x"))).toBe(false);
+    expect(searchFormButton({ ...send, form: null }, "SEND", CMFRI)).toBe(false);
+    expect(searchFormButton(send, "SEND", obs(CMFRI.url, [el("e1", "fill", "Search...", "textbox", { form: 8 }), send], "x"))).toBe(false);
+  });
+
+  it("a click on SEND in a search form runs as navigational; SEND in a message form stays destructive", async () => {
+    const sendClick = (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "CLICK", confidence: 0.9, probabilities: { CLICK: 0.9, DONE: 0.1 } }, click_target: { choice: idx(q, "click_target", "SEND"), confidence: 0.9 } });
+    const t = setup("open https://www.cmfri.org.in/ and search for landings", { pages: { s: CMFRI }, start: "s" }, (name, _s, q) => (name === "step" ? sendClick(q) : {}), { maxSteps: 1 });
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ operation: "CLICK", risk: "navigational", result: "ok" });
+    expect(t.page.calls.some((c) => c.op === "act" && c.id === "e2")).toBe(true);
+    const contact = obs("https://www.cmfri.org.in/contact", [el("e1", "fill", "Message", "textbox", { form: 7, value: "hi", multiline: true }), el("e2", "click", "SEND", "button", { form: 7 })], "Contact");
+    const u = setup("open https://www.cmfri.org.in/contact and send hi", { pages: { c: contact }, start: "c" }, (name, _s, q) => (name === "step" ? sendClick(q) : {}), { maxSteps: 1 });
+    const ur = await u.runner.run();
+    expect(ur.steps[0]?.risk).toBe("destructive");
+  });
+
+  it("Enter in a search form with a SEND button is navigational, so a low Enter runs and no SEND click stands in for it", async () => {
+    const focused = (page: Observation, label: string): Observation => ({ ...page, focus: { node: 1, label, role: "textbox", submitLabel: "SEND", editable: true, value: "landings", form: 7 } });
+    const withNodes = (page: Observation): Observation => ({ ...page, actions: page.actions.map((a, i) => ({ ...a, node: i + 1 })) });
+    const search = focused(withNodes(CMFRI), "Search...");
+    const enter = { page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.9, probabilities: { PRESS_ENTER: 0.9, CLICK: 0.1 } } };
+    const t = setup("open https://www.cmfri.org.in/ and search for landings", { pages: { s: search }, start: "s" }, (name) => (name === "step" ? enter : {}), { maxSteps: 1 });
+    const r = await t.runner.run();
+    expect(r.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "navigational", result: "ok" });
+    // The live CMFRI run: Enter at 0.46 was below the submit gate, and the SEND click that stood in for it was destructive.
+    const low = (q: Questions): PartialAnswers => ({ page_kind: "task_page", operation: { choice: "PRESS_ENTER", confidence: 0.46, probabilities: { PRESS_ENTER: 0.46, CLICK: 0.54 } }, click_target: { choice: idx(q, "click_target", "SEND"), confidence: 0.94 } });
+    const u = setup("open https://www.cmfri.org.in/ and search for landings", { pages: { s: search }, start: "s" }, (name, _s, q) => (name === "step" ? low(q) : {}), { maxSteps: 1 });
+    const ur = await u.runner.run();
+    expect(ur.steps[0]).toMatchObject({ operation: "PRESS_KEY", risk: "navigational", result: "ok" });
+    // Enter in a contact form that has a SEND button stays destructive.
+    const contact = focused(withNodes(obs(CMFRI.url, [el("e1", "fill", "Your name", "textbox", { form: 7, value: "Ann" }), el("e2", "click", "SEND", "button", { form: 7 })], "Contact")), "Your name");
+    const v = setup("open https://www.cmfri.org.in/ and send it", { pages: { c: contact }, start: "c" }, (name) => (name === "step" ? enter : {}), { maxSteps: 1 });
+    const vr = await v.runner.run();
+    expect(vr.steps[0]?.risk).toBe("destructive");
   });
 });
 

@@ -382,6 +382,27 @@ export function searchField(obs: Observation, focused: Action | undefined): bool
   return role === "searchbox" || focused?.inputType === "search" || SEARCH_LABEL.test(f.label);
 }
 
+/** Destructive words that the button of a search form can carry: CMFRI's search box submits with "SEND". */
+const SEARCH_BUTTON_WORDS = DESTRUCTIVE_WORDS.filter((w) => w !== "send");
+
+/**
+ * A click on the button of a search form runs the search, as Enter in its field does: navigational. Every text field of
+ * the button's form is a single-line search field, and the label has no destructive word other than "send".
+ */
+export function searchFormButton(action: Action, label: string, obs: Observation): boolean {
+  const form = action.form ?? null;
+  return action.kind === "click" && form !== null && !hit(label, SEARCH_BUTTON_WORDS) && searchForm(form, obs);
+}
+
+/** Every text field of the form is a single-line search field, and it has at least one. */
+function searchForm(form: number, obs: Observation): boolean {
+  const fields = obs.actions.filter((a) => a.kind === "fill" && (a.form ?? null) === form);
+  return fields.length > 0 && fields.every((f) => {
+    const box = f.role === "searchbox" || f.role === "combobox";
+    return (f.multiline !== true || box) && (box || f.inputType === "search" || SEARCH_LABEL.test(f.label));
+  });
+}
+
 /** True for a CDP transport error or a Chrome that went away. Named by convention; the browser layer is not imported here. */
 function isBrowserError(e: unknown, chrome: Chrome | null): boolean {
   const name = (e as { name?: string } | null)?.name ?? "";
@@ -1384,8 +1405,10 @@ export class FastRunner {
       const label = [obs.focus?.label, obs.focus?.submitLabel, pick ? `picks ${pick.label}` : ""].filter(Boolean).join(" | ");
       // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit. Enter in a search
       // field runs the search, as a click on a link does: navigational, while no name says more and no option is picked.
+      // In a form of search fields only, a submit name or "send" (CMFRI's "SEND") does not say more.
       const own = riskOf("CLICK", label);
-      const risk: RiskClass = own === "destructive" ? "destructive" : !pick && own === "navigational" && searchField(obs, focused) ? "navigational" : "submit";
+      const search = !pick && searchField(obs, focused) && (own === "navigational" || (focusForm != null && !hit(label, SEARCH_BUTTON_WORDS) && searchForm(focusForm, obs)));
+      const risk: RiskClass = search ? "navigational" : own === "destructive" ? "destructive" : "submit";
       ctx.risk = risk;
       ctx.action = "press_key";
       ctx.value = "Enter";
@@ -1476,7 +1499,7 @@ export class FastRunner {
     ctx.target = { ref: action.id, role: action.role ?? "", name: t.label, under: "" };
     ctx.targetConf = t.conf; ctx.runnerUp = t.runnerUp;
     ctx.action = ACTION_OF[op] ?? "none";
-    const own = riskOf(op, t.label);
+    const own = op === "CLICK" && searchFormButton(action, t.label, obs) ? "navigational" : riskOf(op, t.label);
     const risk = floor !== undefined && RISK_ORDER.indexOf(floor) > RISK_ORDER.indexOf(own) ? floor : own;
     ctx.risk = risk;
     const bans = this.bansFor(obs.url);
