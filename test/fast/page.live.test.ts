@@ -1533,3 +1533,49 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("date fields (live Chrome)", ()
     expect((await set("Date of birth (D M YYYY)", "1990-03-07")).text).toContain("Loaded yy 1990");
   });
 });
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page new tabs (live Chrome)", () => {
+  const newtabUrl = pathToFileURL(path.join(FIXTURES, "newtab.html")).href;
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  const pageTabs = async (): Promise<string[]> => {
+    const t = await chrome.client.send("Target.getTargets");
+    return (t["targetInfos"] as { type: string; url: string }[]).filter((x) => x.type === "page").map((x) => x.url);
+  };
+
+  for (const [label, via] of [["Open page two in a new tab", "blank"], ["Open page two without opener", "noopener"], ["Open page two with script", "script"]] as const) {
+    it(`"${label}" loads the new tab's page in the run's tab and leaves no new tab`, async () => {
+      await page.navigate(newtabUrl, NAV_MS);
+      const before = (await pageTabs()).length;
+      const obs = await page.observe();
+      await page.act(find(obs, "click", label), obs);
+      const after = await observeUntil(page, (o) => o.url.includes(`page2.html?via=${via}`));
+      expect(after.url).toContain(`page2.html?via=${via}`);
+      expect(after.title).toBe("Page two");
+      expect((await pageTabs()).length).toBe(before);
+    });
+  }
+
+  it("closes a new tab that never gets a URL and stays on the page", async () => {
+    await page.navigate(newtabUrl, NAV_MS);
+    const before = (await pageTabs()).length;
+    const obs = await page.observe();
+    await page.act(find(obs, "click", "Open an empty window"), obs);
+    const after = await page.observe();
+    expect(after.url).toBe(newtabUrl);
+    expect((await pageTabs()).length).toBe(before);
+  });
+});

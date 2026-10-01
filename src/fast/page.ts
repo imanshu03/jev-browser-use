@@ -37,6 +37,8 @@ const CAUSAL_KINDS: ReadonlySet<string> = new Set(["fill", "click"]);
 
 /** Request types that the causal settle waits for. A document counts only in the main frame: a navigation. */
 const COUNTED_REQUESTS: ReadonlySet<string> = new Set(["Fetch", "XHR"]);
+/** How long the follow of a new tab waits for that tab to get a URL (window.open() starts on about:blank). */
+const OPENED_URL_MS = 2_000;
 
 /** JSON with keys sorted at every level. The fingerprint must not depend on key order. */
 export function stableStringify(value: unknown): string {
@@ -135,6 +137,20 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   };
   const offFinished = client.on("Network.loadingFinished", ended);
   const offFailed = client.on("Network.loadingFailed", ended);
+  // Tabs that this tab opened (a target=_blank link, window.open), by target id, with their last known URL.
+  const opened = new Map<string, string>();
+  // Tabs that followOpened closed: a late targetInfoChanged event must not add them again.
+  const handled = new Set<string>();
+  const onTarget = (params: Record<string, unknown>): void => {
+    const info = params["targetInfo"] as { targetId?: unknown; type?: unknown; url?: unknown; openerId?: unknown } | undefined;
+    if (!info || info.type !== "page" || info.openerId !== targetId || handled.has(String(info.targetId))) return;
+    opened.set(String(info.targetId), String(info.url ?? ""));
+  };
+  const offCreated = client.on("Target.targetCreated", onTarget);
+  const offChanged = client.on("Target.targetInfoChanged", onTarget);
+  const offDestroyed = client.on("Target.targetDestroyed", (params) => { opened.delete(String(params["targetId"])); });
+  // Target events come only with discovery on. Only tabs whose opener is this tab are used, so a user's own tabs (--cdp) are never touched.
+  await client.send("Target.setDiscoverTargets", { discover: true }).catch((e: Error) => opts.log.debug(`target discovery not enabled: ${e.message}`));
 
   async function call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const start = Date.now();
@@ -174,6 +190,11 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
   /** The settle that the last input left for the next read of the page. `stop`: an early observe (see causalSettle). */
   async function settlePending(stop = false): Promise<void> {
+    await settleInput(stop);
+    await followOpened();
+  }
+
+  async function settleInput(stop: boolean): Promise<void> {
     if (early !== null) await causalSettle();
     if (pendingSettle === undefined) return;
     const action = pendingSettle;
@@ -182,6 +203,34 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     causalPending = false;
     if (causal) await causalSettle(action, stop);
     else await evaluate(settleScript(action), true);
+  }
+
+  /**
+   * The run reads one tab. When an input opened new tabs, wait up to OPENED_URL_MS for a URL, close them, and load the
+   * last URL in this tab with this page as referrer. A page that needs window.opener (a sign-in popup) loses it.
+   */
+  async function followOpened(): Promise<void> {
+    if (opened.size === 0) return;
+    const blank = (u: string): boolean => u === "" || u === "about:blank";
+    const deadline = Date.now() + OPENED_URL_MS;
+    while (opened.size > 0 && [...opened.values()].every(blank) && Date.now() < deadline) await settleSleep(20);
+    const tabs = [...opened.entries()];
+    opened.clear();
+    for (const [id] of tabs) {
+      handled.add(id);
+      await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
+    }
+    const url = tabs.map(([, u]) => u).reverse().find((u) => !blank(u));
+    if (url === undefined) {
+      if (tabs.length > 0) opts.log.warn(`closed ${tabs.length} new tab(s) that had no URL after ${OPENED_URL_MS} ms`);
+      return;
+    }
+    const from = await evaluate(LOCATION_SCRIPT);
+    const referrer = typeof from.value === "string" && /^https?:/.test(from.value) ? from.value : undefined;
+    opts.log.info(`the action opened a new tab; loading ${url.slice(0, 160)} in the run's tab`);
+    const res = await call("Page.navigate", { url, ...(referrer ? { referrer } : {}) });
+    if (typeof res["errorText"] === "string" && res["errorText"]) { opts.log.warn(`new tab URL did not load: ${res["errorText"]}`); return; }
+    await waitReady(opts.settleTimeoutMs);
   }
 
   /** Scroll position, scroll height, viewport, width, and element count. StalePage while the document navigates. */
@@ -722,6 +771,11 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       offRequest();
       offFinished();
       offFailed();
+      offCreated();
+      offChanged();
+      offDestroyed();
+      for (const id of opened.keys()) await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
+      opened.clear();
       await chrome.closeTarget(targetId);
     },
   };
