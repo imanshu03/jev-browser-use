@@ -135,6 +135,18 @@ describe("openPage new tabs", () => {
     expect(c.sent.filter((s) => s.method === "Page.navigate")).toHaveLength(0);
   });
 
+  it("does not offer Back to a parent tab that has closed", async () => {
+    const c = scriptedChrome(answer);
+    const page = await openPage(c.chrome, { settleTimeoutMs: 200, log: fakeLogger() });
+    c.client.emit("Target.targetCreated", tab("p1", "https://example.test/pfz", "t1"));
+    await page.observe();
+    expect(await page.canGoBack!()).toBe(true);
+    c.client.emit("Target.targetDestroyed", { targetId: "t1" });
+    expect(await page.canGoBack!()).toBe(false);
+    await page.back(200);
+    await page.close();
+  });
+
   it("never touches tabs that another tab opened, nor non-page targets", async () => {
     const c = scriptedChrome(answer);
     const page = await openPage(c.chrome, { settleTimeoutMs: 200, log: fakeLogger() });

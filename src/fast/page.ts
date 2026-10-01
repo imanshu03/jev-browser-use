@@ -149,7 +149,12 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   };
   const offCreated = client.on("Target.targetCreated", onTarget);
   const offChanged = client.on("Target.targetInfoChanged", onTarget);
-  const offDestroyed = client.on("Target.targetDestroyed", (params) => { opened.delete(String(params["targetId"])); });
+  const offDestroyed = client.on("Target.targetDestroyed", (params) => {
+    const id = String(params["targetId"]);
+    opened.delete(id);
+    const parent = parents.findIndex((p) => p.targetId === id);
+    if (parent >= 0) parents.splice(parent, 1);
+  });
   // Target events come only with discovery on. Only tabs whose opener is this tab are used, so a user's own tabs (--cdp) are never touched.
   await client.send("Target.setDiscoverTargets", { discover: true }).catch((e: Error) => opts.log.debug(`target discovery not enabled: ${e.message}`));
 
