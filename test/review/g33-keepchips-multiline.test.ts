@@ -41,7 +41,8 @@ describe("group 33: a keepChips append with a multi-line assistant text", () => 
       async close() { /* nothing */ },
     };
     const chrome: Chrome = { client, userDataDir: null, profile: { directory: null, copyDir: null, copied: false, copyMs: 0 }, launchMs: 0,
-      async newTarget() { return { targetId: "t1", sessionId: "s1" }; }, async closeTarget() { /* nothing */ }, async close() { /* nothing */ } };
+      async newTarget() { return { targetId: "t1", sessionId: "s1" }; },
+    async adoptTarget(targetId) { return { targetId, sessionId: `s-${targetId}` }; }, async closeTarget() { /* nothing */ }, async close() { /* nothing */ } };
     const page = await openPage(chrome, { settleTimeoutMs: 500, log: fakeLogger() });
     const o = await page.observe();
     const composer: Action = { id: "e1", kind: "fill", node: 7, role: "textbox", label: PLACEHOLDER, value: "@Ann Lee", multiline: true, mentions: ["Ann Lee"], bareText: "" };

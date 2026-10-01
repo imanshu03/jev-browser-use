@@ -485,9 +485,10 @@ export function userAgentMetadata(product: unknown, brand: string | null, platfo
  * reports that point: Browser.grantPermissions (geolocation), then Emulation.setGeolocationOverride (accuracy 50 m when
  * absent).
  */
-export async function attachTarget(client: CdpClient, url: string, opts: AttachTargetOptions): Promise<{ targetId: string; sessionId: string }> {
-  const created = await client.send("Target.createTarget", { url, newWindow: false, ...(opts.attached ? { background: true } : {}) });
-  const targetId = String(created["targetId"]);
+export async function attachTarget(client: CdpClient, url: string, opts: AttachTargetOptions, existingTargetId?: string): Promise<{ targetId: string; sessionId: string }> {
+  const created = existingTargetId === undefined
+    ? await client.send("Target.createTarget", { url, newWindow: false, ...(opts.attached ? { background: true } : {}) }) : null;
+  const targetId = existingTargetId ?? String(created?.["targetId"]);
   const attached = await client.send("Target.attachToTarget", { targetId, flatten: true });
   const sessionId = String(attached["sessionId"]);
   // No Runtime.enable: evaluations need no domain, and it streams every console message of the page to this process.
@@ -539,6 +540,10 @@ async function attachChrome(opts: ChromeLaunchOptions, port: number): Promise<Ch
       const t = await attachTarget(client, url, { headed: opts.headed, attached: true, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo });
       owned.add(t.targetId);
       return t;
+    },
+    async adoptTarget(targetId) {
+      owned.add(targetId);
+      return attachTarget(client, "", { headed: opts.headed, attached: true, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo }, targetId);
     },
     async closeTarget(targetId) {
       if (!owned.delete(targetId)) return;
@@ -674,6 +679,10 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
       const t = await attachTarget(client, url, { headed: opts.headed, attached: false, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo });
       owned.add(t.targetId);
       return t;
+    },
+    async adoptTarget(targetId) {
+      owned.add(targetId);
+      return attachTarget(client, "", { headed: opts.headed, attached: false, ...(userAgent ? { userAgent } : {}), ...(hints ? { userAgentMetadata: hints } : {}), ...geo }, targetId);
     },
     async closeTarget(targetId) {
       if (!owned.delete(targetId)) return;

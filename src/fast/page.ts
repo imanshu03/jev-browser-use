@@ -37,6 +37,8 @@ const CAUSAL_KINDS: ReadonlySet<string> = new Set(["fill", "click"]);
 
 /** Request types that the causal settle waits for. A document counts only in the main frame: a navigation. */
 const COUNTED_REQUESTS: ReadonlySet<string> = new Set(["Fetch", "XHR"]);
+/** How long the follow of a new tab waits for that tab to get a URL (window.open() starts on about:blank). */
+const OPENED_URL_MS = 2_000;
 
 /** JSON with keys sorted at every level. The fingerprint must not depend on key order. */
 export function stableStringify(value: unknown): string {
@@ -91,7 +93,8 @@ export function dialogAccepts(type: unknown): boolean {
 }
 
 export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page> {
-  const { targetId, sessionId } = await chrome.newTarget("about:blank");
+  let { targetId, sessionId } = await chrome.newTarget("about:blank");
+  const parents: { targetId: string; sessionId: string }[] = [];
   const client = chrome.client;
   const stats = { browserMs: 0, calls: 0 };
   let pendingSettle: Action | null | undefined; // undefined = nothing pending; null = generic settle
@@ -110,12 +113,12 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   // A JavaScript dialog blocks the renderer: no input event and no evaluation answers while it is open.
   // Answer it at once so a click that opens alert() or confirm() cannot hang the run.
   const offDialog = client.on("Page.javascriptDialogOpening", (params, sid) => {
-    if (sid !== sessionId) return;
+    if (sid !== sessionId && !parents.some((p) => p.sessionId === sid)) return;
     const type = params["type"];
     const accept = dialogAccepts(type);
     const message = String(params["message"] ?? "").replace(/\s+/g, " ").slice(0, 200);
     opts.log.warn(`dialog ${String(type)} ${accept ? "accepted" : "dismissed"}: ${message}`);
-    call("Page.handleJavaScriptDialog", { accept }).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
+    call("Page.handleJavaScriptDialog", { accept }, sid).catch((e: Error) => opts.log.debug(`dialog not handled: ${e.message}`));
   });
   const offRequest = client.on("Network.requestWillBeSent", (params, sid) => {
     if (sid !== sessionId || !net.armed) return;
@@ -135,12 +138,31 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
   };
   const offFinished = client.on("Network.loadingFinished", ended);
   const offFailed = client.on("Network.loadingFailed", ended);
+  // Tabs that this tab opened (a target=_blank link, window.open), by target id, with their last known URL.
+  const opened = new Map<string, string>();
+  // Tabs that followOpened closed: a late targetInfoChanged event must not add them again.
+  const handled = new Set<string>();
+  const onTarget = (params: Record<string, unknown>): void => {
+    const info = params["targetInfo"] as { targetId?: unknown; type?: unknown; url?: unknown; openerId?: unknown } | undefined;
+    if (!info || info.type !== "page" || info.openerId !== targetId || handled.has(String(info.targetId))) return;
+    opened.set(String(info.targetId), String(info.url ?? ""));
+  };
+  const offCreated = client.on("Target.targetCreated", onTarget);
+  const offChanged = client.on("Target.targetInfoChanged", onTarget);
+  const offDestroyed = client.on("Target.targetDestroyed", (params) => {
+    const id = String(params["targetId"]);
+    opened.delete(id);
+    const parent = parents.findIndex((p) => p.targetId === id);
+    if (parent >= 0) parents.splice(parent, 1);
+  });
+  // Target events come only with discovery on. Only tabs whose opener is this tab are used, so a user's own tabs (--cdp) are never touched.
+  await client.send("Target.setDiscoverTargets", { discover: true }).catch((e: Error) => opts.log.debug(`target discovery not enabled: ${e.message}`));
 
-  async function call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  async function call(method: string, params: Record<string, unknown> = {}, sid = sessionId): Promise<Record<string, unknown>> {
     const start = Date.now();
     stats.calls += 1;
     try {
-      return await client.send(method, params, sessionId);
+      return await client.send(method, params, sid);
     } finally {
       stats.browserMs += Date.now() - start;
     }
@@ -174,6 +196,11 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
   /** The settle that the last input left for the next read of the page. `stop`: an early observe (see causalSettle). */
   async function settlePending(stop = false): Promise<void> {
+    await settleInput(stop);
+    await followOpened();
+  }
+
+  async function settleInput(stop: boolean): Promise<void> {
     if (early !== null) await causalSettle();
     if (pendingSettle === undefined) return;
     const action = pendingSettle;
@@ -182,6 +209,31 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
     causalPending = false;
     if (causal) await causalSettle(action, stop);
     else await evaluate(settleScript(action), true);
+  }
+
+  /** Follow the opened page without repeating its request or losing its document and opener. */
+  async function followOpened(): Promise<void> {
+    if (opened.size === 0) return;
+    const blank = (u: string): boolean => u === "" || u === "about:blank";
+    const deadline = Date.now() + OPENED_URL_MS;
+    while (opened.size > 0 && [...opened.values()].every(blank) && Date.now() < deadline) await settleSleep(20);
+    const tabs = [...opened.entries()];
+    opened.clear();
+    const next = [...tabs].reverse().find(([, url]) => !blank(url));
+    for (const [id] of tabs) {
+      handled.add(id);
+      if (id !== next?.[0]) await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
+    }
+    if (!next) {
+      if (tabs.length > 0) opts.log.warn(`closed ${tabs.length} new tab(s) that had no URL after ${OPENED_URL_MS} ms`);
+      return;
+    }
+    const adopted = await chrome.adoptTarget(next[0]);
+    parents.push({ targetId, sessionId });
+    ({ targetId, sessionId } = adopted);
+    acceptedDoc = null;
+    opts.log.info(`the action opened a new tab; following ${next[1].slice(0, 160)}`);
+    await waitReady(opts.settleTimeoutMs);
   }
 
   /** Scroll position, scroll height, viewport, width, and element count. StalePage while the document navigates. */
@@ -643,13 +695,18 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
 
     async back(timeoutMs) {
       const previous = await previousEntry();
-      if (!previous) return;
-      await call("Page.navigateToHistoryEntry", { entryId: previous.id });
+      if (!previous) {
+        const parent = parents.pop();
+        if (!parent) return;
+        await chrome.closeTarget(targetId);
+        ({ targetId, sessionId } = parent);
+        acceptedDoc = null;
+      } else await call("Page.navigateToHistoryEntry", { entryId: previous.id });
       await waitReady(timeoutMs);
     },
 
     async canGoBack() {
-      return (await previousEntry()) !== null;
+      return (await previousEntry()) !== null || parents.length > 0;
     },
 
     async url() {
@@ -722,7 +779,13 @@ export async function openPage(chrome: Chrome, opts: PageOptions): Promise<Page>
       offRequest();
       offFinished();
       offFailed();
+      offCreated();
+      offChanged();
+      offDestroyed();
+      for (const id of opened.keys()) await client.send("Target.closeTarget", { targetId: id }).catch(() => undefined);
+      opened.clear();
       await chrome.closeTarget(targetId);
+      for (const parent of parents.splice(0)) await chrome.closeTarget(parent.targetId);
     },
   };
   return page;

@@ -131,6 +131,7 @@ export function fakeChrome(): FakeChrome {
     },
     userDataDir: "/tmp/jev-chrome-fake", profile: { directory: null, copyDir: null, copied: false, copyMs: 0 }, launchMs: 1,
     async newTarget() { return { targetId: "t1", sessionId: "s1" }; },
+    async adoptTarget(targetId: string) { return { targetId, sessionId: `s-${targetId}` }; },
     async closeTarget() { /* nothing */ },
     async close() { c.closes += 1; c.client.closed = true; },
   };

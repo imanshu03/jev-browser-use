@@ -66,7 +66,7 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Vercel extraction, answer selection, verification | [src/extract.ts](src/extract.ts) |
 | Assistant-written text: field selection, the text request, reply checks, sanitizer | [src/fast/generate.ts](src/fast/generate.ts) |
 | Date fields: which task date fits a field, the part order, the date gate, the calendar range check | [src/fast/dates.ts](src/fast/dates.ts) |
-| One Chrome and one tab kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
+| One browser and its active page kept between MCP runs | [src/fast/session.ts](src/fast/session.ts) |
 | MCP entry: stdio, stderr log, lazy setup, shutdown | [src/mcp/main.ts](src/mcp/main.ts) |
 | MCP tools, dialogs, and the rule for interactive sessions | [src/mcp/server.ts](src/mcp/server.ts) |
 | MCP run state, hand-offs, cancel, finished runs | [src/mcp/runs.ts](src/mcp/runs.ts) |
@@ -84,6 +84,8 @@ The `vercel` engine invokes the installed `agent-browser` CLI. All three engines
 | Scraper files, `jev-scrape` arguments, browser, output | [src/scrape/store.ts](src/scrape/store.ts), [src/scrape/cli.ts](src/scrape/cli.ts), [src/scrape/launch.ts](src/scrape/launch.ts), [src/scrape/csv.ts](src/scrape/csv.ts), [bin/jev-scrape.js](bin/jev-scrape.js) |
 | Plugin bundle build and development launcher | [scripts/build-mcp.mjs](scripts/build-mcp.mjs), [bin/jev-mcp.js](bin/jev-mcp.js) |
 | Plugin manifests, MCP configurations, skill, marketplaces | [plugin/](plugin/), [.claude-plugin/marketplace.json](.claude-plugin/marketplace.json), [.agents/plugins/marketplace.json](.agents/plugins/marketplace.json) |
+
+When an action opens a page target, the page layer attaches to that target through the same CDP connection. It keeps the opened document, request, and opener. Parent targets stay under browser ownership. Back returns to the parent when the opened tab has no earlier web page; close removes the active tab and its parents. Attach mode follows only targets opened by the run.
 
 The direct loop depends on the `Page`, `Chrome`, and `Oracle` interfaces. Browser modules perform I/O; policy modules construct questions and interpret answers. Keep this separation so decision tests can run without Chrome or the API.
 

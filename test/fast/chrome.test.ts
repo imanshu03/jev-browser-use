@@ -243,6 +243,12 @@ describe("attachTarget", () => {
     expect(sent.map((s) => s.method)).not.toContain("Emulation.setDeviceMetricsOverride");
     expect(sent.filter((s) => s.sessionId === "S").map((s) => s.method)).toEqual(["Page.enable", "Emulation.setFocusEmulationEnabled"]);
   });
+  it("attaches to an existing target without creating a page or sending its request again", async () => {
+    const { c, sent } = client();
+    expect(await attachTarget(c, "", { headed: false, attached: true }, "opened")).toEqual({ targetId: "opened", sessionId: "S" });
+    expect(sent.some((x) => x.method === "Target.createTarget" || x.method === "Page.navigate")).toBe(false);
+    expect(sent.find((x) => x.method === "Target.attachToTarget")?.params).toEqual({ targetId: "opened", flatten: true });
+  });
   it("a headless user agent goes out without HeadlessChrome; a headed one keeps Chrome's own", async () => {
     const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.8037.57 Safari/537.36";
     expect(plainUserAgent(ua)).toBe(ua.replace("HeadlessChrome", "Chrome"));

@@ -1533,3 +1533,111 @@ describe.skipIf(process.env["JEV_LIVE"] !== "1")("date fields (live Chrome)", ()
     expect((await set("Date of birth (D M YYYY)", "1990-03-07")).text).toContain("Loaded yy 1990");
   });
 });
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("fast page new tabs (live Chrome)", () => {
+  const newtabUrl = pathToFileURL(path.join(FIXTURES, "newtab.html")).href;
+  let chrome: Chrome;
+  let page: Page;
+  const log = fakeLogger();
+
+  beforeAll(async () => {
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    if (chrome?.pid && processAlive(chrome.pid)) process.kill(chrome.pid, "SIGKILL");
+  });
+
+  const pageTabs = async (): Promise<string[]> => {
+    const t = await chrome.client.send("Target.getTargets");
+    return (t["targetInfos"] as { type: string; url: string }[]).filter((x) => x.type === "page").map((x) => x.url);
+  };
+
+  for (const [label, via] of [["Open page two in a new tab", "blank"], ["Open page two without opener", "noopener"], ["Open page two with script", "script"]] as const) {
+    it(`"${label}" follows the opened page and returns to its parent with Back`, async () => {
+      await page.navigate(newtabUrl, NAV_MS);
+      const before = (await pageTabs()).length;
+      const obs = await page.observe();
+      await page.act(find(obs, "click", label), obs);
+      const after = await observeUntil(page, (o) => o.url.includes(`page2.html?via=${via}`));
+      expect(after.url).toContain(`page2.html?via=${via}`);
+      expect(after.title).toBe("Page two");
+      expect((await pageTabs()).length).toBe(before + 1);
+      expect(await page.canGoBack!()).toBe(true);
+      await page.back(NAV_MS);
+      expect((await page.observe()).url).toBe(newtabUrl);
+      expect((await pageTabs()).length).toBe(before);
+    });
+  }
+
+  it("closes a new tab that never gets a URL and stays on the page", async () => {
+    await page.navigate(newtabUrl, NAV_MS);
+    const before = (await pageTabs()).length;
+    const obs = await page.observe();
+    await page.act(find(obs, "click", "Open an empty window"), obs);
+    const after = await page.observe();
+    expect(after.url).toBe(newtabUrl);
+    expect((await pageTabs()).length).toBe(before);
+  });
+});
+
+describe.skipIf(process.env["JEV_LIVE"] !== "1")("opened documents keep their request and state (live Chrome)", () => {
+  let server: http.Server;
+  let chrome: Chrome;
+  let page: Page;
+  let base: string;
+  const requests: { method: string; body: string }[] = [];
+  const log = fakeLogger();
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      res.setHeader("Content-Type", "text/html");
+      if (req.url === "/source") {
+        res.end(`<title>Source</title><script>window.runState='kept'</script>
+          <form action="/result" method="post" target="_blank"><input name="query" value="fish"><button>Search</button></form>
+          <a href="/result" target="_blank">Open results</a>
+          <button onclick="const w=window.open('/result'); w.addEventListener('load',()=>w.document.body.append(' script state kept'))">Open scripted results</button>`);
+        return;
+      }
+      if (req.url !== "/result") { res.writeHead(404); res.end(); return; }
+      let body = "";
+      req.on("data", (chunk) => { body += String(chunk); });
+      req.on("end", () => {
+        requests.push({ method: req.method ?? "", body });
+        res.end(`<title>Results</title><p>${req.method} ${body}</p><script>document.body.append(' opener '+(window.opener?.runState??'missing'))</script>`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    chrome = await launchChrome({ headed: false, env: process.env, log });
+    page = await openPage(chrome, { settleTimeoutMs: NAV_MS, log });
+  }, 30_000);
+
+  afterAll(async () => {
+    await page?.close().catch(() => undefined);
+    await chrome?.close().catch(() => undefined);
+    await new Promise<void>((resolve) => server?.close(() => resolve()));
+  });
+
+  for (const label of ["Search", "Open results", "Open scripted results"]) {
+    it(`follows ${label} with one request and keeps the opened document`, async () => {
+      requests.length = 0;
+      await page.navigate(`${base}/source`, NAV_MS);
+      const obs = await page.observe();
+      await page.act(find(obs, "click", label), obs);
+      const result = await page.observe();
+      expect(result.url).toBe(`${base}/result`);
+      expect(requests).toEqual([{ method: label === "Search" ? "POST" : "GET", body: label === "Search" ? "query=fish" : "" }]);
+      if (label === "Search") expect(result.text).toContain("POST query=fish");
+      if (label === "Open scripted results") {
+        expect(result.text).toContain("opener kept");
+        expect(result.text).toContain("script state kept");
+      }
+      await page.back(NAV_MS);
+      expect((await page.observe()).url).toBe(`${base}/source`);
+    });
+  }
+});
