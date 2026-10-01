@@ -8,6 +8,8 @@
 // from a page is redacted with the last run's redactor, has the API key removed, and is sanitized and flattened.
 import * as z from "zod";
 import type { ProfileEntry } from "../browser.js";
+import { browserOf } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import { flatText } from "../fast/generate.js";
 import type { GeoPoint, Page } from "../fast/model.js";
 import type { PageRead } from "../fast/read-types.js";
@@ -65,8 +67,10 @@ export interface ScrapeToolDeps {
   scrape: ScrapeDeps;
   runs: RunManager;
   env: NodeJS.ProcessEnv;
-  profiles: (engine: "cdp" | "chromium") => ProfileEntry[];
+  profiles: (browser: BrowserKind | undefined) => ProfileEntry[];
   engine: "cdp" | "chromium";
+  /** The server's browser (JEV_BROWSER). Absent: Chromium for engine chromium, else the first installed browser. */
+  browser?: BrowserKind;
   secret: () => string | null;
   now: () => number;
   log?: Logger;
@@ -538,15 +542,16 @@ export class ScrapeTools {
     if ("error" in got) return got;
     const { spec, path } = got;
     const engine = this.d.engine;
-    const profiles = this.d.profiles(engine);
+    const kind = browserOf({ engine, ...(this.d.browser ? { browser: this.d.browser } : {}) }, this.d.env) ?? null;
+    const profiles = this.d.profiles(kind ?? undefined);
     const want = spec.profile ?? DEFAULT_PROFILE_NAME;
     const dir = profileDir(want, profiles);
     if (dir === undefined) return { error: `the scraper's profile "${want}" is not a Chrome profile here. Profiles: ${[...profiles.map((p) => `${p.name} (${p.directory})`), "none"].join(", ")}. Save the scraper again from a browse run on one of them` };
     const session = this.d.scrape.session;
     const headed = a.headed;
     const geo = spec.geo ? geoOf(spec.geo) : null;
-    await session.prepare({ engine, headed, profileDirectory: dir, geo });
-    const cfg: RunConfig = { ...this.d.scrape.base, task: spec.task, headed, engine };
+    await session.prepare({ browser: kind, headed, profileDirectory: dir, geo });
+    const cfg: RunConfig = { ...this.d.scrape.base, task: spec.task, headed, engine, ...(kind ? { browser: kind } : {}) };
     delete cfg.geo;
     if (geo) cfg.geo = geo;
     const epoch = session.epoch;

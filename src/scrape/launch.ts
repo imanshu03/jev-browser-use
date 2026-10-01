@@ -4,8 +4,9 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { randomBytes } from "node:crypto";
 import type { ProfileEntry } from "../browser.js";
-import { parseGeo as parseCliGeo, textModelDeps } from "../cli.js";
-import { LAUNCH_WAIT_MS, launchChrome } from "../fast/chrome.js";
+import { browserKind, parseGeo as parseCliGeo, textModelDeps } from "../cli.js";
+import { LAUNCH_WAIT_MS, browserOf, launchChrome } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import type { Chrome, ChromeLaunchOptions, GeoPoint, Page, PageOptions } from "../fast/model.js";
 import { openPage } from "../fast/page.js";
 import type { Human, Logger } from "../io.js";
@@ -37,8 +38,16 @@ export function parseGeo(text: string): GeoPoint {
   return geo;
 }
 
+/** The browser of a scraper command: JEV_BROWSER, Chromium for JEV_BROWSER_ENGINE=chromium, else the first installed one. */
+export function envBrowser(env: NodeJS.ProcessEnv): BrowserKind | undefined {
+  const named = env["JEV_BROWSER"];
+  return browserOf({ engine: env["JEV_BROWSER_ENGINE"], ...(named ? { browser: browserKind(named, "JEV_BROWSER") } : {}) }, env);
+}
+
 export interface BrowserOptions {
   headed: boolean;
+  /** The browser to launch. Absent: the first installed one. */
+  browser?: BrowserKind;
   /** The profile directory ("Profile 14"); absent is a temporary profile. */
   profileDirectory?: string;
   geo?: GeoPoint;
@@ -64,7 +73,7 @@ export function cliBrowser(o: BrowserOptions, deps: BrowserDeps = {}): ScrapeBro
   const start = (): Promise<Chrome> => {
     if (closed) return Promise.reject(new Error("the browser is closed"));
     launching ??= launch({
-      headed: o.headed, ...(o.profileDirectory ? { profileDirectory: o.profileDirectory } : {}), ...(o.geo ? { geolocation: o.geo } : {}),
+      headed: o.headed, ...(o.browser ? { browser: o.browser } : {}), ...(o.profileDirectory ? { profileDirectory: o.profileDirectory } : {}), ...(o.geo ? { geolocation: o.geo } : {}),
       env: o.env, log: o.log, commandTimeoutMs: 30_000,
     }).then((c) => { chrome = c; return c; });
     return launching;

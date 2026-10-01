@@ -10,6 +10,8 @@ import { parseEnv } from "node:util";
 import type { ProfileEntry } from "../browser.js";
 import { loadKey } from "../config.js";
 import { parseArgs } from "../cli.js";
+import { browserOf } from "../fast/chrome.js";
+import type { BrowserKind } from "../fast/chrome.js";
 import { FastRunner } from "../fast/loop.js";
 import type { BrowserSession, SessionKey } from "../fast/session.js";
 import type { Logger } from "../io.js";
@@ -71,6 +73,11 @@ export function baseConfig(env: NodeJS.ProcessEnv, log: Logger): RunConfig {
     log.warn(`JEV_BROWSER_ENGINE="${engine}" is not cdp, chromium, or vercel; using cdp`);
     delete e["JEV_BROWSER_ENGINE"];
   }
+  const browser = e["JEV_BROWSER"];
+  if (browser !== undefined && browser !== "" && !["chrome", "edge", "brave", "chromium"].includes(browser.toLowerCase())) {
+    log.warn(`JEV_BROWSER="${browser}" is not chrome, edge, brave, or chromium; using the first installed browser`);
+    delete e["JEV_BROWSER"];
+  }
   const steps = e["JEV_BROWSER_MAX_STEPS"];
   if (steps !== undefined) {
     const n = Number(steps);
@@ -87,6 +94,7 @@ export function baseConfig(env: NodeJS.ProcessEnv, log: Logger): RunConfig {
     log.warn(`${err.message}; using the defaults`);
     delete e["JEV_BROWSER_ENGINE"];
     delete e["JEV_BROWSER_MAX_STEPS"];
+    delete e["JEV_BROWSER"];
     cfg = parseArgs([], e);
   }
   if (cfg.engine === "vercel") {
@@ -103,11 +111,23 @@ export function baseConfig(env: NodeJS.ProcessEnv, log: Logger): RunConfig {
   return cfg;
 }
 
+/**
+ * The engine and browser of a browse input. The input's browser wins; engine chromium means Chromium; otherwise the
+ * server's browser. Engine chromium of the server does not hold against a browser that the input names.
+ */
+export function browserChoice(input: { engine?: "cdp" | "chromium" | undefined; browser?: BrowserKind | undefined }, base: { engine?: string | undefined; browser?: BrowserKind | undefined }): { engine: "cdp" | "chromium"; browser?: BrowserKind } {
+  if (input.browser) return { engine: input.browser === "chromium" && input.engine === "chromium" ? "chromium" : "cdp", browser: input.browser };
+  if (input.engine === "chromium") return { engine: "chromium", browser: "chromium" };
+  if (input.engine === "cdp") return base.browser ? { engine: "cdp", browser: base.browser } : { engine: "cdp" };
+  const engine = base.engine === "chromium" ? "chromium" : "cdp";
+  return base.browser ? { engine, browser: base.browser } : { engine };
+}
+
 /** The RunConfig of one browse input. profile = input.profile ?? base.profile; var keys are lowercased; geo only from the input. */
 export function configFor(input: BrowseInput, base: RunConfig): RunConfig {
   const cfg: RunConfig = {
     ...base, task: input.task, headed: input.headed, confirm: input.confirm, dryRun: input.dry_run,
-    maxSteps: input.max_steps ?? base.maxSteps, engine: input.engine ?? (base.engine === "chromium" ? "chromium" : "cdp"),
+    maxSteps: input.max_steps ?? base.maxSteps, ...browserChoice(input, base),
     vars: Object.fromEntries(Object.entries(input.vars ?? {}).map(([k, v]) => [k.toLowerCase(), v])),
   };
   delete cfg.url;
@@ -115,6 +135,7 @@ export function configFor(input: BrowseInput, base: RunConfig): RunConfig {
   delete cfg.fallbackUrl;
   delete cfg.profile;
   delete cfg.geo;
+  if (!cfg.browser) delete cfg.browser;
   const profile = input.profile ?? base.profile;
   if (profile !== undefined) cfg.profile = profile;
   if (input.url !== undefined) cfg.url = input.url;
@@ -133,6 +154,9 @@ export function checkInput(input: BrowseInput, env: NodeJS.ProcessEnv, profiles:
     } else if (u.protocol !== "http:" && u.protocol !== "https:") {
       return `url uses ${u.protocol} Use an http or https URL`;
     }
+  }
+  if (input.engine === "chromium" && input.browser !== undefined && input.browser !== "chromium") {
+    return `engine "chromium" launches Chromium; to use ${input.browser}, set engine to "cdp" or leave it out`;
   }
   if (input.profile !== undefined) {
     const want = input.profile.toLowerCase();
@@ -206,7 +230,7 @@ export function createJevLink(env: NodeJS.ProcessEnv, log: Logger, transport?: T
 
 export interface StarterDeps {
   session: BrowserSession; jev: JevLink; base: RunConfig; env: NodeJS.ProcessEnv;
-  profiles: (engine: "cdp" | "chromium") => ProfileEntry[];
+  profiles: (browser: BrowserKind | undefined) => ProfileEntry[];
   oracle?: (model: string, log: Logger) => Oracle;
 }
 
@@ -217,13 +241,13 @@ export interface StarterDeps {
 export function fastStarter(d: StarterDeps): RunStarter {
   return async (input, hooks) => {
     const cfg = configFor(input, d.base);
-    const engine = cfg.engine === "chromium" ? "chromium" : "cdp";
-    const profiles = d.profiles(engine);
+    const browser = browserOf(cfg, d.env) ?? null;
+    const profiles = d.profiles(browser ?? undefined);
     let key: SessionKey | null = null;
     try {
       const pre = prePlan(cfg, profiles);
       // Another geolocation needs another Chrome: the override is set on each tab that Chrome opens.
-      if (pre.profileDirectory !== null) key = { engine, headed: cfg.headed, profileDirectory: pre.profileDirectory ?? null, geo: cfg.geo ?? null };
+      if (pre.profileDirectory !== null) key = { browser, headed: cfg.headed, profileDirectory: pre.profileDirectory ?? null, geo: cfg.geo ?? null };
     } catch { /* an unknown profile: the runner reports it */ }
     await d.session.prepare(key);
     const url = await d.session.currentUrl();

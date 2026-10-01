@@ -4,7 +4,8 @@
 import type { Logger } from "../io.js";
 import type { RunConfig } from "../types.js";
 import { LIMITS } from "../types.js";
-import { LAUNCH_WAIT_MS, launchChrome } from "./chrome.js";
+import { LAUNCH_WAIT_MS, browserOf, launchChrome } from "./chrome.js";
+import type { BrowserKind } from "./chrome.js";
 import type { Chrome, ChromeLaunchOptions, GeoPoint, Page, UnsentText } from "./model.js";
 import { openPage as openTab } from "./page.js";
 
@@ -12,9 +13,10 @@ import { openPage as openTab } from "./page.js";
  * What an open Chrome was launched with. `geo`: the geolocation override of its tabs; absent and null both mean none. A
  * run with another geo needs another Chrome: each tab gets the override when it opens.
  */
-export interface SessionKey { engine: "cdp" | "chromium"; headed: boolean; profileDirectory: string | null; geo?: GeoPoint | null }  // null = temporary profile
+/** `browser` is null when no browser is installed; the launch then reports that. */
+export interface SessionKey { browser: BrowserKind | null; headed: boolean; profileDirectory: string | null; geo?: GeoPoint | null }  // null = temporary profile
 
-/** The open Chrome runs on another profile, engine, or window mode than the run asks for. The session never reuses it silently. */
+/** The open Chrome runs on another profile, browser, or window mode than the run asks for. The session never reuses it silently. */
 export class ProfileMismatchError extends Error {
   override name = "ProfileMismatchError";
 }
@@ -32,12 +34,12 @@ function sameGeo(a: GeoPoint | null | undefined, b: GeoPoint | null | undefined)
 }
 
 function sameKey(a: SessionKey, b: SessionKey): boolean {
-  return a.engine === b.engine && a.headed === b.headed && a.profileDirectory === b.profileDirectory && sameGeo(a.geo, b.geo);
+  return a.browser === b.browser && a.headed === b.headed && a.profileDirectory === b.profileDirectory && sameGeo(a.geo, b.geo);
 }
 
 function describeKey(k: SessionKey): string {
   const geo = k.geo ? `, geo ${k.geo.latitude},${k.geo.longitude}${k.geo.accuracy !== undefined ? ` accuracy ${k.geo.accuracy} m` : ""}` : "";
-  return `${k.profileDirectory === null ? "a temporary profile" : `profile ${k.profileDirectory}`} (${k.engine}, ${k.headed ? "headed" : "headless"}${geo})`;
+  return `${k.profileDirectory === null ? "a temporary profile" : `profile ${k.profileDirectory}`} (${k.browser ?? "no browser"}, ${k.headed ? "headed" : "headless"}${geo})`;
 }
 
 /** Resolve when `p` settles or after `ms`, whichever comes first. The timer is cleared when `p` settles first. */
@@ -104,11 +106,11 @@ export class BrowserSession {
 
   /**
    * Reuse the open Chrome when its key matches; relaunch after client.closed; throw ProfileMismatchError when the
-   * directory, engine, window mode, or geolocation differs.
+   * directory, browser, window mode, or geolocation differs.
    */
   chromeFor(cfg: RunConfig): (profileDirectory: string | undefined) => Promise<Chrome> {
     return async (profileDirectory) => {
-      const want: SessionKey = { engine: cfg.engine === "chromium" ? "chromium" : "cdp", headed: cfg.headed, profileDirectory: profileDirectory ? profileDirectory : null, geo: cfg.geo ?? null };
+      const want: SessionKey = { browser: browserOf(cfg, this.env) ?? null, headed: cfg.headed, profileDirectory: profileDirectory ? profileDirectory : null, geo: cfg.geo ?? null };
       // Never two launches at once, and never a launch while a close is in flight: the profile lock is free only
       // when the old Chrome has exited. A launch that a close cancelled rejects; the checks below then see no Chrome.
       if (this.closing) await this.closing;
@@ -190,7 +192,7 @@ export class BrowserSession {
     const epoch = this._epoch;
     const dir = want.profileDirectory;
     const p = this.launch({
-      browser: want.engine === "chromium" ? "chromium" : "chrome",
+      ...(want.browser ? { browser: want.browser } : {}),
       headed: cfg.headed, ...(dir !== null ? { profileDirectory: dir } : {}), ...(cfg.refreshProfile ? { refreshProfile: true } : {}),
       ...(cfg.cdp !== undefined ? { cdpPort: cfg.cdp } : {}), ...(cfg.chromeBin ? { chromeBin: cfg.chromeBin } : {}),
       ...(want.geo ? { geolocation: want.geo } : {}),

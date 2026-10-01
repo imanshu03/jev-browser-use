@@ -7,11 +7,11 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { fileURLToPath } from "node:url";
 import type { Browser } from "./browser.js";
 import { createBrowser } from "./browser.js";
-import { VERSION, parseArgs, textModelDeps } from "./cli.js";
+import { VERSION, browserOpt, parseArgs, textModelDeps } from "./cli.js";
 import { sanitizeText } from "./fast/generate.js";
 import type { KeyCheck, KeySource } from "./config.js";
 import { configPath, forgetKey, loadKey, looksLikeKey, saveKey, validateKey } from "./config.js";
-import { LAUNCH_WAIT_MS, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
+import { LAUNCH_WAIT_MS, browserOf, defaultUserDataDir, launchChrome, listProfiles } from "./fast/chrome.js";
 import { FastRunner } from "./fast/loop.js";
 import type { Chrome, ChromeLaunchOptions, Page } from "./fast/model.js";
 import { openPage } from "./fast/page.js";
@@ -34,9 +34,10 @@ Run one task without the chat: jev-browser "<task>"
 
 Options:
   --engine <cdp|chromium|vercel>     cdp: direct Chrome CDP. chromium: Chromium over CDP. vercel: agent-browser. Default: cdp (env JEV_BROWSER_ENGINE).
+  --browser <chrome|edge|brave|chromium>  cdp: the browser to launch (env JEV_BROWSER). Default: the first installed, in that order.
   --profile <name|dir|none>  Chrome profile. Default: Parallelloop. none: a temporary profile.
   --refresh-profile          cdp/chromium: copy the browser profile again, even when a copy exists.
-  --chrome-bin <path>        cdp/chromium: browser binary override (env JEV_CHROME_BIN / JEV_CHROMIUM_BIN).
+  --chrome-bin <path>        cdp/chromium: browser binary override (env JEV_CHROME_BIN / JEV_EDGE_BIN / JEV_BRAVE_BIN / JEV_CHROMIUM_BIN).
   --session <name>           Session name. Default: jev-chat-<8 hex>. The vercel engine uses it as the agent-browser session.
   --model <name>             Default: jev-latest.
   --max-steps <n>            Default 25, max 100.
@@ -63,7 +64,7 @@ Commands:
   Any other line runs as a task.
 `;
 
-const CHAT_FLAGS = new Set(["--engine", "--profile", "--refresh-profile", "--chrome-bin", "--session", "--model", "--max-steps", "--confirm", "--log-level", "--var", "--headless", "--headed", "--reset-key", "--help"]);
+const CHAT_FLAGS = new Set(["--engine", "--browser", "--profile", "--refresh-profile", "--chrome-bin", "--session", "--model", "--max-steps", "--confirm", "--log-level", "--var", "--headless", "--headed", "--reset-key", "--help"]);
 const OWN_FLAGS = new Set(["--headless", "--headed", "--reset-key", "--help"]);
 /** Shared flags that take no value. */
 const BOOL_FLAGS = new Set(["--refresh-profile"]);
@@ -409,7 +410,7 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
   const launch = deps.launch ?? launchChrome;
   const open = deps.openPage ?? ((c: Chrome, l: Logger) => openPage(c, { settleTimeoutMs: LIMITS.settleDomMs, log: l }));
   const oracleFor = deps.oracle ?? ((model: string, l: Logger) => createOracle(clientFor(), model, l));
-  const profiles = deps.profiles ?? (fastEngine && !deps.runner ? listProfiles(defaultUserDataDir(env, undefined, base.engine === "chromium" ? "chromium" : "chrome")) : []);
+  const profiles = deps.profiles ?? (fastEngine && !deps.runner ? listProfiles(defaultUserDataDir(env, undefined, browserOf(base, env))) : []);
 
   /** Fast engine: launch Chrome for the first task, then reuse it. */
   async function chromeFor(cfg: RunConfig, profileDirectory: string | undefined): Promise<Chrome> {
@@ -423,7 +424,7 @@ export async function runChat(argv: string[], io: ChatIo = { stdout: process.std
       return chrome;
     }
     launching = launch({
-      browser: cfg.engine === "chromium" ? "chromium" : "chrome",
+      ...browserOpt(cfg, env),
       headed: cfg.headed, ...(profileDirectory ? { profileDirectory } : {}), ...(cfg.refreshProfile ? { refreshProfile: true } : {}),
       ...(cfg.cdp !== undefined ? { cdpPort: cfg.cdp } : {}), ...(cfg.chromeBin ? { chromeBin: cfg.chromeBin } : {}),
       commandTimeoutMs: cfg.stepTimeoutMs, env, log,

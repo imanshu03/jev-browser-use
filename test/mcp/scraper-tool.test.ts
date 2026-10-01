@@ -57,7 +57,7 @@ async function stack(opts: { read?: PageRead; elicit?: (p: ElicitParams) => Elic
   let clock = NOW;
   const runs = new RunManager({ start, log, secret: () => KEY, now: () => clock });
   const c = await connect({
-    runs, version: "0.1.0", env: {}, profiles: () => opts.profiles ?? PROFILES, secret: () => KEY, log, now: () => NOW,
+    runs, version: "0.1.0", env: { JEV_CHROME_BIN: "/opt/chrome" }, profiles: () => opts.profiles ?? PROFILES, secret: () => KEY, log, now: () => NOW,
     closeBrowser: async () => true, scrape: { kit, session: s.session, base: s.base },
   }, opts.elicit);
   const call = (args: Record<string, unknown>): Promise<Result> => c.client.callTool({ name: "scraper", arguments: args });
@@ -375,7 +375,7 @@ describe("scraper run", () => {
     expect("navigator" in opts || "llm" in opts || "params" in opts).toBe(false);
     // A run opens a file: start URL only with JEV_MCP_ALLOW_FILE=1.
     expect(opts.allowFile).toBe(false);
-    expect(prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: "Profile 14", geo });
+    expect(prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: "Profile 14", geo });
     expect(t.launches.at(-1)).toMatchObject({ profileDirectory: "Profile 14", headed: true });
     // The run kept its tab: read_page reads it.
     expect(t.session.page).toBe(t.page);
@@ -441,7 +441,7 @@ describe("scraper run", () => {
     delete file.geo;
     const prepare = vi.spyOn(t.session, "prepare");
     view(await t.call({ action: "run", name: "shop-eggs" }));
-    expect(prepare).toHaveBeenLastCalledWith({ engine: "cdp", headed: true, profileDirectory: null, geo: null });
+    expect(prepare).toHaveBeenLastCalledWith({ browser: "chrome", headed: true, profileDirectory: null, geo: null });
     await t.c.close();
   });
 
@@ -517,7 +517,7 @@ describe("the time cap of a run", () => {
   function tools(kit: ReturnType<typeof fakeKit>) {
     const s = readSession(shopRead());
     const runs = new RunManager({ start: async () => emptyResult("x", "act"), log: fakeLogger() });
-    const tool = new ScrapeTools({ scrape: { kit, session: s.session, base: s.base }, runs, env: {}, profiles: () => PROFILES, engine: "cdp", secret: () => KEY, now: () => Date.now() });
+    const tool = new ScrapeTools({ scrape: { kit, session: s.session, base: s.base }, runs, env: { JEV_CHROME_BIN: "/opt/chrome" }, profiles: () => PROFILES, engine: "cdp", secret: () => KEY, now: () => Date.now() });
     const spec = { ...(kit.files.get("x") as ScraperSpec) };
     return { tool, spec, args: ScraperArgs.parse({ action: "run", name: "x" }) };
   }

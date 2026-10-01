@@ -18,7 +18,7 @@ import { authorScraper, secretProblem } from "./author.js";
 import { toCsv } from "./csv.js";
 import { loadOptions } from "./heal.js";
 import type { BrowserOptions } from "./launch.js";
-import { cliBrowser, lazyNavigator, navBase, parseGeo, resolveProfile } from "./launch.js";
+import { cliBrowser, envBrowser, lazyNavigator, navBase, parseGeo, resolveProfile } from "./launch.js";
 import type { LlmBackend } from "./llm.js";
 import { llmFromEnv, llmTimeoutMs } from "./llm.js";
 import { buildContext, contextChars } from "./prompt.js";
@@ -212,14 +212,15 @@ function emit(result: ScrapeResult, a: Args, io: MainIo, log: Logger, columns: s
 }
 
 function profilesOf(io: MainIo, deps: ScrapeDeps): ProfileEntry[] {
-  return deps.profiles ?? listProfiles(defaultUserDataDir(io.env));
+  return deps.profiles ?? listProfiles(defaultUserDataDir(io.env, undefined, envBrowser(io.env)));
 }
 
 /** The browser of a command: the profile `want`, and the geolocation of --geo, else `geo` (the geo of the scraper file). */
 function browserFor(a: Args, want: string, geo: ScraperSpec["geo"], io: MainIo, log: Logger, deps: ScrapeDeps): ScrapeBrowser {
   const profile = resolveProfile(want, profilesOf(io, deps));
   const where: GeoPoint | undefined = a.geo ?? (geo ? { latitude: geo.latitude, longitude: geo.longitude, ...(geo.accuracy !== undefined ? { accuracy: geo.accuracy } : {}) } : undefined);
-  const opts: BrowserOptions = { headed: a.headed, env: io.env, log, ...(profile ? { profileDirectory: profile.directory } : {}), ...(where ? { geo: where } : {}) };
+  const kind = envBrowser(io.env);
+  const opts: BrowserOptions = { headed: a.headed, ...(kind ? { browser: kind } : {}), env: io.env, log, ...(profile ? { profileDirectory: profile.directory } : {}), ...(where ? { geo: where } : {}) };
   return deps.browser ? deps.browser(opts) : cliBrowser(opts);
 }
 

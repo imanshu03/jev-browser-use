@@ -14,15 +14,66 @@ export interface ProfileEntry { directory: string; name: string }
 export interface FindChromeOptions {
   platform?: NodeJS.Platform;
   exists?: (p: string) => boolean;
-  browser?: "chrome" | "chromium";
+  /** One browser only. Absent: the first browser that `detectBrowser` finds. */
+  browser?: BrowserKind;
 }
 
-const DARWIN_BINS = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-];
-const LINUX_BINS = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
+/** The Chromium-family browsers that the direct engines launch. The order is the auto-detect order. */
+export const BROWSER_KINDS = ["chrome", "edge", "brave", "chromium"] as const;
+export type BrowserKind = (typeof BROWSER_KINDS)[number];
+
+interface BrowserSpec {
+  label: string;
+  /** The environment variable that overrides the binary. */
+  envBin: string;
+  /** App bundle binaries, relative to /Applications and ~/Applications. */
+  darwin: string[];
+  /** Binaries relative to %PROGRAMFILES%, %PROGRAMFILES(X86)%, and %LOCALAPPDATA%. */
+  win32: string[];
+  /** Command names on PATH. */
+  linux: string[];
+  /** The source user data dir, relative to the platform root (Application Support, %LOCALAPPDATA%, ~/.config). */
+  data: { darwin: string; win32: string; linux: string };
+  /** The client-hint brand next to "Chromium". Null for Chromium itself. */
+  brand: string | null;
+}
+
+const BROWSERS: Record<BrowserKind, BrowserSpec> = {
+  chrome: {
+    label: "Google Chrome", envBin: "JEV_CHROME_BIN",
+    darwin: ["Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"],
+    win32: ["Google/Chrome/Application/chrome.exe"], linux: ["google-chrome", "google-chrome-stable"],
+    data: { darwin: "Google/Chrome", win32: "Google/Chrome/User Data", linux: "google-chrome" }, brand: "Google Chrome",
+  },
+  edge: {
+    label: "Microsoft Edge", envBin: "JEV_EDGE_BIN",
+    darwin: ["Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+    win32: ["Microsoft/Edge/Application/msedge.exe"], linux: ["microsoft-edge", "microsoft-edge-stable"],
+    data: { darwin: "Microsoft Edge", win32: "Microsoft/Edge/User Data", linux: "microsoft-edge" }, brand: "Microsoft Edge",
+  },
+  brave: {
+    label: "Brave", envBin: "JEV_BRAVE_BIN",
+    darwin: ["Brave Browser.app/Contents/MacOS/Brave Browser"],
+    win32: ["BraveSoftware/Brave-Browser/Application/brave.exe"], linux: ["brave-browser", "brave"],
+    data: { darwin: "BraveSoftware/Brave-Browser", win32: "BraveSoftware/Brave-Browser/User Data", linux: "BraveSoftware/Brave-Browser" }, brand: "Brave",
+  },
+  chromium: {
+    label: "Chromium", envBin: "JEV_CHROMIUM_BIN",
+    darwin: ["Chromium.app/Contents/MacOS/Chromium"],
+    win32: ["Chromium/Application/chrome.exe"], linux: ["chromium", "chromium-browser"],
+    data: { darwin: "Chromium", win32: "Chromium/User Data", linux: "chromium" }, brand: null,
+  },
+};
+
+/** The display name of a browser, for example "Microsoft Edge". */
+export function browserLabel(kind: BrowserKind): string {
+  return BROWSERS[kind].label;
+}
+
+/** The client-hint brand of a browser next to "Chromium"; null for Chromium. */
+export function browserBrand(kind: BrowserKind | undefined): string | null {
+  return BROWSERS[kind ?? "chrome"].brand;
+}
 
 function onPath(name: string, env: NodeJS.ProcessEnv, exists: (p: string) => boolean): string | null {
   for (const dir of (env["PATH"] ?? "").split(path.delimiter)) {
@@ -33,40 +84,80 @@ function onPath(name: string, env: NodeJS.ProcessEnv, exists: (p: string) => boo
   return null;
 }
 
-/** The Chrome binary to launch. `JEV_CHROME_BIN` wins. Throws `chrome not found ...` when none exists. */
-export function findChrome(env: NodeJS.ProcessEnv, opts: FindChromeOptions = {}): string {
-  const platform = opts.platform ?? process.platform;
-  const exists = opts.exists ?? ((p: string) => fs.existsSync(p));
-  const chromium = opts.browser === "chromium";
-  const override = env[chromium ? "JEV_CHROMIUM_BIN" : "JEV_CHROME_BIN"];
-  if (override) return override;
+/** The installed binary of one browser, or null. Ignores the env override. */
+function installedBin(kind: BrowserKind, env: NodeJS.ProcessEnv, platform: NodeJS.Platform, exists: (p: string) => boolean): string | null {
+  const spec = BROWSERS[kind];
   let candidates: string[] = [];
   if (platform === "darwin") {
-    candidates = chromium ? DARWIN_BINS.filter((p) => p.includes("Chromium.app")) : DARWIN_BINS;
+    const home = env["HOME"] ?? os.homedir();
+    candidates = ["/Applications", path.join(home, "Applications")].flatMap((root) => spec.darwin.map((rel) => path.join(root, rel)));
   } else if (platform === "win32") {
     const roots = [env["PROGRAMFILES"], env["PROGRAMFILES(X86)"], env["LOCALAPPDATA"]].filter((r): r is string => Boolean(r));
-    candidates = roots.map((r) => chromium ? path.join(r, "Chromium", "Application", "chrome.exe") : path.join(r, "Google", "Chrome", "Application", "chrome.exe"));
+    candidates = roots.flatMap((r) => spec.win32.map((rel) => path.join(r, ...rel.split("/"))));
   } else {
-    for (const name of chromium ? ["chromium", "chromium-browser"] : LINUX_BINS) {
+    for (const name of spec.linux) {
       const hit = onPath(name, env, exists);
       if (hit) return hit;
     }
   }
   for (const c of candidates) if (exists(c)) return c;
-  throw new Error(`${chromium ? "chromium" : "chrome"} not found: set ${chromium ? "JEV_CHROMIUM_BIN" : "JEV_CHROME_BIN"} to the browser binary (platform ${platform})`);
+  return null;
 }
 
-/** The Chrome user data dir of this platform. */
-export function defaultUserDataDir(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform, browser: "chrome" | "chromium" = "chrome"): string {
-  const home = env["HOME"] ?? env["USERPROFILE"] ?? os.homedir();
-  if (browser === "chromium") {
-    if (platform === "darwin") return path.join(home, "Library", "Application Support", "Chromium");
-    if (platform === "win32") return path.join(env["LOCALAPPDATA"] ?? path.join(home, "AppData", "Local"), "Chromium", "User Data");
-    return path.join(env["XDG_CONFIG_HOME"] ?? path.join(home, ".config"), "chromium");
+/**
+ * The browser that the direct engines use when none is named: the first one with a binary override in the
+ * environment (`JEV_CHROME_BIN`, `JEV_EDGE_BIN`, `JEV_BRAVE_BIN`, `JEV_CHROMIUM_BIN`), else the first one installed, in
+ * the order Chrome, Edge, Brave, Chromium. Null when none is found.
+ */
+export function detectBrowser(env: NodeJS.ProcessEnv, opts: Omit<FindChromeOptions, "browser"> = {}): BrowserKind | null {
+  const platform = opts.platform ?? process.platform;
+  const exists = opts.exists ?? ((p: string) => fs.existsSync(p));
+  for (const kind of BROWSER_KINDS) if (env[BROWSERS[kind].envBin]) return kind;
+  for (const kind of BROWSER_KINDS) if (installedBin(kind, env, platform, exists)) return kind;
+  return null;
+}
+
+/** The browser of a run: `--browser`, else Chromium for `--engine chromium`, else `detectBrowser`. Undefined when none is installed. */
+export function browserOf(cfg: { engine?: string | undefined; browser?: BrowserKind | undefined }, env: NodeJS.ProcessEnv, opts: Omit<FindChromeOptions, "browser"> = {}): BrowserKind | undefined {
+  if (cfg.browser) return cfg.browser;
+  if (cfg.engine === "chromium") return "chromium";
+  return detectBrowser(env, opts) ?? undefined;
+}
+
+/** The text of a missing-browser error. It names the fix, so an agent tells the user instead of trying another engine. */
+function notFound(kind: BrowserKind | undefined, platform: NodeJS.Platform): Error {
+  const error = kind
+    ? new Error(`${kind} not found: install ${BROWSERS[kind].label}, or set ${BROWSERS[kind].envBin} to the browser binary (platform ${platform}). Other engines need an installed browser too`)
+    : new Error(`no supported browser found: install Google Chrome, Microsoft Edge, Brave, or Chromium, or set JEV_CHROME_BIN to the binary of one (platform ${platform}). Other engines need an installed browser too`);
+  error.name = "ChromeError";
+  return error;
+}
+
+/** The binary to launch. The browser's env override wins. Without `browser`, the first browser found. Throws `... not found` when none exists. */
+export function findChrome(env: NodeJS.ProcessEnv, opts: FindChromeOptions = {}): string {
+  const platform = opts.platform ?? process.platform;
+  const exists = opts.exists ?? ((p: string) => fs.existsSync(p));
+  const kinds = opts.browser ? [opts.browser] : BROWSER_KINDS;
+  for (const kind of kinds) {
+    const override = env[BROWSERS[kind].envBin];
+    if (override) return override;
   }
-  if (platform === "darwin") return path.join(home, "Library", "Application Support", "Google", "Chrome");
-  if (platform === "win32") return path.join(env["LOCALAPPDATA"] ?? path.join(home, "AppData", "Local"), "Google", "Chrome", "User Data");
-  return path.join(home, ".config", "google-chrome");
+  for (const kind of kinds) {
+    const hit = installedBin(kind, env, platform, exists);
+    if (hit) return hit;
+  }
+  throw notFound(opts.browser, platform);
+}
+
+/** The source user data dir of a browser on this platform. */
+export function defaultUserDataDir(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform, browser: BrowserKind = "chrome"): string {
+  const home = env["HOME"] ?? env["USERPROFILE"] ?? os.homedir();
+  const rel = BROWSERS[browser].data[platform === "darwin" || platform === "win32" ? platform : "linux"].split("/");
+  if (platform === "darwin") return path.join(home, "Library", "Application Support", ...rel);
+  if (platform === "win32") return path.join(env["LOCALAPPDATA"] ?? path.join(home, "AppData", "Local"), ...rel);
+  // Chrome keeps its old path; the other browsers follow $XDG_CONFIG_HOME as they do on Linux.
+  if (browser === "chrome") return path.join(home, ".config", ...rel);
+  return path.join(env["XDG_CONFIG_HOME"] ?? path.join(home, ".config"), ...rel);
 }
 
 /** Profiles of a user data dir from `Local State`. Empty when the file is missing or malformed. */
@@ -82,8 +173,8 @@ export function listProfiles(userDataDir: string): ProfileEntry[] {
   }
 }
 
-/** Where the copy of a profile lives: `$XDG_CONFIG_HOME/jev-browser/chrome/<slug>`. */
-export function profileCopyDir(env: NodeJS.ProcessEnv, profileDirectory: string, browser: "chrome" | "chromium" = "chrome"): string {
+/** Where the copy of a profile lives: `$XDG_CONFIG_HOME/jev-browser/<browser>/<slug>`. */
+export function profileCopyDir(env: NodeJS.ProcessEnv, profileDirectory: string, browser: BrowserKind = "chrome"): string {
   const base = env["XDG_CONFIG_HOME"] ?? path.join(env["HOME"] ?? os.homedir(), ".config");
   const slug = profileDirectory.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "profile";
   return path.join(base, "jev-browser", browser, slug);
@@ -361,9 +452,10 @@ export function plainUserAgent(ua: unknown): string | null {
  * product of Browser.getVersion ("HeadlessChrome/154.0.7727.56"). The brand list follows Chrome's own algorithm
  * (components/embedder_support/user_agent_utils.cc): the major version seeds the GREASE brand, its version, and the
  * order. For Chrome 154 on macOS that gives "Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99", as
- * Chrome sends with no override. Null when the product has no version.
+ * Chrome sends with no override. `brand` is "Google Chrome", "Microsoft Edge", or "Brave"; null for Chromium. Null when the
+ * product has no version.
  */
-export function userAgentMetadata(product: unknown, chromium: boolean, platform: NodeJS.Platform = process.platform, arch: string = process.arch, platformVersion = ""): UserAgentMetadata | null {
+export function userAgentMetadata(product: unknown, brand: string | null, platform: NodeJS.Platform = process.platform, arch: string = process.arch, platformVersion = ""): UserAgentMetadata | null {
   const full = typeof product === "string" ? /\/(\d+)((?:\.\d+){0,3})/.exec(product) : null;
   if (!full) return null;
   const seed = Number(full[1]);
@@ -371,7 +463,7 @@ export function userAgentMetadata(product: unknown, chromium: boolean, platform:
   const chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
   const greased = ["8", "99", "24"][seed % 3] as string;
   const grease = { brand: `Not${chars[seed % chars.length]}A${chars[(seed + 1) % chars.length]}Brand`, major: greased, full: `${greased}.0.0.0` };
-  const own = [{ brand: "Chromium", major: full[1] as string, full: version }, ...(chromium ? [] : [{ brand: "Google Chrome", major: full[1] as string, full: version }])];
+  const own = [{ brand: "Chromium", major: full[1] as string, full: version }, ...(brand ? [{ brand, major: full[1] as string, full: version }] : [])];
   // orders[seed % n]: the index of the GREASE brand, then of each own brand.
   const orders = own.length === 2 ? [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] : [[0, 1], [1, 0]];
   const order = orders[seed % orders.length] as number[];
@@ -436,7 +528,7 @@ async function attachChrome(opts: ChromeLaunchOptions, port: number): Promise<Ch
   const owned = new Set<string>();
   let closing: Promise<void> | null = null;
   const userAgent = plainUserAgent(info["User-Agent"]);
-  const hints = userAgent ? userAgentMetadata(info.Browser, opts.browser === "chromium", process.platform, process.arch, platformVersionOf()) : null;
+  const hints = userAgent ? userAgentMetadata(info.Browser, browserBrand(opts.browser), process.platform, process.arch, platformVersionOf()) : null;
   const geo = geoOptions(opts);
   return {
     client,
@@ -475,6 +567,9 @@ export const LAUNCH_WAIT_MS = 5_000;
 /** Launch Chrome on a copied profile or a temporary one, or attach over `cdpPort`. */
 export async function launchChrome(opts: ChromeLaunchOptions): Promise<Chrome> {
   if (opts.cdpPort !== undefined) return attachChrome(opts, opts.cdpPort);
+  // Without a named browser, the binary, the source profiles, and the copy all follow the browser that discovery finds.
+  const browser = opts.browser ?? detectBrowser(opts.env) ?? undefined;
+  if (browser) opts = { ...opts, browser };
   const release = opts.profileDirectory ? acquireProfileLock(profileCopyDir(opts.env, opts.profileDirectory, opts.browser)) : () => undefined;
   let child: ChildProcess | null = null;
   try {
@@ -488,14 +583,15 @@ export async function launchChrome(opts: ChromeLaunchOptions): Promise<Chrome> {
 }
 
 async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: ChildProcess) => void): Promise<Chrome> {
-  const bin = opts.chromeBin ?? findChrome(opts.env, { ...(opts.browser ? { browser: opts.browser } : {}) });
+  const browser = opts.browser;
+  const bin = opts.chromeBin ?? findChrome(opts.env, { ...(browser ? { browser } : {}) });
   let udd: string;
   let tempUdd: string | null = null;
   let profile: Chrome["profile"];
   if (opts.profileDirectory) {
-    const copyDir = profileCopyDir(opts.env, opts.profileDirectory, opts.browser);
+    const copyDir = profileCopyDir(opts.env, opts.profileDirectory, browser);
     const sync = await syncProfileLocked({
-      sourceUserDataDir: opts.sourceUserDataDir ?? defaultUserDataDir(opts.env, undefined, opts.browser),
+      sourceUserDataDir: opts.sourceUserDataDir ?? defaultUserDataDir(opts.env, undefined, browser),
       profileDirectory: opts.profileDirectory,
       dest: copyDir,
       refresh: opts.refreshProfile ?? false,
@@ -559,14 +655,14 @@ async function launchOwnedChrome(opts: ChromeLaunchOptions, onSpawn: (child: Chi
   }
   const launchMs = Date.now() - spawnedAt;
   opts.log.info(
-    `chrome ${String(version["product"] ?? "?")} pid ${child.pid ?? "?"} udd=${udd} profile=${profile.directory ?? "none"} ` +
+    `${browser ?? "browser"} ${String(version["product"] ?? "?")} pid ${child.pid ?? "?"} udd=${udd} profile=${profile.directory ?? "none"} ` +
     `copy=${profile.directory === null ? "none" : profile.copied ? "copied" : "reused"} copyMs=${profile.copyMs} launchMs=${launchMs}`,
   );
 
   const owned = new Set<string>();
   let closing: Promise<void> | null = null;
   const userAgent = plainUserAgent(version["userAgent"]);
-  const hints = userAgent ? userAgentMetadata(version["product"], opts.browser === "chromium" || /chromium/i.test(bin), process.platform, process.arch, platformVersionOf()) : null;
+  const hints = userAgent ? userAgentMetadata(version["product"], /chromium/i.test(bin) ? null : browserBrand(browser), process.platform, process.arch, platformVersionOf()) : null;
   const geo = geoOptions(opts);
   const chrome: Chrome = {
     client,
