@@ -48,7 +48,7 @@ timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 
 - Every key is optional except one base URL. Unknown keys are errors.
 - A secret is the value (4 or more characters) of an env var that `secrets` names, or whose name holds pass, secret, token, api_key (or apikey), private, otp, or pin, in any case. Reports show it as `***`.
-- `llm` is any OpenAI-compatible endpoint. Leave `base_url` empty for no LLM. `judge` checks need it.
+- `llm` is any OpenAI-compatible endpoint. Leave `llm.base_url` empty for no LLM. `judge` checks need the endpoint, `llm.judge_model` or `llm.model`, and any key that the endpoint requires.
 
 ## Suite: *.suite.yaml
 
@@ -115,7 +115,7 @@ A plain-language step fails when Jev cannot do it, or when it does an action tha
 | `check: Is the user signed in?` | Jev answers yes with probability 0.7 or more (`min_probability` changes it). |
 | `judge: The reply summarizes the artifact` | The LLM reads the page and agrees. |
 
-Code checks poll the page until they pass or reach `timeout_ms` (default `timeouts.assert_ms`). `check` and `judge` use a model, so the report marks them. A `check` or `judge` text must not hold a secret.
+Code checks poll the page until they pass or reach `timeout_ms` (default `timeouts.assert_ms`). `check` calls Jev and `judge` calls the LLM on every run, also when all action steps replay. A `check` needs a Jev key; a `judge` needs the configured LLM. The report marks these model checks. A `check` or `judge` text must not hold a secret.
 
 ## Commands
 
@@ -135,7 +135,7 @@ Code checks poll the page until they pass or reach `timeout_ms` (default `timeou
 | `--grep text` | Only cases whose id or title holds the text. |
 | `--headed` | Shows the browser. |
 | `--record` | Records every selected plain-language step again. |
-| `--ci` | CI mode (also when `CI=true`): a missing recording fails, and a repair fails the case. |
+| `--ci` | CI mode (also when `CI=true`): a missing recording fails unless `--record` is set. Repairs use `heal.ci` (default `fail`), unless `--heal` changes it. |
 | `--heal off\|warn\|fail` | The repair policy. Default `heal.local`, or `heal.ci` in CI mode. |
 | `--workers 4` | Suites at the same time. |
 | `--report-dir dir` | Writes the reports there. |
@@ -148,12 +148,12 @@ Exit codes: `0` all passed, `1` a case failed, `2` the config, a suite, or the c
 
 | Plain-language step | Local run | CI run |
 |---|---|---|
-| No recording | Jev does it and records it. | Fails: "has no recording". |
+| No recording | Jev does it and records it. | Fails: "has no recording", unless `--record` is set. |
 | The recording replays | Pass, no model call. | Pass, no model call. |
-| The recording fails | Jev repairs it. The case is `healed` and the new recording is saved. | Jev repairs it. The case fails, and the repaired recording goes to `reports/<run id>/recordings/`. |
+| The recording fails | With the default `heal.local: warn`, Jev repairs it. The case is `healed` and the new recording is saved. | With the default `heal.ci: fail`, Jev repairs it. The case fails, and the repaired recording goes to the report directory under `recordings/`. |
 | `--heal off` | Fails. | Fails. |
 
-A repair keeps the saved steps before the failed one and adds the new steps of Jev. Suite hooks use the same repair policy as case steps.
+A repair keeps the saved steps before the failed one and adds the new steps of Jev. Suite hooks use the same repair policy as case steps. `--heal` changes the policy for the run: `warn` marks a repaired case as `healed`, `fail` marks it as `failed`, and `off` stops at the replay failure.
 
 ## Reports
 

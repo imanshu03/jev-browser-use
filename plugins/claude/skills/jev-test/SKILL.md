@@ -11,7 +11,7 @@ Read [reference.md](references/reference.md) for every config key, step, check, 
 
 ## Find the project
 
-1. Look for `jev-test.config.yaml`. The suites are in the `suites` directory that the config names (default `suites/`). The recordings are in `.jev/recordings/`.
+1. Look for `jev-test.config.yaml`. Read its `suites`, `recordings`, and `reports` paths relative to the config directory. Their defaults are `suites/`, `.jev/recordings/`, and `reports/`.
 2. If there is no config, the project is not set up. Tell the user to run `npx jev-test init` in a terminal. It asks for the app URL, the TypeSafe API key, and an optional OpenAI-compatible LLM endpoint, and it writes the keys only to `.env`. Do not ask the user to paste a key into the chat. In a project outside the jev-browser-use repository, the user first installs the package:
 
    ```sh
@@ -84,12 +84,12 @@ Run the commands from the directory of the config, or pass `--config <file>`:
 npx jev-test validate                      # the config and every suite
 npx jev-test list --id NOTE-001            # the cases that a run selects
 npx jev-test run --id NOTE-001 --headed    # records new plain-language steps
-npx jev-test run --tag smoke               # replays
+npx jev-test run --id NOTE-001             # checks replay of the same case
 ```
 
-- A new or changed plain-language step needs `TYPESAFE_API_KEY`, because Jev records it. A replay needs no key.
-- Run a new case locally first. Then run it again: the second run must pass with replay only.
-- Read the output and `reports/<run id>/results.json`. A failed case has its error, the steps, and a screenshot in `reports/<run id>/screenshots/`.
+- A new or changed plain-language step needs a Jev key (`jev.api_key` or `TYPESAFE_API_KEY`), because Jev records it. Replayed action steps need no key. A `check` calls Jev on every run and needs its key. A `judge` calls the LLM on every run and needs `llm.base_url`, a model, and any key that the endpoint requires.
+- Run a new case locally first. Then run the same case again: each saved plain-language action step must report `how: replay`, with no recorded or healed action step. Model checks still run.
+- Read the output and `results.json` in the run's report directory (default `reports/<run id>/`). It has each case's error and steps. The `screenshots/` directory holds failure screenshots when they were captured. `--report-dir` changes the report directory.
 - Exit codes: `0` all passed, `1` a case failed, `2` a config, suite, or command line problem.
 
 ## Read the result
@@ -97,7 +97,7 @@ npx jev-test run --tag smoke               # replays
 | Status | Meaning | What to do |
 |---|---|---|
 | `passed` | All steps and checks passed. | Nothing. |
-| `healed` | A saved step did not replay, and Jev repaired it. The new recording is saved. | Look at the change in `.jev/recordings/` before you commit it. A repair can hide a real change in the app. Tell the user what changed. |
+| `healed` | A saved step did not replay, and Jev repaired it under `heal: warn`. | Read `recordingsSaved` in the suite result to find the saved recording. Look at the change before you commit it. A repair can hide a real change in the app. Tell the user what changed. |
 | `failed` | A step or a check failed. | Read the error and the screenshot. Decide if the app or the test is wrong, and tell the user. Do not make a check weaker only to get a pass. |
 | `skipped` | The case has `skip`. | Nothing. |
 
@@ -105,17 +105,19 @@ When a check fails, fix the test only when the test is wrong, for example a wron
 
 ## Recordings
 
-- The recordings are one JSON file for each suite under `.jev/recordings/`. Commit them with the suites, so that CI only replays.
+- The recordings are one JSON file for each suite under the config's `recordings` directory (default `.jev/recordings/`). Commit them with the suites, so that CI replays action steps.
 - Do not edit a recording by hand. A recording is keyed by the case id and the step text. When you change the text of a step, only that step records again. When you change a case id, all its steps record again. To record all steps of a case again, run `npx jev-test run --id <id> --record`.
-- In CI (`--ci` or `CI=true`), a step with no recording fails, and a repair fails the case. The repaired recording goes to `reports/<run id>/recordings/` for review.
+- In CI (`--ci` or `CI=true`), a step with no recording fails unless `--record` is set. The default `heal.ci: fail` makes a repair fail the case; `--heal` can change it. Changed recordings go to the run's report directory under `recordings/` for review.
 
 ## CI
 
-For a new project, `npx jev-test init --ci-workflow` writes `.github/workflows/jev-test.yml`. For a project that has a config, copy `packages/test-runner/examples/ci/jev-test.yml` of the jev-browser-use repository to `.github/workflows/`, because `init` does not change an existing config without `--force`. The workflow runs `npx jev-test run --ci`, uploads the reports, and publishes `junit.xml`. The user adds `PACKAGES_TOKEN`, `TYPESAFE_API_KEY`, the LLM key, and the test credentials as repository secrets.
+For a new project, `npx jev-test init --ci-workflow` writes `.github/workflows/jev-test.yml`. For a project that has a config, copy the [CI workflow template](https://github.com/imanshu03/jev-browser-use/blob/main/packages/test-runner/examples/ci/jev-test.yml) to `.github/workflows/jev-test.yml`. The plugin cache does not include the repository's examples. `init` does not change an existing config without `--force`.
+
+Set the workflow's environment name and tag filter to values that the project uses. The template uses `stage` and `smoke`; `init` uses `staging` as its default environment name. Set the default for the `env` input and the fallback after `inputs.env` to the config's environment name. If the project has no named environments, remove `--env`. The workflow runs `npx jev-test run --ci`, uploads the reports, and publishes `junit.xml`. The user adds `PACKAGES_TOKEN`, the model keys that the cases need, and the test credentials as repository secrets.
 
 ## Before you finish
 
 - `npx jev-test validate` passes.
-- Each new case passed locally, and a second run passed with replay only.
+- Each new case passed locally, and a second run passed with each saved action step replayed. Model checks still run.
 - The new recordings are ready to commit.
 - Tell the user the cases that you added, the result of each run, and each case that healed or failed.

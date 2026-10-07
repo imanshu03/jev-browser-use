@@ -103,10 +103,11 @@ Before Jev clicks or presses Enter while assistant text is in a field, or before
 Dialogs show only when all of these are true:
 
 - The client supports MCP form dialogs (elicitation).
+- The negotiated MCP protocol version is not a 2026 version. The server does not show dialogs with that version.
 - `CLAUDE_CODE_SESSION_ATTENDED` is not `0`, or `JEV_MCP_TRUST_ELICITATION=1` is set. SDK hosts, such as T3 Code, set it to `0`.
 - In Codex, `approval_policy` is not `never`. Start Codex with `-c approval_policy="on-request"` to get dialogs.
 
-With no dialog, the action blocks with `needs_confirmation`. The text stays in the field and Chrome stays open. The user checks the text in the Chrome window and does the action there. Tell the user to set `JEV_MCP_TRUST_ELICITATION=1` only when a person answers the dialogs in that client.
+With no dialog, the action blocks with `needs_confirmation`. In a headed run, the text stays in the field and Chrome stays open. The user checks the text in the Chrome window and does the action there. For a headless run, call `browse` again with `headed: true` so that the user can check the page. Tell the user to set `JEV_MCP_TRUST_ELICITATION=1` only when a person answers the dialogs in that client. It does not change the protocol version check.
 
 ## Autonomous mode
 
@@ -114,6 +115,7 @@ The user can let Jev act with no dialogs for one task. The user must write one o
 
 - Every click, Enter, send, save, and delete then goes through. Nobody checks the text before it goes out.
 - Password and one-time-code fields still stop the run.
+- In an unattended autonomous run, a sign-in page or a captcha blocks the run at once. In an attended, headed run, it pauses for the user.
 - When the run ends, the assistant lists each action that ran with no dialog.
 - The mode holds for that one request. A "yes" to a question from the assistant does not turn it on.
 - `JEV_MCP_AUTONOMOUS=0` in the server environment turns the mode off.
@@ -148,7 +150,7 @@ Keep `browse`, `continue`, and `scraper` on prompt, so the user sees the task, t
 | `JEV_BROWSER_MAX_STEPS` | The step limit of a run, 1 to 100 (default 25). |
 | `JEV_MCP_ALLOW_FILE` | `1` lets `browse` open `file:` URLs. |
 | `JEV_MCP_TRUST_ELICITATION` | `1` shows dialogs also when `CLAUDE_CODE_SESSION_ATTENDED=0`. |
-| `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for each `continue` call. |
+| `JEV_MCP_REVIEW_TEXT` | `1` makes Claude Code prompt for each `continue` call. The server reads it at startup. Codex does not use it. |
 | `JEV_MCP_AUTONOMOUS` | `0` turns off autonomous mode. |
 | `JEV_MCP_LOG_LEVEL` | `debug` writes more lines to the server log (stderr). |
 
@@ -163,7 +165,7 @@ Codex passes only the variables in `plugins/codex/.codex-mcp.json` (`env_vars`).
 | `not found` or `no supported browser found` | Install Chrome, Edge, Brave, or Chromium, or set the `JEV_*_BIN` path that the message names. |
 | Every send blocks with `needs_confirmation` | The session shows no dialogs (see [Dialogs](#dialogs)). Do the action in the Chrome window, or use autonomous mode in the user's own words. |
 | A CLI or chat run fails on the same profile | The server keeps that profile open. Call `close_browser` first, or use `profile: "none"`. |
-| A sign-in page or a check shows | The run pauses. The user signs in or solves the check in the Chrome window, and the run goes on. |
+| A sign-in page or a captcha shows | A headed run pauses for the user, except in unattended autonomous mode, which blocks at once. For a headless run, start again with `headed: true`. The user signs in or solves the captcha in the Chrome window, then starts the task again if the run blocked. |
 | A date picker, a recipients field, an @mention, or a rich-text editor goes wrong | Jev is weak there. Put each recipient or tag in quotes in the task, write dates as "1 September 2026", or do that part by hand. |
 | A run takes too long or does the wrong thing | Say "cancel". The assistant calls `cancel`. |
 
