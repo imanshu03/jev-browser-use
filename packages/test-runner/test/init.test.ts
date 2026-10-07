@@ -187,6 +187,17 @@ describe("cli init", () => {
     expect(loadProject(path.join(dir, "jev-test.config.yaml"), { processEnv: {} }).policy).toMatchObject({ confirm: "autonomous", actions: { dangerous: [], safe: [], hosts: {} } });
   });
 
+  it.each([
+    { confirm: "" },
+    { dangerous: Array.from({ length: 101 }, (_, i) => `word${i}`).join(",") },
+    { safe: Array.from({ length: 101 }, (_, i) => `word${i}`).join(",") },
+  ])("rejects init settings that cannot load: %o", async (given) => {
+    const dir = tmp();
+    expect(await runInit({ dir, given: { appUrl: "https://app.example", ...given }, yes: true, force: false, env: {}, prompter: scripted([]) })).toBe(2);
+    expect(fs.existsSync(path.join(dir, "jev-test.config.yaml"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "global.yaml"))).toBe(false);
+  });
+
   it("writes the confirm mode and the action words of the options to global.yaml, and refuses a bad mode or a word that is both", async () => {
     const dir = tmp();
     const io = { out: () => undefined, err: () => undefined, env: {}, prompter: scripted([]) };

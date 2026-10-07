@@ -131,6 +131,12 @@ export function wordList(text: string): string[] {
   return [...new Set(text.split(",").map((w) => w.trim().toLowerCase()).filter(Boolean))];
 }
 
+function wordProblem(text: string): string | null {
+  const words = wordList(text);
+  if (words.length > 100) return "a list has at most 100 words";
+  return words.some((word) => word.length > 80) ? "a word has at most 80 characters" : null;
+}
+
 export function renderGlobal(a: InitAnswers): string {
   const dangerous = wordList(a.dangerous);
   const safe = wordList(a.safe);
@@ -357,13 +363,13 @@ export async function runInit(o: InitOptions): Promise<number> {
       if (!r.ok && !o.yes && !(await o.prompter.confirm("Keep these LLM settings anyway?", true))) throw new InitError("stopped: the LLM settings were not kept");
     }
     const confirm = await value(o, "confirm", "What may Jev do in this environment? autonomous (every action), never (no dangerous action), always (no dangerous action and no submit)", {
-      default: "autonomous", check: (s) => (ConfirmMode.safeParse(s).success ? null : "answer autonomous, never, or always"),
+      default: "autonomous", required: true, check: (s) => (ConfirmMode.safeParse(s).success ? null : "answer autonomous, never, or always"),
     });
-    const dangerous = await value(o, "dangerous", "More dangerous click words, comma-separated, such as approve, merge (empty for none)", { check: (s) => (wordList(s).some((w) => w.length > 80) ? "a word has at most 80 characters" : null) });
+    const dangerous = await value(o, "dangerous", "More dangerous click words, comma-separated, such as approve, merge (empty for none)", { check: wordProblem });
     const safe = await value(o, "safe", "Safe click words that are dangerous by default, comma-separated, such as archive (empty for none)", {
       check: (s) => {
         const both = wordList(s).filter((w) => wordList(dangerous).includes(w));
-        return both.length > 0 ? `${both.join(", ")} is also a dangerous word` : wordList(s).some((w) => w.length > 80) ? "a word has at most 80 characters" : null;
+        return both.length > 0 ? `${both.join(", ")} is also a dangerous word` : wordProblem(s);
       },
     });
     const suitesDir = path.join(o.dir, "suites");

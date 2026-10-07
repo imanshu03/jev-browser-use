@@ -443,6 +443,24 @@ function searchForm(form: number, obs: Observation): boolean {
   });
 }
 
+/** Enter names the focused field, its submit controls, and the option that it picks. */
+export function enterLabel(obs: Observation): string {
+  const pick = obs.focus?.enterOption;
+  return [obs.focus?.label, obs.focus?.submitLabel, pick ? `picks ${pick.label}` : ""].filter(Boolean).join(" | ");
+}
+
+/** Enter is a submit unless the observed field and form allow a search with these action words. */
+export function riskOfEnter(obs: Observation, words?: ActionWords): RiskClass {
+  const focus = obs.focus;
+  const focused = focus ? obs.actions.find((a) => a.kind === "fill" && a.node === focus.node) : undefined;
+  const form = focus?.form !== undefined ? focus.form : obs.actions.find((a) => a.node === focus?.node)?.form ?? null;
+  const own = riskOf("CLICK", enterLabel(obs), words);
+  const search = !focus?.enterOption && searchField(obs, focused) && (own === "navigational" ||
+    (form !== null && focus?.searchOnly === true && riskOf("CLICK", focus.label, words) === "navigational" &&
+      (focus.submitLabel ?? "").split("|").every((label) => searchSubmitLabel(label, words)) && searchForm(form, obs)));
+  return search ? "navigational" : own === "destructive" ? "destructive" : "submit";
+}
+
 /** True for a CDP transport error or a Chrome that went away. Named by convention; the browser layer is not imported here. */
 function isBrowserError(e: unknown, chrome: Chrome | null): boolean {
   const name = (e as { name?: string } | null)?.name ?? "";
@@ -1454,16 +1472,8 @@ export class FastRunner {
       // Enter in another field can send the form: a value typed into a chip field of that form and not added yet asks first.
       const tokenGated = await this.tokenGate(true, this.pendingTokens(obs, focusForm, focusNode), obs, ctx, () => undefined);
       if (tokenGated) return tokenGated;
-      const label = [obs.focus?.label, obs.focus?.submitLabel, pick ? `picks ${pick.label}` : ""].filter(Boolean).join(" | ");
-      // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit. Enter in a search
-      // field runs the search, as a click on a link does: navigational, while no name says more and no option is picked.
-      // In a form of search fields only, a submit name or "send" (CMFRI's "SEND") does not say more.
-      const words = this.words(obs.url);
-      const own = riskOf("CLICK", label, words);
-      const search = !pick && searchField(obs, focused) && (own === "navigational" ||
-        (focusForm != null && obs.focus?.searchOnly === true && riskOf("CLICK", obs.focus.label, words) === "navigational" &&
-          (obs.focus.submitLabel ?? "").split("|").every((l) => searchSubmitLabel(l, words)) && searchForm(focusForm, obs)));
-      const risk: RiskClass = search ? "navigational" : own === "destructive" ? "destructive" : "submit";
+      const label = enterLabel(obs);
+      const risk = riskOfEnter(obs, this.words(obs.url));
       ctx.risk = risk;
       ctx.action = "press_key";
       ctx.value = "Enter";

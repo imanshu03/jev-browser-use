@@ -2,7 +2,7 @@
 // and name, and code finds it in the snapshot. A step whose control does not show fails the replay, and the heal
 // ladder takes over. A sign-in wall or a captcha pauses a headed run for the user, else the run is blocked.
 import { hostOf } from "../fast/generate.js";
-import { searchField } from "../fast/loop.js";
+import { enterLabel, riskOfEnter } from "../fast/loop.js";
 import type { Action, Observation, Page } from "../fast/model.js";
 import { EditRefused, StalePage } from "../fast/model.js";
 import type { Human, Logger } from "../io.js";
@@ -146,10 +146,7 @@ export interface ReplayOptions {
   navTimeoutMs?: number;
   /** The name of the scraper, for the pause message. */
   name?: string;
-  /**
-   * Called before each click and Enter with the label and the page URL; for Enter, `search` tells that the focused field
-   * is a search field. A reason refuses the input and fails the replay.
-   */
+  /** Called before a click or Enter with its observation; a reason refuses input and fails the replay. */
   guard?: (input: ReplayGuardInput) => string | null;
 }
 
@@ -157,8 +154,10 @@ export interface ReplayGuardInput {
   kind: "click" | "enter";
   label: string;
   url: string;
-  /** Enter only: the focused field is a search field, so Enter runs a search. */
+  /** Enter only: the built-in rules allow the observed field and form to run a search. */
   search?: boolean;
+  observation?: Observation;
+  action?: Action;
 }
 
 export type ReplayResult =
@@ -211,7 +210,7 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
             if (!option) return { kind: "failed", reason: `step ${n}: ${describe(step, params)} has no option ${JSON.stringify(fillTemplate(step.value, params))}` };
             await page.act(option, obs);
           } else {
-            const refused = opts.guard?.({ kind: "click", label: action.label, url: obs.url }) ?? null;
+            const refused = opts.guard?.({ kind: "click", label: action.label, url: obs.url, observation: obs, action }) ?? null;
             if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
             await page.act(action, obs);
           }
@@ -235,15 +234,23 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
     switch (step.op) {
       case "click": case "fill": case "select": return targeted(step, n);
       case "press": {
-        if (step.key === "Enter" && opts.guard) {
-          const obs = await page.observe();
-          const label = [obs.focus?.label, obs.focus?.submitLabel].filter(Boolean).join(" | ");
-          const focused = obs.focus ? obs.actions.find((a) => a.node === obs.focus?.node) : undefined;
-          const refused = opts.guard({ kind: "enter", label, url: obs.url, search: searchField(obs, focused) });
-          if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
+        if (step.key !== "Enter" || !opts.guard) {
+          await page.press(step.key);
+          return { kind: "ok" };
         }
-        await page.press(step.key);
-        return { kind: "ok" };
+        for (let stale = 0; ; stale++) {
+          opts.signal?.throwIfAborted();
+          const obs = await page.observe();
+          const refused = opts.guard({ kind: "enter", label: enterLabel(obs), url: obs.url, search: riskOfEnter(obs) === "navigational", observation: obs });
+          if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
+          try {
+            await page.press(step.key, obs);
+            return { kind: "ok" };
+          } catch (error) {
+            if (error instanceof StalePage && stale < STALE_RETRIES) continue;
+            throw error;
+          }
+        }
       }
       case "back": await page.back(opts.navTimeoutMs ?? LIMITS.openTimeoutMs); return { kind: "ok" };
       case "scroll": {

@@ -13,7 +13,7 @@ export { StalePage } from "@imanshu03/jev-core/fast/model.js";
 export type { PageRead, ReadOptions, RecordGroup, TableRead, TextBlock } from "@imanshu03/jev-core/fast/read-types.js";
 
 // Jev runs
-export { FastRunner, riskOf, wordsFor } from "@imanshu03/jev-core/fast/loop.js";
+export { FastRunner, riskOf, riskOfEnter, searchFormButton, wordsFor } from "@imanshu03/jev-core/fast/loop.js";
 export type { FastRunnerDeps } from "@imanshu03/jev-core/fast/loop.js";
 export { createOracle } from "@imanshu03/jev-core/jev.js";
 export type { Oracle } from "@imanshu03/jev-core/jev.js";

@@ -596,7 +596,7 @@ npm run mcp       # runs the MCP server from packages/mcp/src through tsx, on st
 npm run smoke -w @imanshu03/jev-cli  # live: the three acceptance runs (SMOKE_ENGINE selects cdp, chromium, or vercel)
 ```
 
-Set up a test project with `npx jev-test init`. It asks for the app URL, the environment name, the Jev key (and checks it), optional model settings, and what Jev may do in the environment. It writes `global.yaml` with the environments, the confirm mode, the dangerous and safe click words, and instructions for Jev and the LLM. An environment, and then a suite file, can override these settings. See the [setup guide](packages/test-runner/README.md#set-up-a-project-jev-test-init) and [global settings](packages/test-runner/README.md#global-settings-globalyaml).
+Set up a test project with `npx jev-test init`. It asks for the app URL, the environment name, the Jev key (and checks it), optional model settings, and what Jev may do in the environment. It writes `global.yaml` with the environments, the confirm mode, the dangerous and safe click words, and instructions for Jev and the LLM. An environment, and then a suite file, can override these settings. Recorded Enter presses check the focused field, its form, and any selected option before input. A change to focus or the form causes a new observation and risk check. See the [setup guide](packages/test-runner/README.md#set-up-a-project-jev-test-init) and [global settings](packages/test-runner/README.md#global-settings-globalyaml).
 
 Run one package with `-w`, for example `npm test -w @imanshu03/jev-core`. The commands `npx jev-browser`, `npx jev-chat`, `npx jev-scrape`, and `npx jev-test` run from the source in this repository.
 

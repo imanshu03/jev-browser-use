@@ -4,7 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import {
   FastRunner, LIMITS, baseRunConfig, browserOf, createBrowser, createHuman, createLogger, createNavigator, defaultUserDataDir,
-  listProfiles, replaySteps, riskOf, stepsFromRecords, wordsFor,
+  listProfiles, replaySteps, riskOf, riskOfEnter, searchFormButton, stepsFromRecords, wordsFor,
 } from "@imanshu03/jev-browser-use";
 import type { Browser, BrowserKind, Logger, NavigatorDeps, Page, ReplayGuardInput, RunConfig } from "@imanshu03/jev-browser-use";
 import { DEFAULT_POLICY } from "./load.js";
@@ -45,9 +45,14 @@ export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv, llmI
 /** Why the environment does not allow a click or Enter with this label, or null when it does. Autonomous allows all. */
 export function refusal(policy: Policy, envName: string | null, input: ReplayGuardInput): string | null {
   if (policy.confirm === "autonomous") return null;
-  const own = riskOf("CLICK", input.label, wordsFor(policy.actions, input.url));
-  // Enter submits its form as the Jev loop counts it: a submit unless it runs a search, destructive with a dangerous label.
-  const risk = input.kind === "enter" && own !== "destructive" ? (input.search ? "navigational" : "submit") : own;
+  const words = wordsFor(policy.actions, input.url);
+  const own = riskOf("CLICK", input.label, words);
+  let risk = own;
+  if (input.kind === "enter") {
+    risk = input.observation ? riskOfEnter(input.observation, words) : own === "destructive" ? own : input.search ? "navigational" : "submit";
+  } else if (input.action && input.observation && searchFormButton(input.action, input.label, input.observation, words)) {
+    risk = "navigational";
+  }
   const refused = risk === "destructive" || (risk === "submit" && policy.confirm === "always");
   if (!refused) return null;
   const what = `${risk === "destructive" ? "dangerous" : "submit"} ${input.kind === "enter" ? "Enter on" : "click on"} ${JSON.stringify(input.label)}`;

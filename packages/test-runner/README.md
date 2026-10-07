@@ -47,6 +47,7 @@ npx jev-test run
 - Keys go only to `.env`. The config refers to them as `${TYPESAFE_API_KEY}` and `${JEV_TEST_LLM_API_KEY}`. `init` adds `.env` and `reports/` to `.gitignore` and makes `.env` readable only by you. The terminal does not show a key while you type it.
 - `init` checks the Jev key with one small request. When TypeSafe rejects the key, `init` asks for it again unless you keep it. When TypeSafe does not answer, `init` keeps the key by default.
 - `init` checks the LLM endpoint with `GET /models` and tells you when it does not answer or does not have the model.
+- Each action word list has at most 100 words. Each word has at most 80 characters.
 - It does not overwrite an existing config or `global.yaml`. Use `--force` to write them again; `.env` keeps its other lines.
 - With no questions, for scripts and CI: `npx jev-test init --yes --app-url https://app.example.com --llm-url https://api.openai.com/v1 --llm-model gpt-4.1 --confirm never --dangerous "approve, merge" --safe archive`. With `--yes`, a rejected Jev key is only reported, and the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment. You can also pass `--jev-key` and `--llm-key`, but the shell can keep them in its history.
 
@@ -145,9 +146,9 @@ instructions:
 |---|---|
 | `autonomous` (default) | Do every action. |
 | `never` | Do no dangerous click or Enter. Such a step fails. |
-| `always` | Do no dangerous click or Enter, no submit click (save, create, sign in, ...), and no Enter outside a search field. |
+| `always` | Do no dangerous click or Enter, no submit click (save, create, sign in, ...), and no Enter that submits a form. |
 
-Explicit `click` and `press` steps are not checked: you wrote them. A replay that the confirm mode stops fails at once, with no repair.
+Explicit `click` and `press` steps are not checked: you wrote them. A replay that the confirm mode stops fails at once, with no repair. Enter checks the focused field, its form, and the option that it selects. A search is allowed only when the direct engine's search rules permit it. If focus or the form changes before Enter, the replay observes the page and checks the action again.
 
 **`actions`** changes which click labels are dangerous. The built-in dangerous words include delete, remove, pay, buy, send, post, publish, share, reply, and archive.
 

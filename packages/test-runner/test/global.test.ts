@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { engineEnv, refusal } from "../src/engine.js";
 import { createLlm, JUDGE_INSTRUCTIONS_HEAD } from "../src/llm.js";
+import type { Observation } from "@imanshu03/jev-browser-use";
 import type { FetchLike } from "../src/llm.js";
 import { DEFAULT_POLICY, LoadError, loadProject, loadSuites } from "../src/load.js";
 import type { Policy } from "../src/load.js";
@@ -116,6 +117,26 @@ describe("refusal", () => {
     expect(refusal(policy("never"), "prod", { kind: "enter", label: "Note | Delete note", url: "https://app.example.com/" })).toMatch(/dangerous Enter on "Note \| Delete note"/);
   });
 
+  it("uses the full observation for Enter search and option checks", () => {
+    const p: Policy = { ...DEFAULT_POLICY, confirm: "always" };
+    const observation = {
+      url: "https://app.example.com/", title: "Search", text: "", scroll: { y: 0, height: 100 }, w: 100, h: 100, marker: null,
+      actions: [{ id: "e1", kind: "fill", node: 1, label: "Search", role: "searchbox", form: 10, value: "milk" }],
+      focus: { node: 1, label: "Search", role: "searchbox", form: 10, searchOnly: false, submitLabel: "Save" },
+    } as Observation;
+    const input = { kind: "enter" as const, label: "Search | Save", url: observation.url, search: true, observation };
+    expect(refusal(p, "prod", input)).toMatch(/submit Enter/);
+    const search = { ...observation, focus: { ...observation.focus!, searchOnly: true, submitLabel: "Submit" } };
+    expect(refusal(p, "prod", { ...input, label: "Search | Submit", observation: search })).toBeNull();
+    const button = { id: "e2", kind: "click" as const, node: 2, label: "Submit", role: "button", form: 10, submitControl: true, searchOnly: true };
+    const click = { kind: "click" as const, label: "Submit", url: search.url, action: button, observation: { ...search, actions: [...search.actions, button] } };
+    expect(refusal(p, "prod", click)).toBeNull();
+    expect(refusal(p, "prod", { ...click, action: { ...button, searchOnly: false } })).toMatch(/submit click/);
+    const dangerous = { ...search, focus: { ...search.focus, enterOption: { node: 2, label: "Delete account" } } };
+    expect(refusal({ ...p, confirm: "never" }, "prod", { ...input, label: "Search | Submit | picks Delete account", observation: dangerous })).toMatch(/dangerous Enter/);
+    const custom = { ...p, confirm: "never" as const, actions: { dangerous: ["submit"], safe: [], hosts: {} } };
+    expect(refusal(custom, "prod", { ...input, label: "Search | Submit", observation: search })).toMatch(/dangerous Enter/);
+  });
   it("uses the dangerous and safe words, also of the host of the page", () => {
     const p = policy("never", { dangerous: ["approve"], safe: [], hosts: { "app.example.com": { dangerous: [], safe: ["delete"] } } });
     expect(refusal(p, "prod", click("Approve request"))).toMatch(/dangerous click on "Approve request"/);

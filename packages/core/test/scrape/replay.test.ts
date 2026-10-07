@@ -166,17 +166,39 @@ describe("replaySteps", () => {
     const steps: Step[] = [{ op: "click", target: { role: "button", name: "Open" } }, { op: "click", target: { role: "button", name: "Delete note" } }];
     expect(await replaySteps(page, steps, {}, { log, guard })).toEqual({ ok: false, step: 1, reason: "step 2: not allowed here", wall: null, refused: true });
     expect(page.calls).toEqual([{ op: "act", id: "e1" }]);
-    expect(seen).toEqual([{ kind: "click", label: "Open", url: URL }, { kind: "click", label: "Delete note", url: URL }]);
+    expect(seen).toMatchObject([{ kind: "click", label: "Open", url: URL }, { kind: "click", label: "Delete note", url: URL }]);
     const enter = seqPage(() => view);
     expect(await replaySteps(enter, [{ op: "press", key: "Enter" }], {}, { log, guard })).toMatchObject({ ok: false, refused: true });
     expect(enter.calls).toEqual([]);
-    expect(seen.at(-1)).toEqual({ kind: "enter", label: "Note | Delete note", url: URL, search: false });
+    expect(seen.at(-1)).toMatchObject({ kind: "enter", label: "Note | Delete note", url: URL, search: false });
     const searchView = { ...obs(URL, [el("e7", "fill", "Search notes", "searchbox", { node: 7, value: "milk" })], "notes"), focus: { node: 7, label: "Search notes", role: "searchbox", submitLabel: "" } } as Observation;
     await replaySteps(seqPage(() => searchView), [{ op: "press", key: "Enter" }], {}, { log, guard });
-    expect(seen.at(-1)).toEqual({ kind: "enter", label: "Search notes", url: URL, search: true });
+    expect(seen.at(-1)).toMatchObject({ kind: "enter", label: "Search notes", url: URL, search: true });
     const tab = seqPage(() => view);
     expect(await replaySteps(tab, [{ op: "press", key: "Tab" }], {}, { log, guard })).toEqual({ ok: true, steps: 1 });
     expect(tab.calls).toEqual([{ op: "press", key: "Tab" }]);
+  });
+  it("checks the option that Enter picks before sending input", async () => {
+    const view = { ...EMPTY, focus: { node: 9, label: "Search", role: "searchbox", submitLabel: "", enterOption: { node: 10, label: "Delete account" } } } as Observation;
+    const page = seqPage(() => view);
+    const guard = (input: { label: string }) => /delete/i.test(input.label) ? "not allowed here" : null;
+    expect(await replaySteps(page, [{ op: "press", key: "Enter" }], {}, { log, guard })).toMatchObject({ ok: false, refused: true });
+    expect(page.calls).toEqual([]);
+  });
+  it("checks focus again before a guarded Enter and checks the new label after a change", async () => {
+    const allowed = { ...EMPTY, focus: { node: 9, label: "Title", role: "textbox", submitLabel: "Save" } } as Observation;
+    const denied = { ...allowed, focus: { ...allowed.focus!, submitLabel: "Delete account" } };
+    const page = seqPage((n) => n === 1 ? allowed : denied);
+    let presses = 0;
+    page.press = async (_key, observation) => {
+      expect(observation).toBe(allowed);
+      presses += 1;
+      throw new StalePage("focus changed");
+    };
+    const guard = (input: { label: string }) => /delete/i.test(input.label) ? "not allowed here" : null;
+    expect(await replaySteps(page, [{ op: "press", key: "Enter" }], {}, { log, guard })).toMatchObject({ ok: false, refused: true });
+    expect(presses).toBe(1);
+    expect(page.observes).toBe(2);
   });
   it("a missing control of a value that the page shows already skips its steps after a short wait", async () => {
     const results = obs(URL, [el("e5", "fill", "Search", "combobox", { value: "" })], "results");
