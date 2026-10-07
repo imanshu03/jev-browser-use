@@ -68,7 +68,7 @@ codex mcp list
   ```
 
 - The plugin supplies the skills. Do not also link a skill into the Codex profile, because Codex then shows two copies.
-- With no plugin, the user can add the server to `config.toml`. The `config.toml` block is in the "Install in Codex" section of the repository `README.md`. Then the user must link each skill folder of `packages/mcp/skills` into a Codex skill folder.
+- With no plugin, the user can add the server to `config.toml`. The `config.toml` block is in the "Install in Codex" section of the repository `HOW_TO_USE.md`. Then the user must link each skill folder of `packages/mcp/skills` into a Codex skill folder.
 
 ## API key
 

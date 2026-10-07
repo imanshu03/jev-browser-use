@@ -2,7 +2,7 @@
 
 This document defines the design of the one-shot CLI, chat mode, and the MCP server of the assistant plugin for `jev-browser-use`. The package name is `jev-browser-use`; the command names remain `jev-browser` and `jev-chat`. Configuration directories retain the `jev-browser` name so saved keys and profile copies remain available. The public engine choices are `cdp` (default), `chromium`, and `vercel`. The `cdp` and `chromium` options share the direct implementation; `vercel` uses the `agent-browser` implementation. Below, “direct engines” means `cdp` and `chromium`. Internal `FastRunner` and `src/fast/` names remain unchanged. Engine-specific behavior is stated explicitly.
 
-Use [README.md](README.md) for installation, flags, and user commands. Exact interfaces, prompt strings, and limits live in the source files linked here. Update this document when a change affects architecture or behavior.
+Use [HOW_TO_USE.md](HOW_TO_USE.md) for installation, flags, and user commands. Exact interfaces, prompt strings, and limits live in the source files linked here. Update this document when a change affects architecture or behavior.
 
 ## 1. Purpose and boundaries
 
@@ -804,7 +804,7 @@ Step records include operation and target confidence, runner-up probability, val
 
 ## 9. CLI and result contract
 
-[README.md](README.md) describes user commands, flags, and engine settings. [src/cli.ts](src/cli.ts) and [src/chat.ts](src/chat.ts) define the accepted arguments. [package.json](package.json) defines runtime requirements and scripts.
+[HOW_TO_USE.md](HOW_TO_USE.md) describes user commands, flags, and engine settings. [src/cli.ts](src/cli.ts) and [src/chat.ts](src/chat.ts) define the accepted arguments. [package.json](package.json) defines runtime requirements and scripts.
 
 The one-shot CLI accepts engine, profile, refresh, browser binary, start URL, goal, headed mode, CDP attachment, variables, step and time budgets, confirmation, dry run, session, model, logging, keep-open, and screenshot options. Default engine is `cdp`; `JEV_BROWSER_ENGINE` can set the default. `--engine` overrides a valid environment default. The accepted names are exactly `cdp`, `chromium`, and `vercel`; `fast` and `legacy` are rejected. Chat exposes the supported subset through flags and session commands.
 

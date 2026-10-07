@@ -78,8 +78,8 @@ describe("plugin files", () => {
     // Codex gives a stdio server only a small base environment, so the key must be in the list. A headed Chrome
     // on Linux needs the display variables. Codex skips a variable that is not set.
     expect(s.env_vars).toEqual(expect.arrayContaining(["TYPESAFE_API_KEY", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]));
-    // The README fallback for config.toml passes the same list.
-    const readme = readFileSync(path.join(root, "README.md"), "utf8");
+    // The HOW_TO_USE.md fallback for config.toml passes the same list.
+    const readme = readFileSync(path.join(root, "HOW_TO_USE.md"), "utf8");
     const block = /\[mcp_servers\.jev\][\s\S]*?env_vars = (\[[\s\S]*?\])/.exec(readme);
     expect(JSON.parse(block?.[1] ?? "[]")).toEqual(s.env_vars);
   });
@@ -153,7 +153,7 @@ describe("skill set", () => {
   it("jev-plugin gives the install commands of both clients and names the other skills", () => {
     const body = readFileSync(path.join(mcpDir, "skills/jev-plugin/SKILL.md"), "utf8");
     for (const w of ["npm run plugins", "claude plugin install jev-browser@jev-browser-use", "codex plugin add jev-browser@jev-browser-use", "TYPESAFE_API_KEY", "`jev-browser`", "`jev-test`"]) expect(body, w).toContain(w);
-    const readme = readFileSync(path.join(root, "README.md"), "utf8");
+    const readme = readFileSync(path.join(root, "HOW_TO_USE.md"), "utf8");
     for (const v of [...body.matchAll(/^\| `(JEV_MCP_[A-Z_]+)` \|/gm)].map((m) => m[1] as string)) expect(readme, v).toContain(`\`${v}\``);
   });
 });
