@@ -224,9 +224,11 @@ class SuiteRunner {
     const entry = this.o.mode.record ? null : this.store.get(key, text);
     const at = (this.o.now ?? (() => new Date()))().toISOString();
     if (entry) {
-      const r = await this.session.replay(entry.steps, params, run.signal);
+      const r = await this.session.replay(entry.steps, params, run.signal, { guard: true });
       run.signal?.throwIfAborted();
       if (r.ok) { push("replay", true); return; }
+      // A refused action is the environment's rule, not a changed page: no repair.
+      if (r.refused) { push("replay", false, r.reason); return; }
       const why = `replay failed at ${r.reason}`;
       if (this.o.mode.heal === "off") { push("replay", false, why); return; }
       this.log(`repairing "${task}": ${why}`);
@@ -265,7 +267,7 @@ class SuiteRunner {
         run.steps.push({ label, how: "expect", ok: false, ms: 0, detail: SECRET_IN_CHECK });
         throw new StepFailure(`expected ${label}: ${SECRET_IN_CHECK}`);
       }
-      const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: this.o.llm, timeoutMs: this.o.project.config.timeouts.assert_ms, ...(run.signal ? { signal: run.signal } : {}), redactor: (text) => this.o.project.secrets.redact(text) });
+      const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: this.o.llm, instructions: this.suite.policy.llmInstructions, timeoutMs: this.o.project.config.timeouts.assert_ms, ...(run.signal ? { signal: run.signal } : {}), redactor: (text) => this.o.project.secrets.redact(text) });
       run.signal?.throwIfAborted();
       const red = { ...r, label: this.o.project.secrets.redact(r.label), detail: this.o.project.secrets.redact(r.detail) };
       run.assertions.push(red);
@@ -364,7 +366,7 @@ async function runSuite(o: RunOptions, suite: LoadedSuite): Promise<SuiteResult>
   let recordingsSaved: string | null = null;
   try {
     try {
-      session = await o.sessions.open(def.suite, (line) => o.onLog?.(o.project.secrets.redact(line)));
+      session = await o.sessions.open(def.suite, (line) => o.onLog?.(o.project.secrets.redact(line)), suite.policy);
       runner = new SuiteRunner(o, suite, session);
     } catch (e) {
       setupError ??= `the browser did not start: ${(e as Error).message}`;

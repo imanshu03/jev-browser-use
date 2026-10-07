@@ -13,14 +13,18 @@ export { StalePage } from "@imanshu03/jev-core/fast/model.js";
 export type { PageRead, ReadOptions, RecordGroup, TableRead, TextBlock } from "@imanshu03/jev-core/fast/read-types.js";
 
 // Jev runs
-export { FastRunner } from "@imanshu03/jev-core/fast/loop.js";
+export { FastRunner, riskOf, riskOfEnter, searchFormButton, wordsFor } from "@imanshu03/jev-core/fast/loop.js";
 export type { FastRunnerDeps } from "@imanshu03/jev-core/fast/loop.js";
 export { createOracle } from "@imanshu03/jev-core/jev.js";
 export type { Oracle } from "@imanshu03/jev-core/jev.js";
 export { createTransport } from "@imanshu03/jev-core/transport.js";
 export type { Transport } from "@imanshu03/jev-core/transport.js";
-export type { Goal, Outcome, RunConfig, RunResult, StepRecord } from "@imanshu03/jev-core/types.js";
-export { DEFAULT_PROFILE_NAME, LIMITS, secretKey } from "@imanshu03/jev-core/types.js";
+export type { ActionRules, ActionWords, Goal, Outcome, RunConfig, RunResult, StepRecord } from "@imanshu03/jev-core/types.js";
+export { DEFAULT_PROFILE_NAME, DESTRUCTIVE_WORDS, LIMITS, SUBMIT_WORDS, secretKey } from "@imanshu03/jev-core/types.js";
+
+// Keys
+export { validateKey } from "@imanshu03/jev-core/config.js";
+export type { KeyCheck } from "@imanshu03/jev-core/config.js";
 
 // People, logs, and text
 export { createHuman, createLogger } from "@imanshu03/jev-core/io.js";
@@ -34,6 +38,6 @@ export type { LlmBackend, LlmReply } from "@imanshu03/jev-core/scrape/llm.js";
 export { stepsFromRecords, beforeRepeat } from "@imanshu03/jev-core/scrape/record.js";
 export type { RecordedSteps, RecordOptions } from "@imanshu03/jev-core/scrape/record.js";
 export { replaySteps, STEP_MS } from "@imanshu03/jev-core/scrape/replay.js";
-export type { ReplayOptions, ReplayResult } from "@imanshu03/jev-core/scrape/replay.js";
+export type { ReplayGuardInput, ReplayOptions, ReplayResult } from "@imanshu03/jev-core/scrape/replay.js";
 export { Step, Target, PRESS_KEYS } from "@imanshu03/jev-core/scrape/spec.js";
 export { fillTemplate } from "@imanshu03/jev-core/scrape/spec.js";

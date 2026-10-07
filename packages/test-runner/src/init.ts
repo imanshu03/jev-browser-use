@@ -3,9 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { parseEnv } from "node:util";
+import { validateKey } from "@imanshu03/jev-browser-use";
+import type { KeyCheck } from "@imanshu03/jev-browser-use";
 import { Secrets } from "./template.js";
 import type { FetchLike } from "./llm.js";
 import { CONFIG_FILE } from "./load.js";
+import { ConfirmMode } from "./schema.js";
+
+/** The global file that init writes next to the config: environments, confirm mode, action words, and instructions. */
+export const GLOBAL_FILE = "global.yaml";
 
 /** The env var names that init writes to .env. The config refers to them, so no key goes into the config file. */
 export const JEV_KEY_VAR = "TYPESAFE_API_KEY";
@@ -25,6 +31,12 @@ export interface InitAnswers {
   llmUrl: string;
   llmKey: string;
   llmModel: string;
+  /** What Jev may do in the environment: autonomous, never, or always. */
+  confirm: string;
+  /** Extra dangerous words, comma-separated. */
+  dangerous: string;
+  /** Safe words, comma-separated. */
+  safe: string;
   example: boolean;
   ciWorkflow: boolean;
 }
@@ -39,6 +51,8 @@ export interface InitOptions {
   env: NodeJS.ProcessEnv;
   prompter: Prompter;
   fetch?: FetchLike;
+  /** Checks a Jev key with one small request. Default: the check of jev-chat. */
+  validateKey?: (key: string, model: string) => Promise<KeyCheck>;
 }
 
 const ENV_NAME = /^[a-z][a-z0-9_-]{0,30}$/;
@@ -101,6 +115,65 @@ export async function checkLlm(baseUrl: string, apiKey: string, model: string, f
   }
 }
 
+/** Check a Jev key with one small request. It reports; init asks before it drops a key. The detail never holds the key. */
+export async function checkJevKey(key: string, check: (key: string, model: string) => Promise<KeyCheck> = validateKey): Promise<{ ok: boolean; rejected: boolean; detail: string }> {
+  const r = await check(key, "jev-latest");
+  if (r.ok) return { ok: true, rejected: false, detail: `the key works (model ${r.model})` };
+  const secrets = new Secrets();
+  secrets.add(key);
+  const message = secrets.redact(r.message).slice(0, 200);
+  if (r.kind === "rejected") return { ok: false, rejected: true, detail: `TypeSafe rejected the key: ${message}` };
+  return { ok: false, rejected: false, detail: `${r.kind === "network" ? "TypeSafe did not answer" : "the check failed"}: ${message}` };
+}
+
+/** The words of a comma-separated answer, in lower case, without repeats. */
+export function wordList(text: string): string[] {
+  return [...new Set(text.split(",").map((w) => w.trim().toLowerCase()).filter(Boolean))];
+}
+
+function wordProblem(text: string): string | null {
+  const words = wordList(text);
+  if (words.length > 100) return "a list has at most 100 words";
+  return words.some((word) => word.length > 80) ? "a word has at most 80 characters" : null;
+}
+
+export function renderGlobal(a: InitAnswers): string {
+  const dangerous = wordList(a.dangerous);
+  const safe = wordList(a.safe);
+  return [
+    "# Created by jev-test init. Settings that every suite of this project shares.",
+    "",
+    "environments:",
+    `  ${a.envName}:`,
+    `    base_url: ${JSON.stringify(a.appUrl)}`,
+    `    confirm: ${a.confirm}`,
+    "    # Settings for this environment only. They go over the settings below:",
+    "    # instructions: { jev: \"...\", llm: \"...\" }",
+    "    # actions: { dangerous: [], safe: [] }",
+    `default_environment: ${a.envName}`,
+    "",
+    "# What Jev may do when it records or repairs a step, and what a replay of a recorded step may click.",
+    "#   autonomous: every action.   never: no dangerous action.   always: no dangerous action and no submit.",
+    "confirm: autonomous",
+    "",
+    "# Click label words, added to the built-in lists. A dangerous word makes a click dangerous.",
+    "# A safe word stops a built-in dangerous word: \"archive\" stops \"archive\", \"remove from list\" stops \"remove\".",
+    "actions:",
+    `  dangerous: ${JSON.stringify(dangerous)}`,
+    `  safe: ${JSON.stringify(safe)}`,
+    "  # Words for one host and its subdomains only:",
+    "  # hosts:",
+    `  #   ${new URL(a.appUrl).hostname}: { dangerous: [approve], safe: [] }`,
+    "",
+    "# jev: short notes about the app for Jev. llm: instructions for the text writer and the judge.",
+    "instructions:",
+    "  # jev: The Save button of the editor is the disk icon in the toolbar.",
+    "  # llm: Write all text in British English.",
+    "  {}",
+    "",
+  ].join("\n");
+}
+
 export function renderConfig(a: InitAnswers): string {
   const llm = a.llmUrl
     ? [
@@ -119,10 +192,8 @@ export function renderConfig(a: InitAnswers): string {
     ];
   return [
     "# Created by jev-test init. Keys are in .env, which git ignores.",
-    "environments:",
-    `  ${a.envName}:`,
-    `    base_url: ${JSON.stringify(a.appUrl)}`,
-    `default_environment: ${a.envName}`,
+    `# The environments, the confirm mode, the action words, and the instructions are in ${GLOBAL_FILE}.`,
+    `global: ${GLOBAL_FILE}`,
     "",
     "suites: suites",
     "recordings: .jev/recordings",
@@ -266,10 +337,21 @@ export async function runInit(o: InitOptions): Promise<number> {
   const configPath = path.join(o.dir, CONFIG_FILE);
   try {
     if (fs.existsSync(configPath) && !o.force) throw new InitError(`${configPath} exists. Run init with --force to write it again`);
+    const globalPath = path.join(o.dir, GLOBAL_FILE);
+    if (fs.existsSync(globalPath) && !o.force) throw new InitError(`${globalPath} exists. Run init with --force to write it again`);
     if (!o.yes) say("jev-test init: answer each question, or press Enter to take the value in [brackets].\n");
     const appUrl = await value(o, "appUrl", "URL of the web app to test", { required: true, check: (s) => (isHttpUrl(s) ? null : "give an http or https URL") });
     const envName = await value(o, "envName", "Name of this environment", { required: true, default: "staging", check: (s) => (ENV_NAME.test(s) ? null : "use a-z, 0-9, _ and -, starting with a letter") });
-    const jevKey = await value(o, "jevKey", "TypeSafe API key for Jev (empty: add it later; replays need no key)", { secret: true, envVar: JEV_KEY_VAR });
+    const askKey = () => value(o, "jevKey", "TypeSafe API key for Jev (empty: add it later; replays need no key)", { secret: true, envVar: JEV_KEY_VAR });
+    let jevKey = await askKey();
+    for (let tries = 1; jevKey; tries++) {
+      const r = await checkJevKey(jevKey, o.validateKey);
+      say(`  Jev key check: ${r.detail}`);
+      if (r.ok || o.yes || typeof o.given.jevKey === "string") break;
+      if (await o.prompter.confirm("Keep this key anyway?", !r.rejected)) break;
+      if (tries >= 3) throw new InitError("stopped: the Jev key was not kept");
+      jevKey = await askKey();
+    }
     const llmUrl = await value(o, "llmUrl", "OpenAI-compatible base URL for the LLM, such as https://api.openai.com/v1 (empty: no LLM)", { check: (s) => (isHttpUrl(s) ? null : "give an http or https URL") });
     let llmKey = "";
     let llmModel = "";
@@ -280,11 +362,21 @@ export async function runInit(o: InitOptions): Promise<number> {
       say(`  LLM check: ${r.detail}`);
       if (!r.ok && !o.yes && !(await o.prompter.confirm("Keep these LLM settings anyway?", true))) throw new InitError("stopped: the LLM settings were not kept");
     }
+    const confirm = await value(o, "confirm", "What may Jev do in this environment? autonomous (every action), never (no dangerous action), always (no dangerous action and no submit)", {
+      default: "autonomous", required: true, check: (s) => (ConfirmMode.safeParse(s).success ? null : "answer autonomous, never, or always"),
+    });
+    const dangerous = await value(o, "dangerous", "More dangerous click words, comma-separated, such as approve, merge (empty for none)", { check: wordProblem });
+    const safe = await value(o, "safe", "Safe click words that are dangerous by default, comma-separated, such as archive (empty for none)", {
+      check: (s) => {
+        const both = wordList(s).filter((w) => wordList(dangerous).includes(w));
+        return both.length > 0 ? `${both.join(", ")} is also a dangerous word` : wordProblem(s);
+      },
+    });
     const suitesDir = path.join(o.dir, "suites");
     const hasSuites = fs.existsSync(suitesDir) && fs.readdirSync(suitesDir).some((f) => f.endsWith(".suite.yaml"));
     const example = hasSuites ? false : await flag(o, "example", "Write an example suite?", true);
     const ci = await flag(o, "ciWorkflow", "Write a GitHub Actions workflow?", false);
-    const a: InitAnswers = { envName, appUrl: appUrl.replace(/\/+$/, ""), jevKey, llmUrl: llmUrl.replace(/\/+$/, ""), llmKey, llmModel, example, ciWorkflow: ci };
+    const a: InitAnswers = { envName, appUrl: appUrl.replace(/\/+$/, ""), jevKey, llmUrl: llmUrl.replace(/\/+$/, ""), llmKey, llmModel, confirm, dangerous, safe, example, ciWorkflow: ci };
 
     const written: string[] = [];
     const put = (rel: string, text: string, mode?: number) => {
@@ -297,6 +389,7 @@ export async function runInit(o: InitOptions): Promise<number> {
     const envPath = path.join(o.dir, ".env");
     const envText = mergeEnv(fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "", { [JEV_KEY_VAR]: a.jevKey, [LLM_KEY_VAR]: a.llmKey });
     put(CONFIG_FILE, renderConfig(a));
+    put(GLOBAL_FILE, renderGlobal(a));
     if (envText) put(".env", envText, 0o600);
     const ignorePath = path.join(o.dir, ".gitignore");
     const ignore = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8") : "";

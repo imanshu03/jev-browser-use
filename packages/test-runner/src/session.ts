@@ -1,5 +1,6 @@
 // What the runner needs from a browser. The real one wraps jev-browser-use (engine.ts); tests use a fake.
 import type { Observation, PageRead, Step } from "@imanshu03/jev-browser-use";
+import type { Policy } from "./load.js";
 
 export interface JevOutcome {
   ok: boolean;
@@ -11,13 +12,19 @@ export interface JevOutcome {
   jevRequests: number;
 }
 
-export type ReplayOutcome = { ok: true } | { ok: false; step: number; reason: string };
+/** `refused`: the environment does not allow the action of the step, so nothing was sent and no repair may run. */
+export type ReplayOutcome = { ok: true } | { ok: false; step: number; reason: string; refused?: true };
+
+export interface ReplayOptions {
+  /** Check each click and Enter against the confirm mode and the action words of the environment. For recorded steps. */
+  guard?: boolean;
+}
 
 export interface Session {
   goto(url: string): Promise<void>;
   /** Let Jev do a plain-language step on the current page. */
   jev(task: string, params: Record<string, string>, goal: "act" | "check", signal?: AbortSignal): Promise<JevOutcome>;
-  replay(steps: readonly Step[], params: Record<string, string>, signal?: AbortSignal): Promise<ReplayOutcome>;
+  replay(steps: readonly Step[], params: Record<string, string>, signal?: AbortSignal, opts?: ReplayOptions): Promise<ReplayOutcome>;
   /** Type into a field by its label with code only: for password and other credential fields, which Jev never sees. */
   fillCredential(field: string, value: string): Promise<ReplayOutcome>;
   observe(): Promise<Observation>;
@@ -29,5 +36,6 @@ export interface Session {
 }
 
 export interface SessionFactory {
-  open(name: string, log: (line: string) => void): Promise<Session>;
+  /** `policy`: the settings of the suite. Absent: the policy that the factory got. */
+  open(name: string, log: (line: string) => void, policy?: Policy): Promise<Session>;
 }

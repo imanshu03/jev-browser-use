@@ -18,7 +18,7 @@ import type { InitAnswers, Prompter } from "./init.js";
 const HELP = `jev-test - YAML test suites run by Jev in Chrome
 
 Usage:
-  jev-test init [options]                           Ask for the settings and write jev-test.config.yaml, .env, and an example suite
+  jev-test init [options]                           Ask for the settings and write jev-test.config.yaml, global.yaml, .env, and an example suite
   jev-test run [suite files or dirs...] [options]   Run the cases (default: the suites directory of the config)
   jev-test list [suite files or dirs...] [options]  List the cases that a run would select
   jev-test validate [suite files or dirs...]        Check the config and the suites
@@ -45,6 +45,9 @@ Init options (each one skips its question):
   --llm-url <url>     OpenAI-compatible base URL, such as https://api.openai.com/v1
   --llm-key <key>     API key of that endpoint (or JEV_TEST_LLM_API_KEY with --yes)
   --llm-model <name>  Model name
+  --confirm <mode>    What Jev may do: autonomous, never, or always (default autonomous)
+  --dangerous <words> More dangerous click words, comma-separated
+  --safe <words>      Safe click words, comma-separated
   --no-example        Do not write an example suite
   --ci-workflow       Also write a GitHub Actions workflow
   --yes               Ask nothing: use the options, the env keys, and the defaults
@@ -73,7 +76,8 @@ export async function main(argv: string[], io: CliIo = {
         grep: { type: "string" }, headed: { type: "boolean" }, record: { type: "boolean" }, ci: { type: "boolean" }, heal: { type: "string" },
         workers: { type: "string" }, "report-dir": { type: "string" }, help: { type: "boolean", short: "h" },
         dir: { type: "string" }, "app-url": { type: "string" }, "env-name": { type: "string" }, "jev-key": { type: "string" }, "llm-url": { type: "string" },
-        "llm-key": { type: "string" }, "llm-model": { type: "string" }, "no-example": { type: "boolean" }, "ci-workflow": { type: "boolean" },
+        "llm-key": { type: "string" }, "llm-model": { type: "string" },
+        confirm: { type: "string" }, dangerous: { type: "string" }, safe: { type: "string" }, "no-example": { type: "boolean" }, "ci-workflow": { type: "boolean" },
         yes: { type: "boolean", short: "y" }, force: { type: "boolean" },
       },
     });
@@ -89,6 +93,7 @@ export async function main(argv: string[], io: CliIo = {
       ...(v["app-url"] !== undefined ? { appUrl: v["app-url"] } : {}), ...(v["env-name"] !== undefined ? { envName: v["env-name"] } : {}),
       ...(v["jev-key"] !== undefined ? { jevKey: v["jev-key"] } : {}), ...(v["llm-url"] !== undefined ? { llmUrl: v["llm-url"] } : {}),
       ...(v["llm-key"] !== undefined ? { llmKey: v["llm-key"] } : {}), ...(v["llm-model"] !== undefined ? { llmModel: v["llm-model"] } : {}),
+      ...(v.confirm !== undefined ? { confirm: v.confirm } : {}), ...(v.dangerous !== undefined ? { dangerous: v.dangerous } : {}), ...(v.safe !== undefined ? { safe: v.safe } : {}),
       ...(v["no-example"] ? { example: false } : {}), ...(v["ci-workflow"] ? { ciWorkflow: true } : {}),
     };
     return runInit({
@@ -135,14 +140,17 @@ export async function main(argv: string[], io: CliIo = {
   const reportDir = args.values["report-dir"] ? path.resolve(args.values["report-dir"]) : path.join(project.root, project.config.reports, runId);
   let sessions;
   try {
-    sessions = jevSessions({ config: project.config, secrets: project.secrets, processEnv: project.processEnv, headed: Boolean(args.values.headed) || project.config.browser.headed, logDir: path.join(reportDir, "logs") });
+    sessions = jevSessions({
+      config: project.config, secrets: project.secrets, processEnv: project.processEnv, headed: Boolean(args.values.headed) || project.config.browser.headed,
+      logDir: path.join(reportDir, "logs"), policy: project.policy, envName: project.env.name,
+    });
   } catch (e) {
     io.err(`error: ${(e as Error).message}`);
     return 2;
   }
   io.out(`jev-test run ${runId}: environment ${project.env.name ?? "(none)"} at ${project.env.baseUrl}; heal ${heal}${ci ? "; CI mode" : ""}${args.values.record ? "; recording all steps" : ""}`);
   const report = await runAll({
-    project, suites, sessions, llm: createLlm(project.config.llm), runId, reportDir,
+    project, suites, sessions, llm: createLlm(project.config.llm, undefined, project.policy.llmInstructions), runId, reportDir,
     mode: { ci, record: Boolean(args.values.record), heal }, workers: sharedProfile ? 1 : workers,
     onEvent: consoleReporter(io.out), onLog: (l) => io.err(l),
   });

@@ -7,7 +7,7 @@ Use it as:
 - **A command line:** `jev-browser` runs one task, and `jev-chat` runs many tasks in one browser.
 - **A Claude Code or Codex plugin:** your assistant starts browser tasks and writes new text, such as replies, when a form needs it.
 - **Scrapers:** `jev-scrape` saves the path to a table or a list once, then gets the rows again with no model call. It repairs itself when the site changes.
-- **Web app tests:** `jev-test` runs YAML test cases. Jev records each plain-language step once, and later runs replay it with code.
+- **Web app tests:** `jev-test` runs YAML test cases. Jev records each plain-language step once, and later runs replay it with code. A `global.yaml` sets, for each environment or suite file, which actions Jev may do (for example, no deletes on production) and what Jev should know about the app.
 
 Read [HOW_TO_USE.md](HOW_TO_USE.md) for every command, flag, and rule.
 
@@ -29,6 +29,7 @@ npx jev-chat
 | Use the plugin in Claude Code or Codex | [Assistant plugin](HOW_TO_USE.md#assistant-plugin-claude-code-and-codex) |
 | Save and run a scraper | [Scraping](HOW_TO_USE.md#scraping-jev-scrape) |
 | Test a web app with YAML suites | [jev-test](packages/test-runner/README.md) |
+| Limit what tests may do, per environment or suite | [Global settings](packages/test-runner/README.md#global-settings-globalyaml) |
 
 ## Repository layout
 

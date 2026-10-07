@@ -41,4 +41,27 @@ it("gives the engine a redactor for secrets that can appear on the page", async 
   } finally { await session.close(); }
 });
 
+it("gives each Jev run the confirm mode, the action words, the notes of global.yaml, and hints that name the environment", async () => {
+  fake.result = { outcome: "done", reason: "done", steps: [] } as unknown as RunResult;
+  const policy = { globalPath: "/p/global.yaml", confirm: "never" as const, actions: { dangerous: ["approve"], safe: ["archive"], hosts: {} }, jevNotes: "Save is the disk icon.", llmInstructions: "" };
+  const session = await jevSessions({ config: ConfigDef.parse({}), secrets: new Secrets(), processEnv: {}, headed: false, logDir: tempDir(), policy, envName: "prod" }).open("Policy", () => undefined);
+  try {
+    await session.jev("Archive the note", {}, "act");
+    expect(fake.deps?.cfg).toMatchObject({ confirm: "never", actions: policy.actions, notes: "Save is the disk icon." });
+    expect(fake.deps?.hints?.confirmNever).toBe("confirm is never for this suite in the prod environment. To allow it, change confirm or the actions words in global.yaml, the environment, or the suite file");
+  } finally { await session.close(); }
+  const suite = { ...policy, confirm: "autonomous" as const, jevNotes: "Suite notes." };
+  const overridden = await jevSessions({ config: ConfigDef.parse({}), secrets: new Secrets(), processEnv: {}, headed: false, logDir: tempDir(), policy, envName: "prod" }).open("Suite", () => undefined, suite);
+  try {
+    await overridden.jev("Archive the note", {}, "act");
+    expect(fake.deps?.cfg).toMatchObject({ confirm: "autonomous", notes: "Suite notes." });
+  } finally { await overridden.close(); }
+  const plain = await jevSessions({ config: ConfigDef.parse({}), secrets: new Secrets(), processEnv: {}, headed: false, logDir: tempDir() }).open("Default", () => undefined);
+  try {
+    await plain.jev("Archive the note", {}, "act");
+    expect(fake.deps?.cfg.confirm).toBe("autonomous");
+    expect(fake.deps?.cfg).not.toHaveProperty("notes");
+  } finally { await plain.close(); }
+});
+
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), "jev-engine-test-")); }

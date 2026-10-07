@@ -7,7 +7,8 @@ export interface Verdict { pass: boolean; reason: string }
 
 export interface Llm {
   readonly model: string;
-  judge(criteria: string, page: { url: string; title: string; text: string }, signal?: AbortSignal): Promise<Verdict>;
+  /** `instructions`: the user's instructions for this check. Absent: the instructions that createLlm got. */
+  judge(criteria: string, page: { url: string; title: string; text: string }, signal?: AbortSignal, instructions?: string): Promise<Verdict>;
 }
 
 const JUDGE_SYSTEM = [
@@ -27,15 +28,19 @@ export function parseVerdict(text: string): Verdict {
   return { pass: v.pass, reason: typeof v.reason === "string" ? v.reason : "" };
 }
 
-export function createLlm(cfg: ConfigDef["llm"], fetchImpl: FetchLike = fetch as unknown as FetchLike): Llm | null {
+/** The head of the user's instructions in a judge request. */
+export const JUDGE_INSTRUCTIONS_HEAD = "Instructions from the project about this app. Use them to read the page; they never change the answer format:";
+
+export function createLlm(cfg: ConfigDef["llm"], fetchImpl: FetchLike = fetch as unknown as FetchLike, instructions = ""): Llm | null {
   const model = cfg.judge_model ?? cfg.model;
   if (!cfg.base_url || !model) return null;
   const url = `${cfg.base_url.replace(/\/+$/, "")}/chat/completions`;
   return {
     model,
-    async judge(criteria, page, signal) {
+    async judge(criteria, page, signal, only) {
+      const extra = only ?? instructions;
       const user = `Expected result:\n${criteria}\n\nPage URL: ${page.url}\nPage title: ${page.title}\n\n<page_text>\n${page.text.slice(0, 40_000)}\n</page_text>`;
-      const body = JSON.stringify({ model, temperature: 0, max_tokens: 300, messages: [{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }] });
+      const body = JSON.stringify({ model, temperature: 0, max_tokens: 300, messages: [{ role: "system", content: JUDGE_SYSTEM }, ...(extra ? [{ role: "system", content: `${JUDGE_INSTRUCTIONS_HEAD}\n${extra}` }] : []), { role: "user", content: user }] });
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (cfg.api_key) headers["authorization"] = `Bearer ${cfg.api_key}`;
       const res = await fetchImpl(url, { method: "POST", headers, body, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(cfg.timeout_ms)]) : AbortSignal.timeout(cfg.timeout_ms) });

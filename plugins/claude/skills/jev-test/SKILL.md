@@ -12,14 +12,15 @@ Read [reference.md](references/reference.md) for every config key, step, check, 
 ## Find the project
 
 1. Look for `jev-test.config.yaml`. Read its `suites`, `recordings`, and `reports` paths relative to the config directory. Their defaults are `suites/`, `.jev/recordings/`, and `reports/`.
-2. If there is no config, the project is not set up. Tell the user to run `npx jev-test init` in a terminal. It asks for the app URL, the TypeSafe API key, and an optional OpenAI-compatible LLM endpoint, and it writes the keys only to `.env`. Do not ask the user to paste a key into the chat. In a project outside the jev-browser-use repository, the user first installs the package:
+2. If there is no config, the project is not set up. Tell the user to run `npx jev-test init` in a terminal. It asks for the app URL, the TypeSafe API key (and checks it), an optional OpenAI-compatible LLM endpoint, and what Jev may do in the environment. It writes the keys only to `.env`, and the environment settings to `global.yaml`. Do not ask the user to paste a key into the chat. In a project outside the jev-browser-use repository, the user first installs the package:
 
    ```sh
    # .npmrc: @imanshu03:registry=https://npm.pkg.github.com, and a token with read:packages
    npm install --save-dev @imanshu03/jev-test
    ```
 
-3. Read the config: the environments, `vars`, `secrets`, and `flows` (such as `login`). Read the suites near the feature, and use their style, id prefix, and tags.
+3. Read the config: `vars`, `secrets`, and `flows` (such as `login`). Read `global.yaml` next to it: the environments, `confirm`, the `actions` words, and the `instructions`. Read the suites near the feature, and use their style, id prefix, and tags.
+4. `confirm`, `actions`, and `instructions` come from `global.yaml`, then the environment, then the suite file: the suite file wins. Under `confirm: never` or `always`, a case cannot do a dangerous action (or, with `always`, a submit) through a plain-language step or a recorded replay. When the user wants a label treated another way, change the `actions` words, not the step text: in the suite file for one file, in `global.yaml` for all. Put facts about the app for Jev in `instructions.jev`, never in the steps. A suite file can loosen `confirm` also on production, so tell the user when you set `confirm` or safe words in a suite file.
 
 ## Learn the page first
 

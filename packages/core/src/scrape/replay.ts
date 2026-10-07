@@ -2,6 +2,7 @@
 // and name, and code finds it in the snapshot. A step whose control does not show fails the replay, and the heal
 // ladder takes over. A sign-in wall or a captcha pauses a headed run for the user, else the run is blocked.
 import { hostOf } from "../fast/generate.js";
+import { enterLabel, riskOfEnter } from "../fast/loop.js";
 import type { Action, Observation, Page } from "../fast/model.js";
 import { EditRefused, StalePage } from "../fast/model.js";
 import type { Human, Logger } from "../io.js";
@@ -145,14 +146,27 @@ export interface ReplayOptions {
   navTimeoutMs?: number;
   /** The name of the scraper, for the pause message. */
   name?: string;
+  /** Called before a click or Enter with its observation; a reason refuses input and fails the replay. */
+  guard?: (input: ReplayGuardInput) => string | null;
+}
+
+export interface ReplayGuardInput {
+  kind: "click" | "enter";
+  label: string;
+  url: string;
+  /** Enter only: the built-in rules allow the observed field and form to run a search. */
+  search?: boolean;
+  observation?: Observation;
+  action?: Action;
 }
 
 export type ReplayResult =
   | { ok: true; steps: number }
   /** `step`: the 0-based index of the step that failed. */
-  | { ok: false; step: number; reason: string; wall: Wall | null };
+  /** `refused`: the guard refused the input, so nothing was sent. */
+  | { ok: false; step: number; reason: string; wall: Wall | null; refused?: true };
 
-type StepOutcome = { kind: "ok" } | { kind: "missing"; obs: Observation; reason: string } | { kind: "failed"; reason: string } | { kind: "skip"; to: number; reason: string };
+type StepOutcome = { kind: "ok" } | { kind: "missing"; obs: Observation; reason: string } | { kind: "failed"; reason: string; refused?: true } | { kind: "skip"; to: number; reason: string };
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -195,7 +209,11 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
             const option = same.find((a) => normText(optionName(a)) === value);
             if (!option) return { kind: "failed", reason: `step ${n}: ${describe(step, params)} has no option ${JSON.stringify(fillTemplate(step.value, params))}` };
             await page.act(option, obs);
-          } else await page.act(action, obs);
+          } else {
+            const refused = opts.guard?.({ kind: "click", label: action.label, url: obs.url, observation: obs, action }) ?? null;
+            if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
+            await page.act(action, obs);
+          }
           return { kind: "ok" };
         } catch (e) {
           if (e instanceof StalePage && stale < STALE_RETRIES) { stale += 1; continue; }
@@ -215,7 +233,25 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
   const run = async (step: Step, n: number): Promise<StepOutcome> => {
     switch (step.op) {
       case "click": case "fill": case "select": return targeted(step, n);
-      case "press": await page.press(step.key); return { kind: "ok" };
+      case "press": {
+        if (step.key !== "Enter" || !opts.guard) {
+          await page.press(step.key);
+          return { kind: "ok" };
+        }
+        for (let stale = 0; ; stale++) {
+          opts.signal?.throwIfAborted();
+          const obs = await page.observe();
+          const refused = opts.guard({ kind: "enter", label: enterLabel(obs), url: obs.url, search: riskOfEnter(obs) === "navigational", observation: obs });
+          if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
+          try {
+            await page.press(step.key, obs);
+            return { kind: "ok" };
+          } catch (error) {
+            if (error instanceof StalePage && stale < STALE_RETRIES) continue;
+            throw error;
+          }
+        }
+      }
       case "back": await page.back(opts.navTimeoutMs ?? LIMITS.openTimeoutMs); return { kind: "ok" };
       case "scroll": {
         const id = step.direction === "up" ? "scroll_up" : "scroll_down";
@@ -253,7 +289,7 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
     }
     if (out.kind === "ok") continue;
     if (out.kind === "skip") { opts.log.info(out.reason); i = out.to - 1; continue; }
-    if (out.kind === "failed") return { ok: false, step: i, reason: out.reason, wall: null };
+    if (out.kind === "failed") return { ok: false, step: i, reason: out.reason, wall: null, ...(out.refused ? { refused: true as const } : {}) };
     const wall = wallOf(out.obs);
     if (!wall) return { ok: false, step: i, reason: out.reason, wall: null };
     if (opts.human?.interactive && opts.headed && pauses < PAUSES) {
