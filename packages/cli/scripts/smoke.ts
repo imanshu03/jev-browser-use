@@ -1,4 +1,4 @@
-// Live smoke test: runs the three acceptance commands from DESIGN.md section 11 in sequence.
+// Live smoke test: runs the three acceptance commands in sequence.
 // Not part of `npm test`. Needs TYPESAFE_API_KEY, Chrome, and the Parallelloop profile.
 // SMOKE_ENGINE selects the engine (default cdp). Each row shows the wall time, run time, Jev time, and browser time.
 import { spawn } from "node:child_process";

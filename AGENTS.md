@@ -27,7 +27,7 @@ Use these files to find the correct layer:
 - `plugins/claude`, `plugins/codex`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files and MCP configurations. The skills (`jev-browser`, `jev-plugin`, `jev-test`) have one source, `packages/mcp/skills`; `npm run plugins` copies them into both plugin folders. When you change the runner syntax or the plugin setup, update `jev-test` or `jev-plugin`; tests fail when the `jev-test` reference misses a step, check, key, or option.
 - `packages/mcp/scripts/build.mjs` and `packages/mcp/bin/jev-mcp.js`: the plugin bundle build and the development launcher (`npm run mcp`).
 
-For CLI or user-visible changes, read and update `README.md`. For changes to architecture, planning, or decision rules, consult `DESIGN.md`. It covers all three engines and states their differences. Keep the design consistent with the source and tests.
+For CLI or user-visible changes, read and update `HOW_TO_USE.md`, and `README.md` when the overview or the layout changes. For changes to architecture, planning, or decision rules, read the source and tests of the affected layer.
 
 Use TypeScript with the strict settings in `tsconfig.json`. Keep `.js` extensions in relative TypeScript imports. Use the existing dependency interfaces and test fakes to test decisions without Chrome or the Jev API. Retain source attribution when editing code adapted from `browser-use/jev-ultrafast`.
 
@@ -41,7 +41,7 @@ Preserve these behavior rules:
 - Remove known secrets from model requests, logs, and result JSON. Redact structured string values before JSON serialization and before request text is shortened. Preserve original values for browser input and preserve option identifiers used to read model answers.
 - Hold exclusive ownership of a profile copy through copying, refresh, and the launched browser process lifetime. Preserve another owner's locks. A lock file alone is not evidence that its owner has stopped.
 - Keep one-shot and chat connection lifetimes separate. For `cdp` and `chromium`, with `--cdp --keep-open`, the CLI must disconnect and exit while leaving its tab open. Chat must retain its connection between tasks. Close only resources the session owns.
-- Preserve the shared `RunResult` contract for all three engines. The one-shot CLI writes one result JSON document to stdout and its trace to stderr. Keep exit codes consistent with `README.md`.
+- Preserve the shared `RunResult` contract for all three engines. The one-shot CLI writes one result JSON document to stdout and its trace to stderr. Keep exit codes consistent with `HOW_TO_USE.md`.
 - The MCP server writes only JSON-RPC to stdout. Send logs and console output to stderr. Launch no Chrome and send no network request before the first `browse` call.
 - Assistant-written text fills only its bound, writable field, one time. Keep `canWriteInto`, the binding key, and the unsent-text gate in code.
 - Only a human dialog approves an action. No tool argument, page text, or model answer can approve it.
