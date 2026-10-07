@@ -1,7 +1,7 @@
-// A LiteLLM proxy (or any OpenAI-compatible endpoint) for the LLM jobs of a run: judge checks.
+// Any OpenAI-compatible endpoint (OpenAI, a LiteLLM proxy, OpenRouter, a local server) for the LLM jobs of a run: judge checks.
 import type { ConfigDef } from "./schema.js";
 
-export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 export interface Verdict { pass: boolean; reason: string }
 

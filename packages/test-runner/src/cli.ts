@@ -11,10 +11,14 @@ import type { Filter } from "./load.js";
 import { consoleReporter, summary, writeReports } from "./report.js";
 import { runAll } from "./runner.js";
 import { HealMode } from "./schema.js";
+import type { FetchLike } from "./llm.js";
+import { runInit, terminalPrompter } from "./init.js";
+import type { InitAnswers, Prompter } from "./init.js";
 
 const HELP = `jev-test - YAML test suites run by Jev in Chrome
 
 Usage:
+  jev-test init [options]                           Ask for the settings and write jev-test.config.yaml, .env, and an example suite
   jev-test run [suite files or dirs...] [options]   Run the cases (default: the suites directory of the config)
   jev-test list [suite files or dirs...] [options]  List the cases that a run would select
   jev-test validate [suite files or dirs...]        Check the config and the suites
@@ -33,6 +37,20 @@ Options:
   --report-dir <dir>  Write the reports here (default: <reports of the config>/<run id>)
   -h, --help          Show this help
 
+Init options (each one skips its question):
+  --dir <dir>         Project directory (default: the current directory)
+  --app-url <url>     URL of the web app to test
+  --env-name <name>   Name of the environment (default staging)
+  --jev-key <key>     TypeSafe API key (or TYPESAFE_API_KEY with --yes)
+  --llm-url <url>     OpenAI-compatible base URL, such as https://api.openai.com/v1
+  --llm-key <key>     API key of that endpoint (or JEV_TEST_LLM_API_KEY with --yes)
+  --llm-model <name>  Model name
+  --no-example        Do not write an example suite
+  --ci-workflow       Also write a GitHub Actions workflow
+  --yes               Ask nothing: use the options, the env keys, and the defaults
+  --force             Write the config again when it exists
+Keys go only to .env. A key on the command line can stay in the shell history: prefer the question or the env var.
+
 Exit codes: 0 all passed, 1 a case failed, 2 the config, a suite, or the command line is not valid.`;
 
 function envWithDotenv(root: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -41,7 +59,9 @@ function envWithDotenv(root: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   return { ...parseEnv(fs.readFileSync(file, "utf8")), ...env };
 }
 
-export async function main(argv: string[], io: { out: (s: string) => void; err: (s: string) => void; env: NodeJS.ProcessEnv } = {
+export interface CliIo { out: (s: string) => void; err: (s: string) => void; env: NodeJS.ProcessEnv; prompter?: Prompter; fetch?: FetchLike }
+
+export async function main(argv: string[], io: CliIo = {
   out: (s) => process.stdout.write(s + "\n"), err: (s) => process.stderr.write(s + "\n"), env: process.env,
 }): Promise<number> {
   let args;
@@ -52,6 +72,9 @@ export async function main(argv: string[], io: { out: (s: string) => void; err: 
         config: { type: "string" }, env: { type: "string" }, tag: { type: "string", multiple: true }, id: { type: "string", multiple: true },
         grep: { type: "string" }, headed: { type: "boolean" }, record: { type: "boolean" }, ci: { type: "boolean" }, heal: { type: "string" },
         workers: { type: "string" }, "report-dir": { type: "string" }, help: { type: "boolean", short: "h" },
+        dir: { type: "string" }, "app-url": { type: "string" }, "env-name": { type: "string" }, "jev-key": { type: "string" }, "llm-url": { type: "string" },
+        "llm-key": { type: "string" }, "llm-model": { type: "string" }, "no-example": { type: "boolean" }, "ci-workflow": { type: "boolean" },
+        yes: { type: "boolean", short: "y" }, force: { type: "boolean" },
       },
     });
   } catch (e) {
@@ -60,6 +83,19 @@ export async function main(argv: string[], io: { out: (s: string) => void; err: 
   }
   const [command, ...paths] = args.positionals;
   if (args.values.help || !command) { io.out(HELP); return command || args.values.help ? 0 : 2; }
+  if (command === "init") {
+    const v = args.values;
+    const given: Partial<InitAnswers> = {
+      ...(v["app-url"] !== undefined ? { appUrl: v["app-url"] } : {}), ...(v["env-name"] !== undefined ? { envName: v["env-name"] } : {}),
+      ...(v["jev-key"] !== undefined ? { jevKey: v["jev-key"] } : {}), ...(v["llm-url"] !== undefined ? { llmUrl: v["llm-url"] } : {}),
+      ...(v["llm-key"] !== undefined ? { llmKey: v["llm-key"] } : {}), ...(v["llm-model"] !== undefined ? { llmModel: v["llm-model"] } : {}),
+      ...(v["no-example"] ? { example: false } : {}), ...(v["ci-workflow"] ? { ciWorkflow: true } : {}),
+    };
+    return runInit({
+      dir: path.resolve(v.dir ?? "."), given, yes: Boolean(v.yes), force: Boolean(v.force), env: io.env,
+      prompter: io.prompter ?? terminalPrompter(), ...(io.fetch ? { fetch: io.fetch } : {}),
+    });
+  }
   if (!["run", "list", "validate"].includes(command)) { io.err(`unknown command "${command}"\n\n${HELP}`); return 2; }
 
   const configPath = path.resolve(args.values.config ?? CONFIG_FILE);

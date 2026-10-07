@@ -12,7 +12,7 @@ describe("parseVerdict", () => {
   });
 });
 
-describe("createLlm against an OpenAI-compatible server (a LiteLLM proxy)", () => {
+describe("createLlm against an OpenAI-compatible server", () => {
   let server: http.Server;
   let base = "";
   const seen: { auth?: string | undefined; body?: { model: string; messages: { role: string; content: string }[] } } = {};

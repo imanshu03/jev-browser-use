@@ -16,7 +16,8 @@ flows:
 jev:
   api_key: ${TYPESAFE_API_KEY}
 
+# Any OpenAI-compatible endpoint. Leave JEV_TEST_LLM_BASE_URL empty for no LLM.
 llm:
-  base_url: ${LITELLM_PROXY_URL}
-  api_key: ${LITELLM_API_KEY}
-  model: ${LITELLM_MODEL:-claude-sonnet-5-5}
+  base_url: ${JEV_TEST_LLM_BASE_URL}
+  api_key: ${JEV_TEST_LLM_API_KEY}
+  model: ${JEV_TEST_LLM_MODEL}

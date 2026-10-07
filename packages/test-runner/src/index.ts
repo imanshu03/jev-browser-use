@@ -13,3 +13,5 @@ export type { CaseResult, RunEvent, RunMode, RunOptions, RunReport, SuiteResult 
 export { runAssertion } from "./asserts.js";
 export { Assertion, CaseDef, ConfigDef, StepDef, SuiteDef } from "./schema.js";
 export type { JevOutcome, ReplayOutcome, Session, SessionFactory } from "./session.js";
+export { JEV_KEY_VAR, LLM_KEY_VAR, checkLlm, renderConfig, runInit, terminalPrompter } from "./init.js";
+export type { InitAnswers, InitOptions, Prompter } from "./init.js";

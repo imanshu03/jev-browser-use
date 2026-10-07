@@ -1,4 +1,4 @@
-# Parallelloop web app. Put TEST_EMAIL, TEST_PASSWORD, TYPESAFE_API_KEY and the LiteLLM values in .env next to this file.
+# Parallelloop web app. Put TEST_EMAIL, TEST_PASSWORD, TYPESAFE_API_KEY and the LLM values (JEV_TEST_LLM_BASE_URL, JEV_TEST_LLM_API_KEY, JEV_TEST_LLM_MODEL) in .env next to this file.
 environments:
   stage:
     base_url: https://app.staging.parallelloop.ai
@@ -26,10 +26,11 @@ browser:
 jev:
   api_key: ${TYPESAFE_API_KEY}
 
+# Any OpenAI-compatible endpoint. Leave JEV_TEST_LLM_BASE_URL empty for no LLM.
 llm:
-  base_url: ${LITELLM_PROXY_URL}
-  api_key: ${LITELLM_API_KEY}
-  model: ${LITELLM_MODEL:-claude-sonnet-5-5}
+  base_url: ${JEV_TEST_LLM_BASE_URL}
+  api_key: ${JEV_TEST_LLM_API_KEY}
+  model: ${JEV_TEST_LLM_MODEL}
 
 heal:
   local: warn

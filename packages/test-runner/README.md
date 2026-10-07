@@ -5,7 +5,7 @@ Write web app tests as YAML. Write steps in plain language. [jev-browser-use](..
 - **Record once.** The first run lets Jev do each plain-language step and saves the clicks and fills that it found.
 - **Replay after that.** Later runs replay the saved steps with code. No model call, so a run takes seconds.
 - **Repair on change.** When a saved step no longer finds its control, Jev does the step again and saves the new steps. Expected results never repair: a wrong result always fails.
-- **LLM through LiteLLM.** Free-text fields and `judge` checks use any OpenAI-compatible endpoint, such as the LiteLLM proxy. No Claude Code or Codex CLI is needed.
+- **Any OpenAI-compatible LLM.** `judge` checks and new field text use the endpoint that you give at `jev-test init`: OpenAI, a LiteLLM proxy, OpenRouter, or a local server. No Claude Code or Codex CLI is needed, and no provider is built in.
 
 ## Quick start
 
@@ -25,15 +25,33 @@ In your own project, install the package from GitHub Packages. Add an `.npmrc` w
 
 ```bash
 npm install --save-dev @imanshu03/jev-test
+npx jev-test init     # asks for the settings and writes the project files
 npx jev-test run
 ```
 
-To record new steps, set `TYPESAFE_API_KEY` (in the environment or in a `.env` file next to the config).
+## Set up a project: `jev-test init`
+
+`init` asks for each setting and writes the project files:
+
+| Question | Goes to |
+|---|---|
+| URL of the web app, and a name for that environment | `jev-test.config.yaml` |
+| TypeSafe API key for Jev (optional: a replay needs no key) | `.env` as `TYPESAFE_API_KEY` |
+| OpenAI-compatible base URL (optional), such as `https://api.openai.com/v1` | `jev-test.config.yaml` |
+| API key of that endpoint (optional) | `.env` as `JEV_TEST_LLM_API_KEY` |
+| Model name | `jev-test.config.yaml` |
+| Example suite? GitHub Actions workflow? | `suites/example.suite.yaml`, `.github/workflows/jev-test.yml` |
+
+- Keys go only to `.env`. The config refers to them as `${TYPESAFE_API_KEY}` and `${JEV_TEST_LLM_API_KEY}`. `init` adds `.env` and `reports/` to `.gitignore` and makes `.env` readable only by you. The terminal does not show a key while you type it.
+- `init` checks the LLM endpoint with `GET /models` and tells you when it does not answer or does not have the model.
+- It does not overwrite an existing config. Use `--force` to write it again; `.env` keeps its other lines.
+- With no questions, for scripts and CI: `npx jev-test init --yes --app-url https://app.example.com --llm-url https://api.openai.com/v1 --llm-model gpt-5`. With `--yes`, the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment. You can also pass `--jev-key` and `--llm-key`, but the shell can keep them in its history.
 
 ## Commands
 
 | Command | Does |
 |---|---|
+| `jev-test init` | Asks for the settings and writes the config, `.env`, and an example suite. |
 | `jev-test run [files or dirs]` | Runs the cases. Default: the `suites` directory of the config. |
 | `jev-test list [files or dirs]` | Lists the cases that a run selects. |
 | `jev-test validate` | Checks the config and every suite. |
@@ -84,7 +102,7 @@ flows:                          # reusable steps: `- use: login`
 
 browser: { headed: false, workers: 2, profile: none }   # profile: a Chrome profile name, or none for a clean one
 jev:     { api_key: "${TYPESAFE_API_KEY}", model: jev-latest, max_steps: 25 }
-llm:     { base_url: "${LITELLM_PROXY_URL}", api_key: "${LITELLM_API_KEY}", model: claude-sonnet-5-5 }
+llm:     { base_url: https://api.openai.com/v1, api_key: "${JEV_TEST_LLM_API_KEY}", model: gpt-5 }   # any OpenAI-compatible endpoint
 heal:    { local: warn, ci: fail }
 timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 ```
@@ -173,9 +191,9 @@ Suite hook repairs use the same repair policy as case steps. A failed `after_all
 
 A repair keeps the saved steps that ran before the failure and adds Jev's new steps. Review a repaired recording before you commit it: a repair can also hide a real change in the app.
 
-## LLM through LiteLLM
+## The LLM
 
-`llm.base_url` is any OpenAI-compatible endpoint (`.../v1`). jev-test uses it for:
+`llm.base_url` is any OpenAI-compatible endpoint (`.../v1`): OpenAI, a LiteLLM proxy, OpenRouter, or a local server such as Ollama. The runner calls only `POST /chat/completions` (and `init` calls `GET /models`). It uses the LLM for:
 
 - `judge` checks (`llm.judge_model`, else `llm.model`).
 - New text that a step asks Jev to write, such as "write a short reply" (`llm.text_model`, else `llm.model`).
@@ -184,7 +202,7 @@ Jev (TypeSafe) still chooses the clicks when a step records or repairs.
 
 ## CI
 
-Copy `examples/ci/jev-test.yml` to `.github/workflows/`. It runs `jev-test run --ci`, uploads the reports, and publishes `junit.xml`. Commit `.jev/recordings/` so that CI only replays.
+Run `jev-test init --ci-workflow`, or copy `examples/ci/jev-test.yml` to `.github/workflows/`. It runs `jev-test run --ci`, uploads the reports, and publishes `junit.xml`. Commit `.jev/recordings/` so that CI only replays.
 
 ## Use it from code
 

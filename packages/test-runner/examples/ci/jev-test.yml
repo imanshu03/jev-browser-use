@@ -24,8 +24,9 @@ jobs:
           TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
           TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
-          LITELLM_PROXY_URL: ${{ secrets.LITELLM_PROXY_URL }}
-          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          JEV_TEST_LLM_BASE_URL: ${{ vars.JEV_TEST_LLM_BASE_URL }}
+          JEV_TEST_LLM_MODEL: ${{ vars.JEV_TEST_LLM_MODEL }}
+          JEV_TEST_LLM_API_KEY: ${{ secrets.JEV_TEST_LLM_API_KEY }}
         run: npx jev-test run --ci --env "${{ inputs.env || 'stage' }}" ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }} --report-dir reports/ci
       - uses: actions/upload-artifact@v4
         if: always()

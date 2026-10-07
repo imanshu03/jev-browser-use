@@ -20,7 +20,7 @@ export interface EngineOptions {
   logDir: string;
 }
 
-/** The env that jev-browser-use reads: the Jev key, and the LiteLLM proxy as the OpenAI-compatible text model. */
+/** The env that jev-browser-use reads: the Jev key, and the OpenAI-compatible endpoint of the config as the text model. */
 export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...processEnv };
   if (config.jev.api_key) env["TYPESAFE_API_KEY"] = config.jev.api_key;
