@@ -1,6 +1,6 @@
 # jev-browser-use
 
-Run browser tasks from plain-language instructions. TypeSafe's Jev model chooses each click, field, and answer in your browser. Code checks confidence, risk, and page freshness before each action, and asks you before a risky one.
+Run browser tasks from plain-language instructions. TypeSafe's Jev model chooses each click, field, and answer in your browser. Code checks confidence, risk, and page freshness before each action. By default, destructive actions require your approval. Use `--confirm always` to require approval for submits too; see [confirmation rules](HOW_TO_USE.md#flags).
 
 Use it as:
 
