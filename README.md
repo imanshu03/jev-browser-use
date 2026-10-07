@@ -29,7 +29,6 @@ npx jev-chat
 | Use the plugin in Claude Code or Codex | [Assistant plugin](HOW_TO_USE.md#assistant-plugin-claude-code-and-codex) |
 | Save and run a scraper | [Scraping](HOW_TO_USE.md#scraping-jev-scrape) |
 | Test a web app with YAML suites | [jev-test](packages/test-runner/README.md) |
-| Understand the design and the decision rules | [DESIGN.md](DESIGN.md) |
 
 ## Repository layout
 

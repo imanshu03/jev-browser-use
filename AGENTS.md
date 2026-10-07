@@ -27,7 +27,7 @@ Use these files to find the correct layer:
 - `plugins/claude`, `plugins/codex`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files and MCP configurations. The skills (`jev-browser`, `jev-plugin`, `jev-test`) have one source, `packages/mcp/skills`; `npm run plugins` copies them into both plugin folders. When you change the runner syntax or the plugin setup, update `jev-test` or `jev-plugin`; tests fail when the `jev-test` reference misses a step, check, key, or option.
 - `packages/mcp/scripts/build.mjs` and `packages/mcp/bin/jev-mcp.js`: the plugin bundle build and the development launcher (`npm run mcp`).
 
-For CLI or user-visible changes, read and update `HOW_TO_USE.md`, and `README.md` when the overview or the layout changes. For changes to architecture, planning, or decision rules, consult `DESIGN.md`. It covers all three engines and states their differences. Keep the design consistent with the source and tests.
+For CLI or user-visible changes, read and update `HOW_TO_USE.md`, and `README.md` when the overview or the layout changes. For changes to architecture, planning, or decision rules, read the source and tests of the affected layer.
 
 Use TypeScript with the strict settings in `tsconfig.json`. Keep `.js` extensions in relative TypeScript imports. Use the existing dependency interfaces and test fakes to test decisions without Chrome or the Jev API. Retain source attribution when editing code adapted from `browser-use/jev-ultrafast`.
 

@@ -1,4 +1,4 @@
-// Prototype v3 of the observe -> Jev -> act loop. Throwaway; the real CLI follows DESIGN.md.
+// Prototype v3 of the observe -> Jev -> act loop. Throwaway; the real CLI is packages/cli/src/cli.ts.
 // Patterns adopted from browser-use/jev-ultrafast: DONE and BLOCKED are operations in one choice head,
 // speculative target heads per operation, rules in the instructions, stall detection by page change.
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
