@@ -16,8 +16,8 @@ export type ReplayOutcome = { ok: true } | { ok: false; step: number; reason: st
 export interface Session {
   goto(url: string): Promise<void>;
   /** Let Jev do a plain-language step on the current page. */
-  jev(task: string, params: Record<string, string>, goal: "act" | "check"): Promise<JevOutcome>;
-  replay(steps: readonly Step[], params: Record<string, string>): Promise<ReplayOutcome>;
+  jev(task: string, params: Record<string, string>, goal: "act" | "check", signal?: AbortSignal): Promise<JevOutcome>;
+  replay(steps: readonly Step[], params: Record<string, string>, signal?: AbortSignal): Promise<ReplayOutcome>;
   /** Type into a field by its label with code only: for password and other credential fields, which Jev never sees. */
   fillCredential(field: string, value: string): Promise<ReplayOutcome>;
   observe(): Promise<Observation>;

@@ -257,3 +257,80 @@ cases:
     expect(seen).toEqual([{ name: "Milk" }]);
   });
 });
+
+it("fails CI when before_all needs a repair", async () => {
+  const t = setup(`suite: Hooks\nbefore_all: [Open settings]\ncases: [{ id: H-1, title: Hook case }]\n`, "base_url: https://app.example\n");
+  t.session.onJev = () => ({ ok: true, steps: [{ op: "click", target: { role: "button", name: "Settings" } }], reason: "done", jevRequests: 1 });
+  await t.run();
+  t.session.onReplay = () => ({ ok: false, step: 0, reason: "renamed" });
+  const r = await t.run({ ci: true, record: false, heal: "fail" });
+  expect(r.totals.failed).toBe(1);
+  expect(r.suites[0]?.cases[0]?.healed).toContain("Open settings: replay failed at renamed");
+});
+
+it("fails CI when after_all needs a repair", async () => {
+  const t = setup(`suite: Hooks\nafter_all: [Close settings]\ncases: [{ id: H-1, title: Hook case }]\n`, "base_url: https://app.example\n");
+  t.session.onJev = () => ({ ok: true, steps: [{ op: "click", target: { role: "button", name: "Close" } }], reason: "done", jevRequests: 1 });
+  await t.run();
+  t.session.onReplay = () => ({ ok: false, step: 0, reason: "renamed" });
+  const r = await t.run({ ci: true, record: false, heal: "fail" });
+  expect(r.totals.failed).toBe(1);
+});
+
+it("reports an after_all failure in the case and JUnit totals", async () => {
+  const t = setup(`suite: Hooks\nafter_all: [{ expect: { visible_text: missing } }]\ncases: [{ id: H-1, title: Hook case }]\n`, "base_url: https://app.example\ntimeouts: { assert_ms: 0 }\n");
+  const r = await t.run();
+  expect(r.totals.failed).toBe(1);
+  expect(r.suites[0]?.cases[0]?.error).toMatch(/after_all.*missing/);
+});
+
+it("stops a timed-out case before cleanup and the next case", async () => {
+  const t = setup(`suite: Timeout\ncases:\n  - id: T-1\n    title: Slow case\n    timeout_ms: 10\n    steps: [{ wait: 80 }, { goto: /late }]\n    cleanup: [{ goto: /cleanup }]\n  - { id: T-2, title: Next case, steps: [{ goto: /next }] }\n`, "base_url: https://app.example\n");
+  const r = await t.run();
+  const before = JSON.stringify(r);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(t.session.calls).not.toContain("goto https://app.example/late");
+  expect(JSON.stringify(r)).toBe(before);
+  expect(r.totals).toMatchObject({ failed: 1, passed: 1 });
+});
+
+it("removes secret page text before a judge receives it", async () => {
+  const t = setup(`suite: Private\ncases: [{ id: S-1, title: Private case, expect: [{ judge: User is signed in }] }]\n`, CONFIG);
+  t.session.page.text = "Signed in s3cret-pass";
+  let seen = "";
+  const r = await runAll({
+    project: t.project, suites: loadSuites(t.project, [], { tags: [], ids: [], grep: null }), sessions: factoryOf(t.session),
+    llm: { model: "judge", judge: async (_criteria, page) => { seen = JSON.stringify(page); return { pass: true, reason: "shown" }; } },
+    mode: LOCAL, workers: 1, reportDir: path.join(t.root, "reports"), runId: "r1",
+  });
+  expect(r.totals.passed).toBe(1);
+  expect(seen).not.toContain("s3cret-pass");
+  expect(seen).toContain("***");
+});
+
+it("uses code to fill a credential field whose label is a var", async () => {
+  const t = setup(`suite: Login\nvars: { field: Password }\ncases: [{ id: L-1, title: Login, steps: [{ fill: { field: "{field}", value: literal } }] }]\n`, "base_url: https://app.example\n");
+  const r = await t.run();
+  expect(r.totals.passed).toBe(1);
+  expect(t.session.calls).toContain("credential Password=7");
+  expect(t.session.calls.some((call) => call.startsWith("replay"))).toBe(false);
+});
+
+it("removes secrets from case titles, suite names, skipped reasons, and events", async () => {
+  const t = setup(`suite: Private \${QA_PASSWORD}\ncases: [{ id: S-1, title: "Private \${QA_PASSWORD}", skip: "Skipped \${QA_PASSWORD}" }]\n`, CONFIG);
+  const events: unknown[] = [];
+  const report = await runAll({
+    project: t.project, suites: loadSuites(t.project, [], { tags: [], ids: [], grep: null }), sessions: factoryOf(t.session),
+    llm: null, mode: LOCAL, workers: 1, reportDir: path.join(t.root, "reports"), runId: "r1", onEvent: (event) => events.push(event),
+  });
+  expect(JSON.stringify(report)).not.toContain("s3cret-pass");
+  expect(JSON.stringify(events)).not.toContain("s3cret-pass");
+});
+
+it("removes a secret from the repair history in a recording", async () => {
+  const t = setup(`suite: Private\ncases: [{ id: S-1, title: Private case, steps: [Open settings] }]\n`, CONFIG);
+  await t.run();
+  t.session.onReplay = () => ({ ok: false, step: 0, reason: "page error: s3cret-pass" });
+  await t.run();
+  expect(fs.readFileSync(t.recording(), "utf8")).not.toContain("s3cret-pass");
+});

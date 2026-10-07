@@ -117,7 +117,7 @@ export function lazyNavigator(env: NodeJS.ProcessEnv, log: Logger, human: Human,
   const idle = { requests: 0, inputTokens: 0, outputTokens: 0, model: base.model, ms: 0 };
   const make = (): { oracle: Oracle; transport: Transport; client: TypeSafeClient } => {
     transport ??= createTransport({ log });
-    client ??= new TypeSafeClient({ defaultModel: base.model, logLevel: "off", fetch: transport.fetch });
+    client ??= new TypeSafeClient({ apiKey: env["TYPESAFE_API_KEY"]!, ...(env["TYPESAFE_BASE_URL"] ? { baseURL: env["TYPESAFE_BASE_URL"] } : {}), defaultModel: base.model, logLevel: "off", fetch: transport.fetch });
     oracle ??= createOracle(client, base.model, log);
     return { oracle, transport, client };
   };

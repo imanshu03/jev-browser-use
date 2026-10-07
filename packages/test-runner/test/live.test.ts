@@ -1,12 +1,15 @@
 // Live: real Chrome on the demo app. Run with `npm run test:live`. The committed recording replays, so no Jev key is needed.
 import fs from "node:fs";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli.js";
+import { jevSessions } from "../src/engine.js";
+import { ConfigDef } from "../src/schema.js";
+import { Secrets } from "../src/template.js";
 
 const live = process.env["JEV_LIVE"] === "1";
 const demo = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "examples", "demo");
@@ -32,4 +35,25 @@ describe.skipIf(!live)("demo suite in Chrome", () => {
     const results = JSON.parse(fs.readFileSync(path.join(reports, "results.json"), "utf8")) as { suites: { cases: { jevRequests: number }[] }[] };
     expect(results.suites[0]?.cases.map((c) => c.jevRequests)).toEqual([0, 0, 0]);
   }, 120_000);
+});
+
+
+describe.skipIf(!live)("credential fill in Chrome", () => {
+  it("rejects read-only and refused input, and checks typed and cleared values", async () => {
+    const fixture = createServer((_req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><label>Locked password<input type="password" readonly value="old"></label><label>Blocked password<input type="password" onbeforeinput="event.preventDefault()"></label><label>Password<input type="password" value="old"></label>`));
+    await new Promise<void>((resolve) => fixture.listen(0, "127.0.0.1", resolve));
+    const logs = fs.mkdtempSync(path.join(os.tmpdir(), "jev-credential-live-"));
+    const session = await jevSessions({ config: ConfigDef.parse({ browser: { browser: "chrome" }, timeouts: { step_ms: 0 } }), secrets: new Secrets(), processEnv: process.env, headed: false, logDir: logs }).open("Credential", () => undefined);
+    try {
+      await session.goto(`http://127.0.0.1:${(fixture.address() as AddressInfo).port}`);
+      expect(await session.fillCredential("Locked password", "new-value")).toMatchObject({ ok: false });
+      expect(await session.fillCredential("Blocked password", "new-value")).toMatchObject({ ok: false });
+      expect(await session.fillCredential("Password", "new-value")).toEqual({ ok: true });
+      expect(await session.fillCredential("Password", "")).toEqual({ ok: true });
+    } finally {
+      await session.close();
+      fixture.close();
+      fs.rmSync(logs, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -18,8 +18,16 @@ export class Secrets {
 
   redact(text: string): string {
     let out = text;
-    for (const v of [...this.values].sort((a, b) => b.length - a.length)) out = out.split(v).join("***");
+    const forms = [...this.values].flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]);
+    for (const value of forms.sort((a, b) => b.length - a.length)) out = out.split(value).join("***");
     return out;
+  }
+
+  redactData<T>(value: T): T {
+    if (typeof value === "string") return this.redact(value) as T;
+    if (Array.isArray(value)) return value.map((v) => this.redactData(v)) as T;
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, this.redactData(v)])) as T;
+    return value;
   }
 
   list(): string[] {

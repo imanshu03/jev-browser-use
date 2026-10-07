@@ -52,6 +52,9 @@ export function loadProject(configPath: string, opts: { envName?: string; proces
   const parsed = ConfigDef.safeParse(expandEnv(raw ?? {}, opts.processEnv, secrets, named));
   if (!parsed.success) throw new LoadError(zodMessage(parsed.error, abs));
   const config = parsed.data;
+  secrets.add(config.jev.api_key || opts.processEnv["TYPESAFE_API_KEY"] || "");
+  secrets.add(config.llm.api_key);
+  for (const name of named) secrets.add(opts.processEnv[name] ?? "");
   const envName = opts.envName ?? config.default_environment ?? null;
   let baseUrl = config.base_url ?? "";
   let vars = { ...config.vars };

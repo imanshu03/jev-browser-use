@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs, parseEnv } from "node:util";
+import { fileURLToPath } from "node:url";
 import { jevSessions } from "./engine.js";
 import { createLlm } from "./llm.js";
 import { CONFIG_FILE, LoadError, loadProject, loadSuites } from "./load.js";
@@ -112,4 +113,12 @@ export async function main(argv: string[], io: { out: (s: string) => void; err: 
   const files = writeReports(reportDir, report);
   io.out(`\n${summary(report)}\nreports: ${files.junit}, ${files.json}`);
   return report.totals.failed > 0 ? 1 : 0;
+}
+
+const entry = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === entry) {
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((e: unknown) => {
+    process.stderr.write(`error: ${(e as Error).message}\n`);
+    process.exitCode = 1;
+  });
 }

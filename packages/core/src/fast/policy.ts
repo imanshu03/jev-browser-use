@@ -226,6 +226,7 @@ export function actionSpace(actions: Action[], mention = false): ActionSpace {
 }
 
 export interface StepInput {
+  redactor?: (text: string) => string;
   task: string;
   goal: Goal;
   obs: Observation;
@@ -764,7 +765,8 @@ const LADDER: { trim: Trim; note: string }[] = [
 
 /** Redact the task, the page, and the history with the secret spans. */
 function redacted(input: StepInput): StepInput {
-  return { ...input, task: redact(input.task, input.spans), obs: redactData(input.obs, (s) => redact(s, input.spans)), history: redactData(input.history, (s) => redact(s, input.spans)) };
+  const clean = input.redactor ?? ((text: string) => redact(text, input.spans));
+  return { ...input, task: clean(input.task), obs: redactData(input.obs, clean), history: redactData(input.history, clean) };
 }
 
 function fitted(input: StepInput, only?: string, ask?: ValueAsk): { state: EntryType; questions: Questions; meta: StepMeta } {

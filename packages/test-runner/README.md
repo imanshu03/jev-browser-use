@@ -131,7 +131,7 @@ Built-in vars: `{now}` (milliseconds, a unique suffix), `{date}` (YYYY-MM-DD), `
 | `- Add a note titled "{title}"` | Plain language. Jev records it, replay runs it, repair fixes it. Put exact values in quotes. |
 | `- goto: /path` | Opens a path of the base URL, or a full URL. |
 | `- click: Save` or `{ name, role, match, nth, optional }` | Clicks a control by its name. |
-| `- fill: { field: Email, value: "..." }` | Types into a field by its label. Password and code fields are typed with code only: Jev and the LLM never see them. |
+| `- fill: { field: Email, value: "..." }` | Types into a field by its label. Password and code fields are typed with code only and checked after input. Jev and the LLM never see them. |
 | `- select: { field: Sort, option: Newest }` | Picks an option. |
 | `- press: Enter` | Presses a key. |
 | `- wait: 1000` / `- wait_for_text: Saved` | Waits a time, or until a text shows (fails when it does not). |
@@ -163,7 +163,13 @@ Code checks poll until they pass or time out (`timeout_ms`, default `timeouts.as
 | Recording fails | Jev repairs it. The case is `HEAL` and the new recording is saved. | Jev repairs it. The case fails, and the repaired recording goes to `reports/.../recordings/` for review. |
 | `--heal off` | Fails | Fails |
 
+A completed action that cannot be recorded fails the step. Use an explicit step for that action.
+
+Recordings for suites outside the project go under `_external/` in the recordings directory.
+
 A recording is keyed by the step text. When you change the text of a step, only that step records again.
+
+Suite hook repairs use the same repair policy as case steps. A failed `after_all` hook fails the suite cases.
 
 A repair keeps the saved steps that ran before the failure and adds Jev's new steps. Review a repaired recording before you commit it: a repair can also hide a real change in the app.
 
@@ -202,7 +208,7 @@ writeReports("reports/r1", report);
 
 - Jev is weak on date pickers, recipient chips, @mentions and rich-text editors. Use explicit `click` and `fill` steps there, or keep those flows in Playwright.
 - `element` and `field_value` see only controls in view.
-- When a case times out, its steps can still run while the cleanup starts.
+- A case timeout cancels further steps. Cleanup waits for the active browser command or model request to finish.
 - One browser at a time can use a named Chrome profile, so `browser.profile` other than `none` runs 1 worker.
 
 ## Development

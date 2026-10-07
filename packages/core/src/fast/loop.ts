@@ -50,6 +50,8 @@ export interface FastRunnerDeps {
   text?: TextSource;
   /** Cancels the run. Checked at step start, around each step request, before page input, and after each wait. */
   signal?: AbortSignal;
+  /** Removes secrets known to the caller from model requests, logs, and results. */
+  redactor?: (text: string) => string;
   /** Front-end hint texts. An absent field keeps the CLI text. */
   hints?: RunnerHints;
   /** The task and the vars come from an assistant (MCP), not from the user directly. */
@@ -523,7 +525,7 @@ export class FastRunner {
   private readonly stagedWarned = new Set<string>();
 
   constructor(deps: FastRunnerDeps) {
-    this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => redact(s, this.spans)) };
+    this.deps = { ...deps, oracle: redactingOracle(deps.oracle, (s) => this.redact(s)) };
     this.cfg = deps.cfg;
     this.log = deps.log;
     this.now = deps.now ?? (() => Date.now());
@@ -553,6 +555,11 @@ export class FastRunner {
     return [...new Set(this.written.filter((w) => !typed.has(w.label)).map((w) => w.label))];
   }
 
+  private redact(text: string): string {
+    const value = redact(text, this.spans);
+    return this.deps.redactor ? this.deps.redactor(value) : value;
+  }
+
   async run(): Promise<RunResult> {
     const cfg = this.cfg;
     let outcome: RunResult["outcome"] = "failed";
@@ -560,8 +567,8 @@ export class FastRunner {
       const profiles = this.deps.profiles.filter((p) => p.directory);
       const exclude = [...profiles.flatMap((p) => [p.name, p.directory]), ...catalogWords()];
       this.spans = [...extractSpans(cfg.task, exclude), ...varSpans(cfg.vars)];
-      this.log.redactor = (s) => redact(s, this.spans);
-      this.result.task = redact(cfg.task, this.spans);
+      this.log.redactor = (s) => this.redact(s);
+      this.result.task = this.redact(cfg.task);
       this.keys = extractKeys(cfg.task);
 
       // When code alone knows the profile and the start URL, Chrome starts and loads the page while the
@@ -672,7 +679,7 @@ export class FastRunner {
       duration_ms: this.now() - this.startedAt, model: s.model, pauses: this.pauses,
       jev_ms: s.ms, browser_ms: this._page ? this._page.stats.browserMs - this.browser0.browserMs : 0, engine: this.cfg.engine ?? "cdp",
     };
-    return redactData(r, (s) => redact(s, this.spans));
+    return redactData(r, (s) => this.redact(s));
   }
 
   /** End the settle of an early action that is still pending (lateRefresh), and log a deferred record. Never throws. */
@@ -969,6 +976,7 @@ export class FastRunner {
       const inputOn = (o: Observation): StepInput => {
         const held = this.heldText(o);
         return {
+          redactor: (text) => this.redact(text),
           task: this.cfg.task, goal: this.goal, obs: o, history: this.history, spans: this.offered(o), keys: this.keys,
           bannedActionIds: this.bannedIds(o), doneBanned: this.stepNo <= this.doneBannedUntil,
           ...(retryReason ? { retryReason } : {}),

@@ -28,7 +28,10 @@ export function entryKey(scope: string, text: string, occurrence: number): strin
 
 /** The recording file path of a suite: the suite key with ".json" in the recordings directory. */
 export function recordingPath(dir: string, suiteKey: string): string {
-  return path.join(dir, suiteKey.replace(/\.suite\.yaml$/, "") + ".json");
+  const relative = suiteKey.replace(/\.suite\.yaml$/, "") + ".json";
+  const outside = path.isAbsolute(relative) || relative.split(/[\\/]/).includes("..");
+  const name = outside ? path.join("_external", createHash("sha256").update(suiteKey).digest("hex").slice(0, 12), path.basename(relative)) : relative;
+  return path.join(dir, name);
 }
 
 export class RecordingStore {

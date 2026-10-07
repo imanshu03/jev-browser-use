@@ -1,4 +1,5 @@
 // Expected results. Code checks poll the page until they pass or time out; `check` asks Jev and `judge` asks the LLM.
+import { setTimeout as wait } from "node:timers/promises";
 import type { Observation, PageRead } from "@imanshu03/jev-browser-use";
 import type { Llm } from "./llm.js";
 import type { Assertion } from "./schema.js";
@@ -18,6 +19,8 @@ export interface AssertContext {
   vars: Record<string, string>;
   llm: Llm | null;
   timeoutMs: number;
+  signal?: AbortSignal;
+  redactor?: (text: string) => string;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -105,10 +108,11 @@ function probeOf(a: Assertion, ctx: AssertContext): Probe {
 }
 
 export async function runAssertion(a: Assertion, ctx: AssertContext): Promise<AssertResult> {
+  ctx.signal?.throwIfAborted();
   const label = describe(a, ctx.vars);
   if ("check" in a) {
     const params = Object.fromEntries(varNames(a.check).map((n) => [n, ctx.vars[n] as string]));
-    const r = await ctx.session.jev(fillVars(a.check, ctx.vars), params, "check");
+    const r = await ctx.session.jev(fillVars(a.check, ctx.vars), params, "check", ctx.signal);
     const min = a.min_probability ?? DEFAULT_MIN_PROBABILITY;
     if (!r.check) return { pass: false, label, detail: `Jev gave no answer: ${r.reason}`, model: "jev" };
     const pass = r.check.answer === true && r.check.probability >= min;
@@ -117,16 +121,20 @@ export async function runAssertion(a: Assertion, ctx: AssertContext): Promise<As
   if ("judge" in a) {
     if (!ctx.llm) return { pass: false, label, detail: "a judge check needs the LLM: set llm.base_url and llm.model", model: "llm" };
     const [read, obs] = [await ctx.session.read().catch(() => null), await ctx.session.observe()];
-    const verdict = await ctx.llm.judge(fillVars(a.judge, ctx.vars), { url: obs.url, title: obs.title, text: pageText(read, obs) });
+    ctx.signal?.throwIfAborted();
+    const redact = ctx.redactor ?? ((text: string) => text);
+    const verdict = await ctx.llm.judge(redact(fillVars(a.judge, ctx.vars)), { url: redact(obs.url), title: redact(obs.title), text: redact(pageText(read, obs)) }, ctx.signal);
     return { pass: verdict.pass, label, detail: verdict.reason, model: "llm" };
   }
   const probe = probeOf(a, ctx);
-  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = ctx.sleep ?? ((ms: number) => wait(ms, undefined, ctx.signal ? { signal: ctx.signal } : {}));
   const now = ctx.now ?? (() => Date.now());
   const deadline = now() + (a.timeout_ms ?? ctx.timeoutMs);
   for (;;) {
+    ctx.signal?.throwIfAborted();
     let last: { pass: boolean; detail: string };
     try { last = await probe(); } catch (e) { last = { pass: false, detail: `the page could not be read: ${(e as Error).message}` }; }
+    ctx.signal?.throwIfAborted();
     if (last.pass || now() >= deadline) return { pass: last.pass, label, detail: last.detail };
     await sleep(ctx.pollMs ?? 300);
   }

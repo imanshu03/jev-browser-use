@@ -1,4 +1,6 @@
 #!/usr/bin/env node
-import { main } from "../dist/cli.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { launch } from "./launch.js";
 
-process.exitCode = await main(process.argv.slice(2));
+launch(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "cli");

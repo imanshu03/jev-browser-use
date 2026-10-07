@@ -7,7 +7,7 @@ export interface Verdict { pass: boolean; reason: string }
 
 export interface Llm {
   readonly model: string;
-  judge(criteria: string, page: { url: string; title: string; text: string }): Promise<Verdict>;
+  judge(criteria: string, page: { url: string; title: string; text: string }, signal?: AbortSignal): Promise<Verdict>;
 }
 
 const JUDGE_SYSTEM = [
@@ -33,12 +33,12 @@ export function createLlm(cfg: ConfigDef["llm"], fetchImpl: FetchLike = fetch as
   const url = `${cfg.base_url.replace(/\/+$/, "")}/chat/completions`;
   return {
     model,
-    async judge(criteria, page) {
+    async judge(criteria, page, signal) {
       const user = `Expected result:\n${criteria}\n\nPage URL: ${page.url}\nPage title: ${page.title}\n\n<page_text>\n${page.text.slice(0, 40_000)}\n</page_text>`;
       const body = JSON.stringify({ model, temperature: 0, max_tokens: 300, messages: [{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }] });
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (cfg.api_key) headers["authorization"] = `Bearer ${cfg.api_key}`;
-      const res = await fetchImpl(url, { method: "POST", headers, body, signal: AbortSignal.timeout(cfg.timeout_ms) });
+      const res = await fetchImpl(url, { method: "POST", headers, body, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(cfg.timeout_ms)]) : AbortSignal.timeout(cfg.timeout_ms) });
       const raw = await res.text();
       if (!res.ok) throw new Error(`LLM ${res.status}: ${raw.slice(0, 300)}`);
       const content = (JSON.parse(raw) as { choices?: { message?: { content?: unknown } }[] }).choices?.[0]?.message?.content;

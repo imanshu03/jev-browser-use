@@ -1,5 +1,6 @@
 // Run the selected suites: one browser session per suite, cases in file order, suites in parallel up to `workers`.
 import path from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 import type { Step } from "@imanshu03/jev-browser-use";
 import type { AssertResult } from "./asserts.js";
 import { runAssertion } from "./asserts.js";
@@ -93,6 +94,7 @@ const CREDENTIAL_FIELD = /password|passcode|passphrase|\bpin\b|\botp\b|one-time|
 
 /** The state of one case while it runs. */
 interface CaseRun {
+  signal?: AbortSignal;
   vars: Record<string, string>;
   steps: StepLog[];
   assertions: AssertResult[];
@@ -155,9 +157,11 @@ class SuiteRunner {
   async runSteps(defs: readonly StepDef[], scope: string, run: CaseRun, depth = 0): Promise<void> {
     const seen = new Map<string, number>();
     for (const def of defs) {
+      run.signal?.throwIfAborted();
       const t0 = Date.now();
       const label = this.o.project.secrets.redact(typeof def === "string" ? fillVars(def, run.vars) : stepLabel(def));
       const push = (how: StepLog["how"], ok: boolean, detail?: string) => {
+        run.signal?.throwIfAborted();
         run.steps.push({ label, how, ok, ms: Date.now() - t0, ...(detail ? { detail: this.o.project.secrets.redact(detail) } : {}) });
         if (!ok) throw new StepFailure(`${label}: ${this.o.project.secrets.redact(detail ?? "failed")}`);
       };
@@ -183,16 +187,16 @@ class SuiteRunner {
         push("code", true);
         continue;
       }
-      if ("wait" in def) { await new Promise((r) => setTimeout(r, def.wait)); push("code", true); continue; }
+      if ("wait" in def) { await wait(def.wait, undefined, run.signal ? { signal: run.signal } : {}); push("code", true); continue; }
       if ("wait_for_text" in def) {
         const a: Assertion = { visible_text: def.wait_for_text, ...(def.timeout_ms !== undefined ? { timeout_ms: def.timeout_ms } : {}) };
-        const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: null, timeoutMs: this.o.project.config.timeouts.assert_ms });
+        const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: null, timeoutMs: this.o.project.config.timeouts.assert_ms, ...(run.signal ? { signal: run.signal } : {}), redactor: (text) => this.o.project.secrets.redact(text) });
         push("code", r.pass, r.pass ? undefined : `the text did not show: ${r.detail}`);
         continue;
       }
       if ("fill" in def) {
         const value = fillVars(def.fill.value, run.vars);
-        if (CREDENTIAL_FIELD.test(def.fill.field) || this.o.project.secrets.redact(value) !== value) {
+        if (CREDENTIAL_FIELD.test(fillVars(def.fill.field, run.vars)) || this.o.project.secrets.redact(value) !== value) {
           const r = await this.session.fillCredential(fillVars(def.fill.field, run.vars), value);
           push("code", r.ok, r.ok ? undefined : r.reason);
           continue;
@@ -204,7 +208,7 @@ class SuiteRunner {
       else if ("select" in def) step = { op: "select", target: { role: "combobox", name: def.select.field }, value: def.select.option };
       else step = { op: "press", key: def.press };
       const filled = JSON.parse(JSON.stringify(step), (_k, v: unknown) => (typeof v === "string" ? literal(fillVars(v, run.vars)) : v)) as Step;
-      const r = await this.session.replay([filled], {});
+      const r = await this.session.replay([filled], {}, run.signal);
       push("code", r.ok, r.ok ? undefined : r.reason);
     }
   }
@@ -220,18 +224,20 @@ class SuiteRunner {
     const entry = this.o.mode.record ? null : this.store.get(key, text);
     const at = (this.o.now ?? (() => new Date()))().toISOString();
     if (entry) {
-      const r = await this.session.replay(entry.steps, params);
+      const r = await this.session.replay(entry.steps, params, run.signal);
+      run.signal?.throwIfAborted();
       if (r.ok) { push("replay", true); return; }
       const why = `replay failed at ${r.reason}`;
       if (this.o.mode.heal === "off") { push("replay", false, why); return; }
       this.log(`repairing "${task}": ${why}`);
-      const j = await this.session.jev(task, params, "act");
+      const j = await this.session.jev(task, params, "act", run.signal);
+      run.signal?.throwIfAborted();
       run.jevRequests += j.jevRequests;
       if (!j.ok) { push("healed", false, `${why}; Jev could not repair it: ${j.reason}`); return; }
       // The steps before the failed one already ran, so Jev went on from there: the repaired recording keeps them.
       const steps = [...entry.steps.slice(0, r.step), ...j.steps];
       if (this.stepsHaveSecret(steps)) { push("healed", false, SECRET_IN_RECORDING); return; }
-      this.store.put(key, { text, steps, recorded_at: at, healed: [...(entry.healed ?? []), { at, reason: why }].slice(-10) });
+      this.store.put(key, { text, steps, recorded_at: at, healed: [...(entry.healed ?? []), { at, reason: this.o.project.secrets.redact(why) }].slice(-10) });
       run.healed.push(this.o.project.secrets.redact(`${task}: ${why}`));
       push("healed", true, why);
       return;
@@ -240,7 +246,8 @@ class SuiteRunner {
       push("recorded", false, "this step has no recording. Run jev-test on your machine to record it, then commit the recordings directory");
       return;
     }
-    const j = await this.session.jev(task, params, "act");
+    const j = await this.session.jev(task, params, "act", run.signal);
+    run.signal?.throwIfAborted();
     run.jevRequests += j.jevRequests;
     if (!j.ok) { push("jev", false, j.reason); return; }
     if (this.stepsHaveSecret(j.steps)) { push("recorded", false, SECRET_IN_RECORDING); return; }
@@ -250,6 +257,7 @@ class SuiteRunner {
 
   async expect(list: readonly Assertion[], run: CaseRun): Promise<void> {
     for (const a of list) {
+      run.signal?.throwIfAborted();
       const t0 = Date.now();
       const asked = "check" in a ? a.check : "judge" in a ? a.judge : null;
       if (asked !== null && this.hasSecret(fillVars(asked, run.vars))) {
@@ -257,7 +265,8 @@ class SuiteRunner {
         run.steps.push({ label, how: "expect", ok: false, ms: 0, detail: SECRET_IN_CHECK });
         throw new StepFailure(`expected ${label}: ${SECRET_IN_CHECK}`);
       }
-      const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: this.o.llm, timeoutMs: this.o.project.config.timeouts.assert_ms });
+      const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: this.o.llm, timeoutMs: this.o.project.config.timeouts.assert_ms, ...(run.signal ? { signal: run.signal } : {}), redactor: (text) => this.o.project.secrets.redact(text) });
+      run.signal?.throwIfAborted();
       const red = { ...r, label: this.o.project.secrets.redact(r.label), detail: this.o.project.secrets.redact(r.detail) };
       run.assertions.push(red);
       run.steps.push({ label: red.label, how: "expect", ok: r.pass, ms: Date.now() - t0, detail: red.detail });
@@ -288,13 +297,24 @@ class SuiteRunner {
       await this.expect(c.expect, run);
     };
     const limit = c.timeout_ms ?? this.o.project.config.timeouts.case_ms;
+    const controller = new AbortController();
+    run.signal = controller.signal;
+    const pending = body();
     let timer: NodeJS.Timeout | undefined;
     try {
-      await Promise.race([body(), new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new StepFailure(`the case took longer than ${limit} ms`)), limit); })]);
+      await Promise.race([pending, new Promise<never>((_, rej) => {
+        timer = setTimeout(() => {
+          const failure = new StepFailure(`the case took longer than ${limit} ms`);
+          controller.abort(failure);
+          rej(failure);
+        }, limit);
+      })]);
     } catch (e) {
       error = (e as Error).message;
     } finally {
       clearTimeout(timer);
+      await pending.catch(() => undefined);
+      delete run.signal;
     }
     let screenshot: string | null = null;
     if (error) {
@@ -316,41 +336,66 @@ class SuiteRunner {
 async function runSuite(o: RunOptions, suite: LoadedSuite): Promise<SuiteResult> {
   const t0 = Date.now();
   const def = suite.def;
-  o.onEvent?.({ type: "suite_start", suite: def.suite, cases: def.cases.length });
+  const emit = (event: RunEvent) => o.onEvent?.(o.project.secrets.redactData(event));
+  emit({ type: "suite_start", suite: def.suite, cases: def.cases.length });
   const cases: CaseResult[] = [];
   let session: Session | null = null;
   let runner: SuiteRunner | null = null;
   let setupError: string | null = null;
   const base = (() => { try { return resolveVars(o.project.vars, def.vars); } catch (e) { setupError = (e as Error).message; return {}; } })();
-  try {
-    session = await o.sessions.open(def.suite, (l) => o.onLog?.(l));
-    runner = new SuiteRunner(o, suite, session);
-  } catch (e) {
-    setupError ??= `the browser did not start: ${(e as Error).message}`;
-  }
   const hookRun = (): CaseRun => ({ vars: { ...base, ...builtinVars((o.now ?? (() => new Date()))(), o.runId) }, steps: [], assertions: [], healed: [], jevRequests: 0, shots: [] });
-  if (!setupError && runner) {
-    try { await runner.runSteps(def.before_all, "before_all", hookRun()); } catch (e) { setupError = `before_all: ${(e as Error).message}`; }
-  }
-  for (const c of def.cases) {
-    const r: CaseResult = setupError || !runner
-      ? { id: c.id, title: c.title, tags: [...def.tags, ...c.tags], status: c.skip ? "skipped" : "failed", ms: 0, error: c.skip ?? setupError, steps: [], assertions: [], healed: [], screenshot: null, jevRequests: 0 }
-      : await runner.runCase(c, base);
-    cases.push(r);
-    o.onEvent?.({ type: "case_end", suite: def.suite, result: r });
-  }
-  if (runner && !setupError) {
-    try { await runner.runSteps(def.after_all, "after_all", hookRun()); } catch (e) { o.onLog?.(`${def.suite}: after_all: ${(e as Error).message}`); }
-  }
+  const before = hookRun();
+  const applyHook = (run: CaseRun, error: string | null): void => {
+    const active = cases.filter((c) => c.status !== "skipped");
+    const first = active[0];
+    if (first) {
+      first.steps.push(...run.steps);
+      first.assertions.push(...run.assertions);
+      first.jevRequests += run.jevRequests;
+    }
+    for (const c of active) {
+      c.healed.push(...run.healed);
+      if (error || (run.healed.length && o.mode.heal === "fail")) {
+        c.status = "failed";
+        c.error ??= error ?? `a suite hook needed repair: ${run.healed.join("; ")}. Review the repaired recording and commit it`;
+      } else if (run.healed.length && c.status === "passed") c.status = "healed";
+    }
+  };
   let recordingsSaved: string | null = null;
-  if (runner?.recordings.dirty) {
-    recordingsSaved = o.mode.ci
-      ? runner.recordings.save(path.join(o.reportDir, "recordings", path.relative(path.resolve(o.project.root, o.project.config.recordings), runner.recordings.path)))
-      : runner.recordings.save();
+  try {
+    try {
+      session = await o.sessions.open(def.suite, (line) => o.onLog?.(o.project.secrets.redact(line)));
+      runner = new SuiteRunner(o, suite, session);
+    } catch (e) {
+      setupError ??= `the browser did not start: ${(e as Error).message}`;
+    }
+    if (!setupError && runner) {
+      try { await runner.runSteps(def.before_all, "before_all", before); } catch (e) { setupError = `before_all: ${(e as Error).message}`; }
+    }
+    for (const c of def.cases) {
+      const r: CaseResult = setupError || !runner
+        ? { id: c.id, title: c.title, tags: [...def.tags, ...c.tags], status: c.skip ? "skipped" : "failed", ms: 0, error: c.skip ?? setupError, steps: [], assertions: [], healed: [], screenshot: null, jevRequests: 0 }
+        : await runner.runCase(c, base);
+      cases.push(r);
+    }
+    applyHook(before, null);
+    if (runner && !setupError) {
+      const after = hookRun();
+      let error: string | null = null;
+      try { await runner.runSteps(def.after_all, "after_all", after); } catch (e) { error = `after_all: ${(e as Error).message}`; }
+      applyHook(after, error);
+    }
+    if (runner?.recordings.dirty) {
+      recordingsSaved = o.mode.ci
+        ? runner.recordings.save(path.join(o.reportDir, "recordings", path.relative(path.resolve(o.project.root, o.project.config.recordings), runner.recordings.path)))
+        : runner.recordings.save();
+    }
+  } finally {
+    await session?.close().catch(() => undefined);
   }
-  await session?.close().catch(() => undefined);
-  const result: SuiteResult = { suite: def.suite, key: suite.key, cases, ms: Date.now() - t0, recordingsSaved };
-  o.onEvent?.({ type: "suite_end", result });
+  const result = o.project.secrets.redactData({ suite: def.suite, key: suite.key, cases, ms: Date.now() - t0, recordingsSaved });
+  for (const c of result.cases) emit({ type: "case_end", suite: def.suite, result: c });
+  emit({ type: "suite_end", result });
   return result;
 }
 
@@ -369,5 +414,5 @@ export async function runAll(o: RunOptions): Promise<RunReport> {
   await Promise.all(Array.from({ length: Math.max(1, Math.min(o.workers, o.suites.length)) }, worker));
   const totals = { passed: 0, healed: 0, failed: 0, skipped: 0, total: 0 };
   for (const s of results) for (const c of s.cases) { totals[c.status] += 1; totals.total += 1; }
-  return { runId: o.runId, environment: o.project.env.name, baseUrl: o.project.env.baseUrl, startedAt: started.toISOString(), ms: Date.now() - t0, suites: results, totals };
+  return o.project.secrets.redactData({ runId: o.runId, environment: o.project.env.name, baseUrl: o.project.env.baseUrl, startedAt: started.toISOString(), ms: Date.now() - t0, suites: results, totals });
 }

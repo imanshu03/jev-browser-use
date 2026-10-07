@@ -58,7 +58,7 @@ export function focusFieldScript(field: string): string {
       return out.map(norm).filter(Boolean);
     };
     const fields = [...document.querySelectorAll("input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]), textarea")]
-      .filter((e) => !e.disabled && e.checkVisibility && e.checkVisibility());
+      .filter((e) => !e.disabled && !e.readOnly && e.checkVisibility && e.checkVisibility());
     const hit = fields.find((e) => names(e).includes(want)) || fields.find((e) => names(e).some((n) => n.startsWith(want)));
     if (!hit) return false;
     hit.scrollIntoView({ block: "center" });
@@ -78,6 +78,7 @@ class JevSession implements Session {
     private readonly log: Logger,
     private readonly stepMs: number,
     private readonly headed: boolean,
+    private readonly secrets: Secrets,
   ) {}
 
   private page(): Promise<Page> {
@@ -89,33 +90,36 @@ class JevSession implements Session {
     await (await this.page()).navigate(url, LIMITS.openTimeoutMs);
   }
 
-  async jev(task: string, params: Record<string, string>, goal: "act" | "check"): Promise<JevOutcome> {
+  async jev(task: string, params: Record<string, string>, goal: "act" | "check", signal?: AbortSignal): Promise<JevOutcome> {
+    signal?.throwIfAborted();
     const nav = this.nav.navigator;
     if (!nav) return { ok: false, steps: [], reason: "a plain-language step needs Jev: set jev.api_key (TYPESAFE_API_KEY)", jevRequests: 0 };
     const page = await this.page();
     const current = await page.url().catch(() => "");
+    signal?.throwIfAborted();
     const cfg: RunConfig = {
       ...this.base, task, goal, vars: { ...params }, keepOpen: true, headed: this.headed, profile: "none", confirm: "autonomous",
       ...(current && current !== "about:blank" ? { fallbackUrl: current } : {}),
     };
     const runner = new FastRunner({
       cfg, profiles: nav.profiles, chrome: () => this.browser.chrome(), page, openPage: async () => page,
+      ...(signal ? { signal } : {}), redactor: (text) => this.secrets.redact(text),
       oracle: nav.oracle, human: nav.human, log: this.log, attended: false,
       ...(nav.warm ? { warm: nav.warm } : {}), ...(nav.text ? { text: nav.text } : {}),
     });
     const before = nav.oracle.stats.requests;
     const r = await runner.run();
     const jevRequests = nav.oracle.stats.requests - before;
-    const rec = stepsFromRecords(r.steps, params, { keepGated: true });
+    const rec = stepsFromRecords(r.steps.filter((s) => s.result === "ok"), params, { keepGated: true });
     for (const s of rec.skipped) this.log.info(`not recorded: ${s}`);
     const reason = r.outcome === "done" ? r.reason : `jev ${r.outcome}: ${r.blocked?.hint || r.error?.message || r.reason || "no reason"}`;
-    const out: JevOutcome = { ok: r.outcome === "done", steps: rec.steps, reason, jevRequests };
+    const out: JevOutcome = { ok: r.outcome === "done" && (goal === "check" || rec.skipped.length === 0), steps: rec.steps, reason: goal === "act" && rec.skipped.length ? `the run cannot be replayed: ${rec.skipped.join("; ")}. Use explicit steps for these actions` : reason, jevRequests };
     if (r.answer?.kind === "check") out.check = { answer: r.answer.answer, probability: r.answer.probability };
     return out;
   }
 
-  async replay(steps: Parameters<Session["replay"]>[0], params: Record<string, string>): Promise<ReplayOutcome> {
-    const r = await replaySteps(await this.page(), steps, params, { log: this.log, stepTimeoutMs: this.stepMs, headed: this.headed });
+  async replay(steps: Parameters<Session["replay"]>[0], params: Record<string, string>, signal?: AbortSignal): Promise<ReplayOutcome> {
+    const r = await replaySteps(await this.page(), steps, params, { log: this.log, stepTimeoutMs: this.stepMs, headed: this.headed, ...(signal ? { signal } : {}) });
     return r.ok ? { ok: true } : { ok: false, step: r.step, reason: r.reason };
   }
 
@@ -128,8 +132,13 @@ class JevSession implements Session {
       const found = (r["result"] as { value?: unknown } | undefined)?.value === true;
       if (found) {
         if (value) await chrome.client.send("Input.insertText", { text: value }, page.sessionId);
-        else await chrome.client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 }, page.sessionId);
-        return { ok: true };
+        else {
+          for (const type of ["keyDown", "keyUp"]) await chrome.client.send("Input.dispatchKeyEvent", { type, key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 }, page.sessionId);
+        }
+        const check = await chrome.client.send("Runtime.evaluate", { expression: `document.activeElement?.value === ${JSON.stringify(value)}`, returnByValue: true }, page.sessionId);
+        return (check["result"] as { value?: unknown } | undefined)?.value === true
+          ? { ok: true }
+          : { ok: false, step: 0, reason: `the field ${JSON.stringify(field)} did not keep the requested value` };
       }
       if (Date.now() >= deadline) return { ok: false, step: 0, reason: `no field ${JSON.stringify(field)}` };
       await new Promise((res) => setTimeout(res, 250));
@@ -151,8 +160,7 @@ class JevSession implements Session {
   }
 
   async close() {
-    await this.browser.close();
-    await this.nav.close();
+    try { await this.browser.close(); } finally { await this.nav.close(); }
   }
 }
 
@@ -168,17 +176,17 @@ export function jevSessions(o: EngineOptions): SessionFactory {
     async open(name, write) {
       fs.mkdirSync(o.logDir, { recursive: true });
       const file = fs.createWriteStream(path.join(o.logDir, `${name.replace(/[^A-Za-z0-9_.-]+/g, "_")}.log`));
-      const log = createLogger(lineStream((l) => { file.write(l + "\n"); if (/ WARN /.test(l) && !/ unattended: /.test(l)) write(l); }), "info", false);
+      const log = createLogger(lineStream((l) => { file.write(o.secrets.redact(l) + "\n"); if (/ WARN /.test(l) && !/ unattended: /.test(l)) write(o.secrets.redact(l)); }), "info", false);
       log.redactor = (s) => o.secrets.redact(s);
-      const human = createHuman({ stdin: process.stdin, stderr: lineStream((l) => file.write(l + "\n")) as unknown as NodeJS.WriteStream, forceNonInteractive: true });
+      const human = createHuman({ stdin: process.stdin, stderr: lineStream((l) => file.write(o.secrets.redact(l) + "\n")) as unknown as NodeJS.WriteStream, forceNonInteractive: true });
       const base = { ...baseRunConfig(env, { headed: o.headed, maxSteps: o.config.jev.max_steps }), model: o.config.jev.model };
       const nav = createNavigator(env, log, human, profiles, base);
       const browser = createBrowser({
         headed: o.headed, env, log, ...(kind ? { browser: kind } : {}), ...(profile ? { profileDirectory: profile.directory } : {}),
       });
-      const session = new JevSession(browser, nav, base, log, o.config.timeouts.step_ms, o.headed);
+      const session = new JevSession(browser, nav, base, log, o.config.timeouts.step_ms, o.headed, o.secrets);
       const close = session.close.bind(session);
-      session.close = async () => { await close(); await new Promise<void>((r) => file.end(r)); };
+      session.close = async () => { try { await close(); } finally { await new Promise<void>((r) => file.end(r)); } };
       return session;
     },
   };

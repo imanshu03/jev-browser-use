@@ -31,3 +31,10 @@ describe("fillVars", () => {
     expect(resolveVars({ now: "1" }, { title: "Note {now}", full: "{title}!" })).toEqual({ now: "1", title: "Note 1", full: "Note 1!" });
   });
 });
+
+it("removes a secret from text that already has JSON escapes", () => {
+  const secrets = new Secrets();
+  const value = 'private-"value\\with\nlines';
+  secrets.add(value);
+  expect(secrets.redact(JSON.stringify({ value }))).toBe('{"value":"***"}');
+});
