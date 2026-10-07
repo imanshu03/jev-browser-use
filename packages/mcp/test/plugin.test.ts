@@ -123,6 +123,41 @@ describe("plugin folders share one MCP server and one skill set", () => {
   });
 });
 
+describe("skill set", () => {
+  const SKILLS = ["jev-browser", "jev-plugin", "jev-test"];
+  const front = (name: string): Map<string, string> => {
+    const m = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(path.join(mcpDir, "skills", name, "SKILL.md"), "utf8"));
+    return new Map((m?.[1] ?? "").split("\n").map((l) => [l.slice(0, l.indexOf(":")).trim(), l.slice(l.indexOf(":") + 1).trim()]));
+  };
+
+  it("each skill folder has a SKILL.md whose name is the folder name and whose description is 1024 characters or fewer", () => {
+    expect(readdirSync(path.join(mcpDir, "skills")).sort()).toEqual(SKILLS);
+    for (const name of SKILLS) {
+      const f = front(name);
+      expect(f.get("name"), name).toBe(name);
+      expect((f.get("description") ?? "").length, name).toBeGreaterThan(0);
+      expect((f.get("description") ?? "").length, name).toBeLessThanOrEqual(1024);
+    }
+  });
+
+  it("each relative link of a skill points to a file that exists", () => {
+    for (const f of tree(path.join(mcpDir, "skills")).filter((x) => x.endsWith(".md"))) {
+      const text = readFileSync(path.join(mcpDir, "skills", f), "utf8");
+      for (const [, target] of text.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
+        if (/^[a-z]+:/i.test(target as string)) continue;
+        expect(existsSync(path.join(mcpDir, "skills", path.dirname(f), target as string)), `${f} -> ${target}`).toBe(true);
+      }
+    }
+  });
+
+  it("jev-plugin gives the install commands of both clients and names the other skills", () => {
+    const body = readFileSync(path.join(mcpDir, "skills/jev-plugin/SKILL.md"), "utf8");
+    for (const w of ["npm run plugins", "claude plugin install jev-browser@jev-browser-use", "codex plugin add jev-browser@jev-browser-use", "TYPESAFE_API_KEY", "`jev-browser`", "`jev-test`"]) expect(body, w).toContain(w);
+    const readme = readFileSync(path.join(root, "README.md"), "utf8");
+    for (const v of [...body.matchAll(/^\| `(JEV_MCP_[A-Z_]+)` \|/gm)].map((m) => m[1] as string)) expect(readme, v).toContain(`\`${v}\``);
+  });
+});
+
 describe("skill", () => {
   it("has the name jev-browser and a description of 1024 characters or fewer", () => {
     const s = skill();

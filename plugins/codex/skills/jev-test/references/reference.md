@@ -1,0 +1,167 @@
+# jev-test reference
+
+## Project layout
+
+```
+my-qa/
+  jev-test.config.yaml     environments, vars, secrets, flows, browser, Jev, LLM, repair policy
+  suites/*.suite.yaml      the tests (a suite file name must end with .suite.yaml)
+  .jev/recordings/         saved steps, one JSON file for each suite: commit them
+  reports/<run id>/        results.json, junit.xml, screenshots, logs (not committed)
+  .env                     keys and test credentials for local runs (not committed)
+```
+
+## Config: jev-test.config.yaml
+
+```yaml
+environments:
+  stage: { base_url: https://app.staging.example.com }
+  prod:  { base_url: https://app.example.com, vars: { org: Prod Org } }
+default_environment: stage     # or a top-level base_url with no environments
+
+vars: { org: Test Org }        # {org} in any step
+secrets: [TEST_PASSWORD]       # also hidden in reports
+
+flows:                         # reusable steps: `- use: login`
+  login:
+    - goto: /login
+    - fill: { field: Email, value: "${TEST_EMAIL}" }
+    - fill: { field: Password, value: "${TEST_PASSWORD}" }
+    - click: Sign in
+    - expect: { url_matches: "^(?!.*/login)", timeout_ms: 20000 }
+
+suites: suites                 # default
+recordings: .jev/recordings    # default
+reports: reports               # default
+
+browser:
+  headed: false
+  browser: chrome              # chrome | edge | brave | chromium
+  profile: none                # none for a clean profile; a named Chrome profile runs 1 worker
+  workers: 2                   # suites at the same time, 1 to 16
+
+jev:     { api_key: "${TYPESAFE_API_KEY}", model: jev-latest, max_steps: 25 }
+llm:     { base_url: https://api.openai.com/v1, api_key: "${JEV_TEST_LLM_API_KEY}", model: gpt-4.1, judge_model: gpt-4.1, text_model: gpt-4.1, timeout_ms: 60000 }
+heal:    { local: warn, ci: fail }                 # off | warn | fail
+timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
+```
+
+- Every key is optional except one base URL. Unknown keys are errors.
+- A secret is the value (4 or more characters) of an env var that `secrets` names, or whose name holds pass, secret, token, api_key (or apikey), private, otp, or pin, in any case. Reports show it as `***`.
+- `llm` is any OpenAI-compatible endpoint. Leave `base_url` empty for no LLM. `judge` checks need it.
+
+## Suite: *.suite.yaml
+
+```yaml
+suite: Artifacts               # required
+tags: [artifacts]              # added to each case
+vars: { project: QA Automation }
+
+before_all:  []                # once, before the first case
+before_each: []                # before each case, after `start`
+after_each:  []                # after each case, also after a failure
+after_all:   []                # once, after the last case; a failure fails the cases of the suite
+
+cases:                         # at least one
+  - id: TC-ART-001             # letters, digits, _, . and -; at most 80; unique in all suites
+    title: Create an artifact and delete it
+    tags: [regression]         # letters, digits, _, : and -
+    vars: { name: "jev artifact {now}" }
+    start: /                   # a path of the base URL, or a full URL
+    steps: []
+    expect: []                 # checks after the steps
+    cleanup: []                # runs also when the case fails
+    skip: "bug 123"            # skips the case with this reason
+    timeout_ms: 300000         # default timeouts.case_ms
+```
+
+The order of one case: `start`, `before_each`, `steps`, `expect`, a screenshot when the case failed, `cleanup`, `after_each`.
+
+All cases of a suite run in one browser, in file order. Suites run in parallel up to `browser.workers`.
+
+Var names: a-z, 0-9, and `_`; start with a letter; at most 40 characters. Values can be strings, numbers, or booleans.
+
+## Steps
+
+| Step | Does |
+|---|---|
+| `- Open the Artifacts tab` | Plain language. Jev records it once, replay runs it, repair fixes it. Put exact values in quotes and changing values in `{vars}`. |
+| `- goto: /path` | Opens a path of the base URL, or a full URL. |
+| `- click: Save` | Clicks a button with that name. |
+| `- click: { name: Docs, role: link, match: contains, nth: 0, optional: true }` | `role` default `button`. `match`: `exact` (default), `starts`, or `contains`. `nth` picks one of many matches (from 0). `optional: true` passes when the control is missing. |
+| `- fill: { field: Email, value: "{email}" }` | Types into the field with that label. A password or code field, or a secret value, is typed by code only. Jev and the LLM never see it. |
+| `- select: { field: Sort, option: Newest }` | Picks an option of a select field. |
+| `- press: Enter` | `Enter`, `Escape`, `Tab`, `ArrowDown`, `ArrowUp`, `PageDown`, or `PageUp`. |
+| `- wait: 1000` | Waits this many milliseconds. Prefer `wait_for_text`. |
+| `- wait_for_text: Saved` | Waits until the text shows. Fails at `timeout_ms` (default `timeouts.assert_ms`). |
+| `- use: login` | Runs a flow of the config. Flows can nest 5 deep. |
+| `- expect: { visible_text: Saved }` | One check, or a list of checks, in the middle of the steps. |
+| `- screenshot: after-save` | Saves a screenshot to the report. Name: letters, digits, `_`, `-`; at most 60. |
+
+A plain-language step fails when Jev cannot do it, or when it does an action that cannot be recorded. Use an explicit step for that action.
+
+## Checks
+
+| Check | Passes when |
+|---|---|
+| `url_contains: /notes` | The URL holds the text. |
+| `url_matches: "^.*/notes/\\d+$"` | The URL matches the regular expression. |
+| `title_contains: Notes` | The page title holds the text. |
+| `visible_text: Saved` | The page text holds the text. |
+| `not_visible_text: Error` | The page text does not hold the text. |
+| `element: { name: Sign out, role: button, present: true }` | A control with that name is in view (`present: false`: not in view). |
+| `field_value: { field: Title, value: Milk }` | The field in view holds the value. |
+| `row_contains: [Milk, "2026-10-07"]` | One table row or list record holds every value. |
+| `check: Is the user signed in?` | Jev answers yes with probability 0.7 or more (`min_probability` changes it). |
+| `judge: The reply summarizes the artifact` | The LLM reads the page and agrees. |
+
+Code checks poll the page until they pass or reach `timeout_ms` (default `timeouts.assert_ms`). `check` and `judge` use a model, so the report marks them. A `check` or `judge` text must not hold a secret.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `jev-test init` | Asks for the settings and writes the config, `.env`, `.gitignore` lines, and an example suite. |
+| `jev-test validate [files or dirs]` | Checks the config and every suite. |
+| `jev-test list [files or dirs]` | Lists the cases that a run selects. |
+| `jev-test run [files or dirs]` | Runs the cases. Default: the suites directory of the config. |
+
+| Option | Does |
+|---|---|
+| `--config <file>` | The config file (default `jev-test.config.yaml`). |
+| `--env stage` | An environment of the config. |
+| `--tag smoke` | Only cases with this tag. Repeat for AND. Suite tags count. |
+| `--id TC-1` | Only this case. Repeat for more. |
+| `--grep text` | Only cases whose id or title holds the text. |
+| `--headed` | Shows the browser. |
+| `--record` | Records every selected plain-language step again. |
+| `--ci` | CI mode (also when `CI=true`): a missing recording fails, and a repair fails the case. |
+| `--heal off\|warn\|fail` | The repair policy. Default `heal.local`, or `heal.ci` in CI mode. |
+| `--workers 4` | Suites at the same time. |
+| `--report-dir dir` | Writes the reports there. |
+
+`init` options: `--dir`, `--app-url`, `--env-name`, `--llm-url`, `--llm-model`, `--no-example`, `--ci-workflow`, `--force`, and `--yes` (no questions; the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment).
+
+Exit codes: `0` all passed, `1` a case failed, `2` the config, a suite, or the command line is not valid.
+
+## Record, replay, repair
+
+| Plain-language step | Local run | CI run |
+|---|---|---|
+| No recording | Jev does it and records it. | Fails: "has no recording". |
+| The recording replays | Pass, no model call. | Pass, no model call. |
+| The recording fails | Jev repairs it. The case is `healed` and the new recording is saved. | Jev repairs it. The case fails, and the repaired recording goes to `reports/<run id>/recordings/`. |
+| `--heal off` | Fails. | Fails. |
+
+A repair keeps the saved steps before the failed one and adds the new steps of Jev. Suite hooks use the same repair policy as case steps.
+
+## Reports
+
+`reports/<run id>/` holds `results.json` (each suite, case, step, check, and error), `junit.xml`, `screenshots/` (one for each failed case, and each `screenshot` step), and `logs/`.
+
+## Known limits
+
+- Jev is weak on date pickers, recipient chips, @mentions, and rich-text editors. Use explicit steps there.
+- `element` and `field_value` see only controls in view.
+- A case timeout stops the next steps. Cleanup waits for the active browser command or model request to end.
+- A named Chrome profile (`browser.profile` other than `none`) runs 1 worker.

@@ -1,6 +1,6 @@
 These instructions apply to `jev-browser-use` and its subdirectories.
 
-The repository name is `jev-browser-use`. It is an npm workspace: `packages/core` (engine), `packages/mcp` (MCP server and skill), `packages/cli` (commands), `packages/sdk` (public library), and `packages/test-runner` (jev-test). Only `core` may hold engine code; other packages import it as `@imanshu03/jev-core/<path>.js` and core never imports them. Public commands remain `jev-browser` and `jev-chat`. The MCP server is not a public command. Each plugin folder (`plugins/claude`, `plugins/codex`) runs its copy of the one MCP bundle, `dist/jev-mcp.mjs`. Preserve the existing configuration paths and environment variable names when editing project branding.
+The repository name is `jev-browser-use`. It is an npm workspace: `packages/core` (engine), `packages/mcp` (MCP server and skills), `packages/cli` (commands), `packages/sdk` (public library), and `packages/test-runner` (jev-test). Only `core` may hold engine code; other packages import it as `@imanshu03/jev-core/<path>.js` and core never imports them. Public commands remain `jev-browser` and `jev-chat`. The MCP server is not a public command. Each plugin folder (`plugins/claude`, `plugins/codex`) runs its copy of the one MCP bundle, `dist/jev-mcp.mjs`. Preserve the existing configuration paths and environment variable names when editing project branding.
 
 Use ASD-STE100 Simplified Technical English. Follow Zinsser's principles: simplicity, brevity, clarity, and humanity. Avoid staccato pairs, antithesis reframes, negative parallelism, isocolon metaphor-pairs, and backward references.
 
@@ -24,7 +24,7 @@ Use these files to find the correct layer:
 - `packages/core/src/fast/session.ts`: the Chrome and the tab that the MCP server keeps between runs, and profile relaunch.
 - `packages/mcp/src/main.ts` and `packages/mcp/src/server.ts`: the MCP server entry, stdio, shutdown, the tools, and the dialogs. Only these two files import the MCP SDK.
 - `packages/mcp/src/runs.ts`, `view.ts`, `setup.ts`, `timers.ts`, and `limits.ts`: run state and hand-offs, tool results, environment and input checks, idle timers, and constants.
-- `plugins/claude`, `plugins/codex`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files and MCP configurations. The `jev-browser` skill has one source, `packages/mcp/skills`; `npm run plugins` copies it into both plugin folders.
+- `plugins/claude`, `plugins/codex`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files and MCP configurations. The skills (`jev-browser`, `jev-plugin`, `jev-test`) have one source, `packages/mcp/skills`; `npm run plugins` copies them into both plugin folders. When you change the runner syntax or the plugin setup, update `jev-test` or `jev-plugin`; tests fail when the `jev-test` reference misses a step, check, key, or option.
 - `packages/mcp/scripts/build.mjs` and `packages/mcp/bin/jev-mcp.js`: the plugin bundle build and the development launcher (`npm run mcp`).
 
 For CLI or user-visible changes, read and update `README.md`. For changes to architecture, planning, or decision rules, consult `DESIGN.md`. It covers all three engines and states their differences. Keep the design consistent with the source and tests.
