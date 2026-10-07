@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseEnv } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli.js";
 import type { Prompter } from "../src/init.js";
 import { LLM_KEY_VAR, mergeEnv, mergeGitignore, runInit, terminalPrompter } from "../src/init.js";
@@ -154,4 +154,79 @@ describe("terminalPrompter", () => {
     expect(shown).toContain("Name [staging]: ");
     expect(shown).toContain("Key (hidden): ");
   });
+});
+
+it("quotes YAML values so that model names and URL fragments load unchanged", async () => {
+  for (const llmModel of ["123", "null", "provider: model", "model # label"]) {
+    const dir = tmp();
+    const appUrl = "https://app.example/path# part";
+    expect(await runInit({ dir, given: { appUrl, llmUrl: "https://llm.example/v1", llmModel }, yes: true, force: false, env: {}, prompter: scripted([]), fetch: models([llmModel]) })).toBe(0);
+    const project = loadProject(path.join(dir, "jev-test.config.yaml"), { processEnv: {} });
+    expect(project.env.baseUrl).toBe(appUrl);
+    expect(project.config.llm.model).toBe(llmModel);
+  }
+});
+
+it("rejects an empty environment name before writing files", async () => {
+  const dir = tmp();
+  expect(await runInit({ dir, given: { appUrl: "https://app.example", envName: "" }, yes: true, force: false, env: {}, prompter: scripted([]) })).toBe(2);
+  expect(fs.existsSync(path.join(dir, "jev-test.config.yaml"))).toBe(false);
+});
+
+it("keeps keys with quote characters unchanged in .env", () => {
+  for (const value of ["has'quote", 'has"quote', 'both\'and"quotes', 'all\'three"quotes`']) {
+    expect(parseEnv(mergeEnv("", { TYPESAFE_API_KEY: value }))["TYPESAFE_API_KEY"]).toBe(value);
+  }
+});
+
+it("replaces duplicate and spaced key assignments without changing other values", () => {
+  const existing = "OTHER=keep\nTYPESAFE_API_KEY=old\nexport TYPESAFE_API_KEY = stale\nTYPESAFE_API_KEY=stale\n";
+  const merged = mergeEnv(existing, { TYPESAFE_API_KEY: "new-key" });
+  expect(parseEnv(merged)).toEqual({ OTHER: "keep", TYPESAFE_API_KEY: "new-key" });
+  expect(merged).not.toContain("stale");
+  expect(merged).not.toContain("old");
+});
+
+it("removes keys from endpoint error text before init prints or shortens it", async () => {
+  const key = 'private-key-"with-quotes';
+  const p = scripted([]);
+  expect(await runInit({ dir: tmp(), given: { appUrl: "https://app.example", llmUrl: "https://llm.example/v1", llmModel: "model", llmKey: key }, yes: true, force: false, env: {}, prompter: p,
+    fetch: async () => ({ ok: false, status: 401, text: async () => "x".repeat(180) + JSON.stringify({ key }) }) })).toBe(0);
+  expect(p.said.join("\n")).not.toContain("priva");
+  expect(p.said.join("\n")).toContain("***");
+});
+
+it("keeps a secret answer out of terminal history", async () => {
+  vi.stubEnv("TERM", "xterm");
+  const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {} });
+  const output = new PassThrough();
+  let shown = "";
+  output.on("data", (chunk) => { shown += String(chunk); });
+  const p = terminalPrompter(input, output);
+  try {
+    const key = p.ask("Key", { secret: true });
+    input.write("private-secret-key\r");
+    expect(await key).toBe("private-secret-key");
+    const model = p.ask("Model");
+    input.write("\x1b[A");
+    input.write("m\r");
+    expect(await model).toBe("m");
+    expect(shown).not.toContain("private-secret-key");
+  } finally { p.close(); input.end(); vi.unstubAllEnvs(); }
+});
+
+it("keeps multiline .env entries and replaces a multiline key as one assignment", () => {
+  const other = "OTHER='a line\nTYPESAFE_API_KEY=not-an-assignment\nlast line'\n";
+  const text = mergeEnv(other + "TYPESAFE_API_KEY='old\nkey'\n", { TYPESAFE_API_KEY: "new-key" });
+  expect(text).toBe(other + "TYPESAFE_API_KEY=new-key\n");
+  expect(parseEnv(text).TYPESAFE_API_KEY).toBe("new-key");
+});
+
+it("rejects a key that .env cannot encode before it writes any file", async () => {
+  const dir = tmp();
+  const old = "OTHER=keep\n";
+  fs.writeFileSync(path.join(dir, ".env"), old);
+  expect(await runInit({ dir, given: { appUrl: "https://app.example", jevKey: 'all\'three"quotes` # suffix' }, yes: true, force: false, env: {}, prompter: scripted([]) })).toBe(2);
+  expect(fs.existsSync(path.join(dir, "jev-test.config.yaml"))).toBe(false);
+  expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(old);
 });

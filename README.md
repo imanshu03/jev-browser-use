@@ -590,6 +590,8 @@ npm run mcp       # runs the MCP server from packages/mcp/src through tsx, on st
 npm run smoke -w @imanshu03/jev-cli  # live: the three acceptance runs (SMOKE_ENGINE selects cdp, chromium, or vercel)
 ```
 
+Set up a test project with `npx jev-test init`. It asks for the app URL, environment name, and optional model settings; see the [test runner setup guide](packages/test-runner/README.md#set-up-a-project-jev-test-init).
+
 Run one package with `-w`, for example `npm test -w @imanshu03/jev-core`. The commands `npx jev-browser`, `npx jev-chat`, `npx jev-scrape`, and `npx jev-test` run from the source in this repository.
 
 The live suite launches Chrome. It tests both direct engine names through attachment, native and rich-text entry, editor freshness, browser actions, profiles, and cleanup. It also runs the MCP server on the [reply fixture](packages/core/test/fixtures/live/reply.html) with a scripted Jev and an in-memory client that answers the dialogs. It does not establish that a local Chromium binary launches. Verify that separately when changing Chromium launch behavior. Smoke runs use real API access and prepared browser profiles; Chromium needs its own prepared profile.

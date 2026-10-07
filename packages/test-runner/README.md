@@ -45,7 +45,7 @@ npx jev-test run
 - Keys go only to `.env`. The config refers to them as `${TYPESAFE_API_KEY}` and `${JEV_TEST_LLM_API_KEY}`. `init` adds `.env` and `reports/` to `.gitignore` and makes `.env` readable only by you. The terminal does not show a key while you type it.
 - `init` checks the LLM endpoint with `GET /models` and tells you when it does not answer or does not have the model.
 - It does not overwrite an existing config. Use `--force` to write it again; `.env` keeps its other lines.
-- With no questions, for scripts and CI: `npx jev-test init --yes --app-url https://app.example.com --llm-url https://api.openai.com/v1 --llm-model gpt-5`. With `--yes`, the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment. You can also pass `--jev-key` and `--llm-key`, but the shell can keep them in its history.
+- With no questions, for scripts and CI: `npx jev-test init --yes --app-url https://app.example.com --llm-url https://api.openai.com/v1 --llm-model gpt-4.1`. With `--yes`, the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment. You can also pass `--jev-key` and `--llm-key`, but the shell can keep them in its history.
 
 ## Commands
 
@@ -102,7 +102,7 @@ flows:                          # reusable steps: `- use: login`
 
 browser: { headed: false, workers: 2, profile: none }   # profile: a Chrome profile name, or none for a clean one
 jev:     { api_key: "${TYPESAFE_API_KEY}", model: jev-latest, max_steps: 25 }
-llm:     { base_url: https://api.openai.com/v1, api_key: "${JEV_TEST_LLM_API_KEY}", model: gpt-5 }   # any OpenAI-compatible endpoint
+llm:     { base_url: https://api.openai.com/v1, api_key: "${JEV_TEST_LLM_API_KEY}", model: gpt-4.1 }   # any OpenAI-compatible endpoint
 heal:    { local: warn, ci: fail }
 timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 ```
@@ -199,6 +199,8 @@ A repair keeps the saved steps that ran before the failure and adds Jev's new st
 - New text that a step asks Jev to write, such as "write a short reply" (`llm.text_model`, else `llm.model`).
 
 Jev (TypeSafe) still chooses the clicks when a step records or repairs.
+
+The model must accept the request parameters. Judge requests use `temperature: 0` and `max_tokens: 300`. The new-text writer uses `max_tokens` and JSON mode. GPT-5 rejects the judge temperature parameter; see the [official parameter limits](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.4).
 
 ## CI
 

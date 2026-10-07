@@ -2,6 +2,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { parseEnv } from "node:util";
+import { Secrets } from "./template.js";
 import type { FetchLike } from "./llm.js";
 import { CONFIG_FILE } from "./load.js";
 
@@ -48,7 +50,7 @@ function isHttpUrl(s: string): boolean {
 
 /** A prompter on a terminal or a pipe. A secret answer is not echoed. Lines are buffered, so piped answers are not lost; end of input answers "". */
 export function terminalPrompter(input: NodeJS.ReadableStream = process.stdin, output: NodeJS.WritableStream = process.stdout): Prompter {
-  const rl = readline.createInterface({ input, output, terminal: Boolean((input as NodeJS.ReadStream).isTTY) });
+  const rl = readline.createInterface({ input, output, terminal: Boolean((input as NodeJS.ReadStream).isTTY), historySize: 0 });
   const lines = rl[Symbol.asyncIterator]();
   let closed = false;
   rl.on("close", () => { closed = true; });
@@ -83,17 +85,19 @@ export function terminalPrompter(input: NodeJS.ReadableStream = process.stdin, o
 
 /** Check an OpenAI-compatible endpoint with GET /models. It reports; it never stops init. */
 export async function checkLlm(baseUrl: string, apiKey: string, model: string, fetchImpl: FetchLike = fetch as unknown as FetchLike): Promise<{ ok: boolean; detail: string }> {
+  const secrets = new Secrets();
+  secrets.add(apiKey);
   const headers: Record<string, string> = {};
   if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
   try {
     const res = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/models`, { method: "GET", headers, signal: AbortSignal.timeout(10_000) });
     const text = await res.text();
-    if (!res.ok) return { ok: false, detail: `GET /models answered ${res.status}: ${text.slice(0, 200)}` };
+    if (!res.ok) return { ok: false, detail: `GET /models answered ${res.status}: ${secrets.redact(text).slice(0, 200)}` };
     const ids = ((JSON.parse(text) as { data?: { id?: unknown }[] }).data ?? []).map((m) => String(m.id ?? ""));
     if (ids.length > 0 && !ids.includes(model)) return { ok: true, detail: `the endpoint answers, but its ${ids.length} model(s) do not include "${model}"` };
     return { ok: true, detail: ids.length > 0 ? `the endpoint answers and has the model "${model}"` : "the endpoint answers" };
   } catch (e) {
-    return { ok: false, detail: `the endpoint did not answer: ${(e as Error).message}` };
+    return { ok: false, detail: `the endpoint did not answer: ${secrets.redact((e as Error).message)}` };
   }
 }
 
@@ -102,9 +106,9 @@ export function renderConfig(a: InitAnswers): string {
     ? [
       "# Any OpenAI-compatible endpoint (OpenAI, a LiteLLM proxy, OpenRouter, a local server). Used for judge checks and new field text.",
       "llm:",
-      `  base_url: ${a.llmUrl}`,
+      `  base_url: ${JSON.stringify(a.llmUrl)}`,
       `  api_key: \${${LLM_KEY_VAR}}`,
-      `  model: ${a.llmModel}`,
+      `  model: ${JSON.stringify(a.llmModel)}`,
     ]
     : [
       "# No LLM is set, so judge checks fail with a hint. To add one, run jev-test init --force or add:",
@@ -117,7 +121,7 @@ export function renderConfig(a: InitAnswers): string {
     "# Created by jev-test init. Keys are in .env, which git ignores.",
     "environments:",
     `  ${a.envName}:`,
-    `    base_url: ${a.appUrl}`,
+    `    base_url: ${JSON.stringify(a.appUrl)}`,
     `default_environment: ${a.envName}`,
     "",
     "suites: suites",
@@ -187,17 +191,31 @@ export function ciWorkflow(withLlm: boolean): string {
   ].join("\n");
 }
 
-/** Set `values` in .env text: replace a line of the same key, else append. Empty values are not written. */
+function envValue(value: string): string {
+  if (SAFE_ENV_VALUE.test(value)) return value;
+  const forms = [value, ...["'", '"', "`"].map((quote) => quote + value + quote)];
+  const encoded = forms.find((text) => parseEnv(`JEV_INIT_VALUE=${text}\n`)["JEV_INIT_VALUE"] === value);
+  if (encoded === undefined) throw new InitError("the key cannot be saved in .env without changing its value");
+  return encoded;
+}
+
+/** Replace all assignments of each supplied key and keep other .env entries. */
 export function mergeEnv(existing: string, values: Record<string, string>): string {
-  const lines = existing ? existing.replace(/\n$/, "").split("\n") : [];
+  let text = existing;
   for (const [key, value] of Object.entries(values)) {
     if (!value) continue;
-    const quoted = SAFE_ENV_VALUE.test(value) ? value : `'${value}'`;
-    const i = lines.findIndex((l) => l.replace(/^export\s+/, "").startsWith(`${key}=`));
-    if (i >= 0) lines[i] = `${key}=${quoted}`;
-    else lines.push(`${key}=${quoted}`);
+    const line = `${key}=${envValue(value)}\n`;
+    const assignment = new RegExp("^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(?:'[^']*'|\"[^\"]*\"|`[^`]*`|[^\r\n]*)[^\r\n]*(?:\r?\n|$)", "gm");
+    let replaced = false;
+    text = text.replace(assignment, (entry, name: string) => {
+      if (name !== key) return entry;
+      if (replaced) return "";
+      replaced = true;
+      return line;
+    });
+    if (!replaced) text += (text && !text.endsWith("\n") ? "\n" : "") + line;
   }
-  return lines.length > 0 ? lines.join("\n") + "\n" : "";
+  return text && !text.endsWith("\n") ? text + "\n" : text;
 }
 
 /** Add the lines that a .gitignore lacks. */
@@ -250,7 +268,7 @@ export async function runInit(o: InitOptions): Promise<number> {
     if (fs.existsSync(configPath) && !o.force) throw new InitError(`${configPath} exists. Run init with --force to write it again`);
     if (!o.yes) say("jev-test init: answer each question, or press Enter to take the value in [brackets].\n");
     const appUrl = await value(o, "appUrl", "URL of the web app to test", { required: true, check: (s) => (isHttpUrl(s) ? null : "give an http or https URL") });
-    const envName = await value(o, "envName", "Name of this environment", { default: "staging", check: (s) => (ENV_NAME.test(s) ? null : "use a-z, 0-9, _ and -, starting with a letter") });
+    const envName = await value(o, "envName", "Name of this environment", { required: true, default: "staging", check: (s) => (ENV_NAME.test(s) ? null : "use a-z, 0-9, _ and -, starting with a letter") });
     const jevKey = await value(o, "jevKey", "TypeSafe API key for Jev (empty: add it later; replays need no key)", { secret: true, envVar: JEV_KEY_VAR });
     const llmUrl = await value(o, "llmUrl", "OpenAI-compatible base URL for the LLM, such as https://api.openai.com/v1 (empty: no LLM)", { check: (s) => (isHttpUrl(s) ? null : "give an http or https URL") });
     let llmKey = "";
@@ -276,9 +294,9 @@ export async function runInit(o: InitOptions): Promise<number> {
       if (mode !== undefined) fs.chmodSync(p, mode);
       written.push(rel);
     };
-    put(CONFIG_FILE, renderConfig(a));
     const envPath = path.join(o.dir, ".env");
     const envText = mergeEnv(fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "", { [JEV_KEY_VAR]: a.jevKey, [LLM_KEY_VAR]: a.llmKey });
+    put(CONFIG_FILE, renderConfig(a));
     if (envText) put(".env", envText, 0o600);
     const ignorePath = path.join(o.dir, ".gitignore");
     const ignore = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8") : "";
