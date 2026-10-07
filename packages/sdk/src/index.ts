@@ -38,6 +38,6 @@ export type { LlmBackend, LlmReply } from "@imanshu03/jev-core/scrape/llm.js";
 export { stepsFromRecords, beforeRepeat } from "@imanshu03/jev-core/scrape/record.js";
 export type { RecordedSteps, RecordOptions } from "@imanshu03/jev-core/scrape/record.js";
 export { replaySteps, STEP_MS } from "@imanshu03/jev-core/scrape/replay.js";
-export type { ReplayOptions, ReplayResult } from "@imanshu03/jev-core/scrape/replay.js";
+export type { ReplayGuardInput, ReplayOptions, ReplayResult } from "@imanshu03/jev-core/scrape/replay.js";
 export { Step, Target, PRESS_KEYS } from "@imanshu03/jev-core/scrape/spec.js";
 export { fillTemplate } from "@imanshu03/jev-core/scrape/spec.js";

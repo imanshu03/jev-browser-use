@@ -263,6 +263,9 @@ describe("FastRunner control", () => {
     expect(riskOf("CLICK", "Delete and remove from list", w)).toBe("destructive");
     expect(riskOf("CLICK", "Save and archive", w)).toBe("submit");
     expect(riskOf("CLICK", "Archive and approve", w)).toBe("destructive");
+    expect(riskOf("CLICK", "Remove account (not remove from list)", w)).toBe("destructive");
+    expect(riskOf("CLICK", "Remove from list, then remove", w)).toBe("destructive");
+    expect(riskOf("CLICK", "Remove from list", { dangerous: [], safe: ["remove from list", "list"] })).toBe("navigational");
     expect(riskOf("TYPE_TEXT", "Approve", w)).toBe("data_entry");
   });
   it("wordsFor: the words of each matching host go over the words for all pages, the longest host last", () => {
@@ -274,6 +277,8 @@ describe("FastRunner control", () => {
     expect(wordsFor(rules, "https://app.example.com/x")).toEqual({ dangerous: [], safe: ["delete", "approve"] });
     expect(wordsFor(rules, "https://prod.example.com/x")).toEqual({ dangerous: ["delete"], safe: ["approve"] });
     expect(wordsFor(rules, "not a url")).toEqual({ dangerous: ["approve"], safe: [] });
+    expect(wordsFor(rules, "https://prod.example.com./x")).toEqual({ dangerous: ["delete"], safe: ["approve"] });
+    expect(wordsFor({ dangerous: [], safe: [], hosts: { "app.example.com.": { dangerous: ["save"], safe: [] } } }, "https://APP.example.com/")).toEqual({ dangerous: ["save"], safe: [] });
   });
   it("cfg.actions: a safe word lets Delete run under confirm never on its host only; a dangerous word blocks a link", async () => {
     const script = byUrl({ [DASH.url]: (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Delete project"), confidence: 0.9 } }) });

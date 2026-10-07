@@ -84,6 +84,12 @@ describe("loadProject with global.yaml", () => {
     expect(() => loadProject(clash, { processEnv: {} })).toThrow(/actions lists "delete" as dangerous and as safe/);
     const hostClash = project("base_url: https://a.example.com\n", "actions: { hosts: { a.example.com: { dangerous: [x], safe: [x] } } }\n");
     expect(() => loadProject(hostClash, { processEnv: {} })).toThrow(/actions host a\.example\.com lists "x"/);
+    for (const key of ["app.example.com:443", "https://app.example.com", "*.example.com", "app.example.com/notes", "user@app.example.com"]) {
+      const host = project("base_url: https://a.example.com\n", `actions: { hosts: { "${key}": { dangerous: [save] } } }\n`);
+      expect(() => loadProject(host, { processEnv: {} }), key).toThrow(/is not a host name: write only the host/);
+    }
+    const dotted = project("base_url: https://a.example.com\n", "actions: { hosts: { App.Example.com.: { dangerous: [save] } } }\n");
+    expect(loadProject(dotted, { processEnv: {} }).policy.actions.hosts).toEqual({ "app.example.com": { dangerous: ["save"], safe: [] } });
     const bad = project("base_url: https://a.example.com\n", "confirm: sometimes\n");
     expect(() => loadProject(bad, { processEnv: {} })).toThrow(/confirm/);
     const missing = project("base_url: https://a.example.com\nglobal: shared/global.yaml\n", null);
@@ -103,7 +109,10 @@ describe("refusal", () => {
     expect(refusal(policy("never"), "prod", click("Save"))).toBeNull();
     expect(refusal(policy("always"), null, click("Save"))).toBe('confirm is always for this suite, so the run does not do the submit click on "Save"');
     expect(refusal(policy("always"), "prod", click("Open menu"))).toBeNull();
-    expect(refusal(policy("always"), "prod", { kind: "enter", label: "Title | Save", url: "https://app.example.com/" })).toBeNull();
+    expect(refusal(policy("always"), "prod", { kind: "enter", label: "Title | Save", url: "https://app.example.com/" })).toMatch(/submit Enter on "Title \| Save"/);
+    expect(refusal(policy("always"), "prod", { kind: "enter", label: "Title", url: "https://app.example.com/", search: false })).toMatch(/submit Enter on "Title"/);
+    expect(refusal(policy("always"), "prod", { kind: "enter", label: "Search notes", url: "https://app.example.com/", search: true })).toBeNull();
+    expect(refusal(policy("never"), "prod", { kind: "enter", label: "Title | Save", url: "https://app.example.com/" })).toBeNull();
     expect(refusal(policy("never"), "prod", { kind: "enter", label: "Note | Delete note", url: "https://app.example.com/" })).toMatch(/dangerous Enter on "Note \| Delete note"/);
   });
 
@@ -112,6 +121,8 @@ describe("refusal", () => {
     expect(refusal(p, "prod", click("Approve request"))).toMatch(/dangerous click on "Approve request"/);
     expect(refusal(p, "prod", click("Delete note"))).toBeNull();
     expect(refusal(p, "prod", click("Delete note", "https://other.example.org/"))).toMatch(/dangerous click/);
+    const hosted = policy("never", { dangerous: [], safe: [], hosts: { "app.example.com": { dangerous: ["save"], safe: [] } } });
+    expect(refusal(hosted, "prod", click("Save", "https://app.example.com./notes"))).toMatch(/dangerous click on "Save"/);
   });
 });
 

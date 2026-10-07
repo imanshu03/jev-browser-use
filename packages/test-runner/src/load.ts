@@ -50,7 +50,9 @@ export interface LoadedSuite {
 }
 
 function zodMessage(e: z.ZodError, file: string): string {
-  return `${file}:\n` + e.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
+  // A bad record key keeps its own reason in nested issues; show that reason, not "Invalid key in record".
+  const message = (i: z.core.$ZodIssue): string => ("issues" in i && Array.isArray(i.issues) && i.issues[0] && "message" in i.issues[0] ? String(i.issues[0].message) : i.message);
+  return `${file}:\n` + e.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${message(i)}`).join("\n");
 }
 
 function readYaml(file: string): unknown {

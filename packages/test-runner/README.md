@@ -145,15 +145,15 @@ instructions:
 |---|---|
 | `autonomous` (default) | Do every action. |
 | `never` | Do no dangerous click or Enter. Such a step fails. |
-| `always` | Do no dangerous click or Enter, and no submit click (save, create, sign in, ...). |
+| `always` | Do no dangerous click or Enter, no submit click (save, create, sign in, ...), and no Enter outside a search field. |
 
 Explicit `click` and `press` steps are not checked: you wrote them. A replay that the confirm mode stops fails at once, with no repair.
 
 **`actions`** changes which click labels are dangerous. The built-in dangerous words include delete, remove, pay, buy, send, post, publish, share, reply, and archive.
 
 - A `dangerous` word makes each click whose label holds it dangerous, such as `approve`.
-- A `safe` word stops a built-in dangerous word that it holds. `archive` stops `archive`, and `remove from list` stops `remove` in "Remove from list", but "Delete" stays dangerous.
-- `hosts` gives words for one host and its subdomains, over the other words.
+- A `safe` phrase stops the built-in dangerous words only where it stands in the label. With `remove from list`, "Remove from list" is safe, but "Delete" and "Remove account (not remove from list)" stay dangerous.
+- `hosts` gives words for one host and its subdomains, over the other words. A key is a bare host name such as `app.example.com`: a scheme, port, path, or wildcard is an error.
 - Under `autonomous`, the words still set how sure Jev must be before it clicks: a dangerous click needs a higher confidence.
 
 **`instructions`**: `jev` goes to Jev in each step request as notes about the app (at most 1,000 characters). Write facts about the app, not rules for the task, because extra rules can make Jev skip steps. `llm` goes to the text writer and to every `judge` check.

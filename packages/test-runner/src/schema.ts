@@ -12,7 +12,18 @@ export const ActionWordsDef = z.strictObject({ dangerous: Words, safe: Words });
 export type ActionWordsDef = z.infer<typeof ActionWordsDef>;
 
 /** Action words for all pages, and more words for some hosts (a host and its subdomains). */
-export const ActionsDef = ActionWordsDef.extend({ hosts: z.record(z.string().trim().min(1).transform((h) => h.toLowerCase()), ActionWordsDef).default({}) });
+/** A bare host name, as a URL gives it: no scheme, port, path, user, or wildcard. A trailing dot is dropped. */
+const Host = z.string().trim().min(1).transform((h, ctx) => {
+  let host = "";
+  try {
+    const u = new URL(`http://${h}`);
+    if (!/[/@?#:*]/.test(h.replace(/^\[[^\]]*\]$/, "")) && u.port === "" && u.pathname === "/") host = u.hostname.toLowerCase().replace(/\.+$/, "");
+  } catch { host = ""; }
+  if (!host) ctx.addIssue({ code: "custom", message: `"${h}" is not a host name: write only the host, such as app.example.com` });
+  return host;
+});
+
+export const ActionsDef = ActionWordsDef.extend({ hosts: z.record(Host, ActionWordsDef).default({}) });
 export type ActionsDef = z.infer<typeof ActionsDef>;
 
 /** What Jev may do when it records or repairs a step, and what a replay may click. */

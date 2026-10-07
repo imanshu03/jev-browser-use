@@ -358,33 +358,46 @@ function valueText(v: Decision["value"]): string {
 /** Risk classes from low to high. */
 const RISK_ORDER: RiskClass[] = ["read_only", "navigational", "data_entry", "submit", "destructive"];
 
+/** The label with each whole-word occurrence of a safe phrase blanked out, longest phrase first. */
+function maskPhrases(label: string, phrases: readonly string[]): string {
+  let out = label.toLowerCase();
+  for (const p of [...phrases].sort((a, b) => b.length - a.length)) {
+    out = out.replace(new RegExp(`(?<![a-z])${p.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z])`, "g"), " ");
+  }
+  return out;
+}
+
 /**
  * Risk of one target from its label. Keyword classes apply to clicks; a fill or select is data entry. `words` adds the
- * user's words: a dangerous word makes the click destructive, and a safe phrase in the label stops each built-in
- * destructive word that the phrase holds ("remove from list" stops "remove", not "delete").
+ * user's words: a dangerous word makes the click destructive. A safe phrase stops the built-in destructive words only
+ * where it stands: "Remove from list" is safe with "remove from list", "Remove account (not remove from list)" is not.
  */
 export function riskOf(op: TargetOp, label: string, words?: ActionWords): RiskClass {
   if (op === "CLICK") {
     if (words && words.dangerous.length > 0 && hit(label, words.dangerous)) return "destructive";
-    const safe = words ? words.safe.filter((p) => hit(label, [p])) : [];
-    if (DESTRUCTIVE_WORDS.some((w) => hit(label, [w]) && !safe.some((p) => hit(p, [w])))) return "destructive";
+    if (hit(words && words.safe.length > 0 ? maskPhrases(label, words.safe) : label, DESTRUCTIVE_WORDS)) return "destructive";
     if (hit(label, SUBMIT_WORDS)) return "submit";
     return "navigational";
   }
   return "data_entry";
 }
 
+/** A host name as a URL gives it, in lower case and without the trailing dot of a fully qualified name. */
+export function normHost(host: string): string {
+  return host.toLowerCase().replace(/\.+$/, "");
+}
+
 /** The action words for a page: the words for all pages, then the words of each matching host, the longest host last. */
 export function wordsFor(rules: ActionRules | undefined, url: string): ActionWords | undefined {
   if (!rules) return undefined;
   let host = "";
-  try { host = new URL(url).hostname.toLowerCase(); } catch { host = ""; }
+  try { host = normHost(new URL(url).hostname); } catch { host = ""; }
   let dangerous = [...rules.dangerous];
   let safe = [...rules.safe];
   const keys = Object.keys(rules.hosts ?? {}).sort((a, b) => a.length - b.length);
   for (const key of keys) {
-    const k = key.toLowerCase();
-    if (!host || (host !== k && !host.endsWith(`.${k}`))) continue;
+    const k = normHost(key);
+    if (!host || !k || (host !== k && !host.endsWith(`.${k}`))) continue;
     const w = (rules.hosts as Record<string, ActionWords>)[key] as ActionWords;
     dangerous = [...dangerous.filter((x) => !w.safe.includes(x)), ...w.dangerous];
     safe = [...safe.filter((x) => !w.dangerous.includes(x)), ...w.safe];

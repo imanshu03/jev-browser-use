@@ -170,7 +170,10 @@ describe("replaySteps", () => {
     const enter = seqPage(() => view);
     expect(await replaySteps(enter, [{ op: "press", key: "Enter" }], {}, { log, guard })).toMatchObject({ ok: false, refused: true });
     expect(enter.calls).toEqual([]);
-    expect(seen.at(-1)).toEqual({ kind: "enter", label: "Note | Delete note", url: URL });
+    expect(seen.at(-1)).toEqual({ kind: "enter", label: "Note | Delete note", url: URL, search: false });
+    const searchView = { ...obs(URL, [el("e7", "fill", "Search notes", "searchbox", { node: 7, value: "milk" })], "notes"), focus: { node: 7, label: "Search notes", role: "searchbox", submitLabel: "" } } as Observation;
+    await replaySteps(seqPage(() => searchView), [{ op: "press", key: "Enter" }], {}, { log, guard });
+    expect(seen.at(-1)).toEqual({ kind: "enter", label: "Search notes", url: URL, search: true });
     const tab = seqPage(() => view);
     expect(await replaySteps(tab, [{ op: "press", key: "Tab" }], {}, { log, guard })).toEqual({ ok: true, steps: 1 });
     expect(tab.calls).toEqual([{ op: "press", key: "Tab" }]);

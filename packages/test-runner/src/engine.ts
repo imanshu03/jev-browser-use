@@ -6,7 +6,7 @@ import {
   FastRunner, LIMITS, baseRunConfig, browserOf, createBrowser, createHuman, createLogger, createNavigator, defaultUserDataDir,
   listProfiles, replaySteps, riskOf, stepsFromRecords, wordsFor,
 } from "@imanshu03/jev-browser-use";
-import type { Browser, BrowserKind, Logger, NavigatorDeps, Page, RunConfig } from "@imanshu03/jev-browser-use";
+import type { Browser, BrowserKind, Logger, NavigatorDeps, Page, ReplayGuardInput, RunConfig } from "@imanshu03/jev-browser-use";
 import { DEFAULT_POLICY } from "./load.js";
 import type { Policy } from "./load.js";
 import type { ConfigDef } from "./schema.js";
@@ -43,10 +43,12 @@ export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv, llmI
 }
 
 /** Why the environment does not allow a click or Enter with this label, or null when it does. Autonomous allows all. */
-export function refusal(policy: Policy, envName: string | null, input: { kind: "click" | "enter"; label: string; url: string }): string | null {
+export function refusal(policy: Policy, envName: string | null, input: ReplayGuardInput): string | null {
   if (policy.confirm === "autonomous") return null;
-  const risk = riskOf("CLICK", input.label, wordsFor(policy.actions, input.url));
-  const refused = risk === "destructive" || (input.kind === "click" && risk === "submit" && policy.confirm === "always");
+  const own = riskOf("CLICK", input.label, wordsFor(policy.actions, input.url));
+  // Enter submits its form as the Jev loop counts it: a submit unless it runs a search, destructive with a dangerous label.
+  const risk = input.kind === "enter" && own !== "destructive" ? (input.search ? "navigational" : "submit") : own;
+  const refused = risk === "destructive" || (risk === "submit" && policy.confirm === "always");
   if (!refused) return null;
   const what = `${risk === "destructive" ? "dangerous" : "submit"} ${input.kind === "enter" ? "Enter on" : "click on"} ${JSON.stringify(input.label)}`;
   return `confirm is ${policy.confirm} for this suite${envName ? ` in the ${envName} environment` : ""}, so the run does not do the ${what}`;
@@ -147,7 +149,7 @@ class JevSession implements Session {
 
   async replay(steps: Parameters<Session["replay"]>[0], params: Record<string, string>, signal?: AbortSignal, opts: ReplayOptions = {}): Promise<ReplayOutcome> {
     const guard = opts.guard && this.policy.confirm !== "autonomous"
-      ? (input: { kind: "click" | "enter"; label: string; url: string }) => refusal(this.policy, this.envName, input)
+      ? (input: ReplayGuardInput) => refusal(this.policy, this.envName, input)
       : undefined;
     const r = await replaySteps(await this.page(), steps, params, { log: this.log, stepTimeoutMs: this.stepMs, headed: this.headed, ...(signal ? { signal } : {}), ...(guard ? { guard } : {}) });
     return r.ok ? { ok: true } : { ok: false, step: r.step, reason: r.reason, ...(r.refused ? { refused: true as const } : {}) };

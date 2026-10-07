@@ -2,6 +2,7 @@
 // and name, and code finds it in the snapshot. A step whose control does not show fails the replay, and the heal
 // ladder takes over. A sign-in wall or a captcha pauses a headed run for the user, else the run is blocked.
 import { hostOf } from "../fast/generate.js";
+import { searchField } from "../fast/loop.js";
 import type { Action, Observation, Page } from "../fast/model.js";
 import { EditRefused, StalePage } from "../fast/model.js";
 import type { Human, Logger } from "../io.js";
@@ -145,8 +146,19 @@ export interface ReplayOptions {
   navTimeoutMs?: number;
   /** The name of the scraper, for the pause message. */
   name?: string;
-  /** Called before each click and Enter with the label and the page URL. A reason refuses the input and fails the replay. */
-  guard?: (input: { kind: "click" | "enter"; label: string; url: string }) => string | null;
+  /**
+   * Called before each click and Enter with the label and the page URL; for Enter, `search` tells that the focused field
+   * is a search field. A reason refuses the input and fails the replay.
+   */
+  guard?: (input: ReplayGuardInput) => string | null;
+}
+
+export interface ReplayGuardInput {
+  kind: "click" | "enter";
+  label: string;
+  url: string;
+  /** Enter only: the focused field is a search field, so Enter runs a search. */
+  search?: boolean;
 }
 
 export type ReplayResult =
@@ -226,7 +238,8 @@ export async function replaySteps(page: Page, steps: readonly Step[], params: Re
         if (step.key === "Enter" && opts.guard) {
           const obs = await page.observe();
           const label = [obs.focus?.label, obs.focus?.submitLabel].filter(Boolean).join(" | ");
-          const refused = opts.guard({ kind: "enter", label, url: obs.url });
+          const focused = obs.focus ? obs.actions.find((a) => a.node === obs.focus?.node) : undefined;
+          const refused = opts.guard({ kind: "enter", label, url: obs.url, search: searchField(obs, focused) });
           if (refused) return { kind: "failed", reason: `step ${n}: ${refused}`, refused: true };
         }
         await page.press(step.key);
