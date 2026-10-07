@@ -47,8 +47,9 @@ describe("openPage.observe readiness", () => {
     const obs = await page.observe();
     expect(obs.text).toBe("menu\nTitle");
     expect(c.evaluations()).toBe(3);
-    expect(obs.ms).toBeGreaterThanOrEqual(40);
-    expect(page.stats.browserMs).toBeGreaterThanOrEqual(40);
+    // Two 20 ms polls; a Node timer can fire up to 1 ms early by Date.now(), so each poll counts as 19 ms or more.
+    expect(obs.ms).toBeGreaterThanOrEqual(38);
+    expect(page.stats.browserMs).toBeGreaterThanOrEqual(38);
     expect(log.lines.some((l) => /observe waited 2 polls/.test(l))).toBe(true);
   });
   it("gives up at the cap once per document and does not wait again on the same url", async () => {
