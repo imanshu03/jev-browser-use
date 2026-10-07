@@ -18,6 +18,8 @@ export interface AssertContext {
   session: Session;
   vars: Record<string, string>;
   llm: Llm | null;
+  /** The LLM instructions of the suite for a judge check. Absent: the instructions that the LLM got. */
+  instructions?: string;
   timeoutMs: number;
   signal?: AbortSignal;
   redactor?: (text: string) => string;
@@ -123,7 +125,7 @@ export async function runAssertion(a: Assertion, ctx: AssertContext): Promise<As
     const [read, obs] = [await ctx.session.read().catch(() => null), await ctx.session.observe()];
     ctx.signal?.throwIfAborted();
     const redact = ctx.redactor ?? ((text: string) => text);
-    const verdict = await ctx.llm.judge(redact(fillVars(a.judge, ctx.vars)), { url: redact(obs.url), title: redact(obs.title), text: redact(pageText(read, obs)) }, ctx.signal);
+    const verdict = await ctx.llm.judge(redact(fillVars(a.judge, ctx.vars)), { url: redact(obs.url), title: redact(obs.title), text: redact(pageText(read, obs)) }, ctx.signal, ctx.instructions);
     return { pass: verdict.pass, label, detail: verdict.reason, model: "llm" };
   }
   const probe = probeOf(a, ctx);

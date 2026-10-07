@@ -24,6 +24,13 @@ function scripted(answers: string[], confirms: boolean[] = []): Prompter & { ask
   };
 }
 
+// No test sends a real key check: each one gets this answer unless it sets another.
+const keyCheck = vi.hoisted(() => ({ queue: [] as unknown[], keys: [] as string[] }));
+vi.mock("@imanshu03/jev-browser-use", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  validateKey: async (key: string) => { keyCheck.keys.push(key); return keyCheck.queue.shift() ?? { ok: true, model: "jev-test-model", usage: {} }; },
+}));
+
 const models = (ids: string[], status = 200): FetchLike => async () => ({ ok: status < 300, status, text: async () => JSON.stringify({ data: ids.map((id) => ({ id })) }) });
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "jev-init-"));
 
@@ -113,6 +120,48 @@ describe("runInit", () => {
   });
 });
 
+describe("the Jev key", () => {
+  it("checks a typed key; a rejected key is asked again unless the user keeps it, and the report hides the key", async () => {
+    const dir = tmp();
+    keyCheck.queue = [{ ok: false, kind: "rejected", message: "invalid key ts-bad-1234" }];
+    keyCheck.keys = [];
+    const p = scripted(["https://app.example.com", "", "ts-bad-1234", "ts-good-5678", "", "", "", ""], [false, false, false]);
+    expect(await runInit({ dir, given: {}, yes: false, force: false, env: {}, prompter: p })).toBe(0);
+    expect(keyCheck.keys).toEqual(["ts-bad-1234", "ts-good-5678"]);
+    expect(p.said).toContain("  Jev key check: TypeSafe rejected the key: invalid key ***");
+    expect(p.said).toContain("  Jev key check: the key works (model jev-test-model)");
+    expect(p.asked.filter((a) => a.secret).length).toBe(2);
+    expect(parseEnv(fs.readFileSync(path.join(dir, ".env"), "utf8"))).toEqual({ TYPESAFE_API_KEY: "ts-good-5678" });
+  });
+
+  it("keeps a key when TypeSafe does not answer (the default), or when the user keeps it; --yes only reports", async () => {
+    keyCheck.queue = [{ ok: false, kind: "network", message: "fetch failed" }];
+    const kept = tmp();
+    const p = scripted(["https://app.example.com", "", "ts-key-1", "", "", "", ""], []);
+    expect(await runInit({ dir: kept, given: {}, yes: false, force: false, env: {}, prompter: p })).toBe(0);
+    expect(p.said).toContain("  Jev key check: TypeSafe did not answer: fetch failed");
+    expect(p.asked.map((a) => a.q)).toContain("Keep this key anyway?");
+    expect(parseEnv(fs.readFileSync(path.join(kept, ".env"), "utf8"))).toEqual({ TYPESAFE_API_KEY: "ts-key-1" });
+    keyCheck.queue = [{ ok: false, kind: "rejected", message: "no" }];
+    const yes = scripted([]);
+    expect(await runInit({ dir: tmp(), given: { appUrl: "https://app.example.com" }, yes: true, force: false, env: { TYPESAFE_API_KEY: "env-key-1" }, prompter: yes })).toBe(0);
+    expect(yes.said).toContain("  Jev key check: TypeSafe rejected the key: no");
+    keyCheck.queue = [{ ok: false, kind: "rejected", message: "no" }, { ok: false, kind: "rejected", message: "no" }, { ok: false, kind: "rejected", message: "no" }];
+    const stop = tmp();
+    expect(await runInit({ dir: stop, given: {}, yes: false, force: false, env: {}, prompter: scripted(["https://app.example.com", "", "k1", "k2", "k3"], [false, false, false]) })).toBe(2);
+    expect(fs.existsSync(path.join(stop, "jev-test.config.yaml"))).toBe(false);
+    keyCheck.queue = [];
+  });
+
+  it("keeps an existing global.yaml unless --force", async () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, "global.yaml"), "mine");
+    expect(await runInit({ dir, given: { appUrl: "https://app.example.com" }, yes: true, force: false, env: {}, prompter: scripted([]) })).toBe(2);
+    expect(fs.readFileSync(path.join(dir, "global.yaml"), "utf8")).toBe("mine");
+    expect(fs.existsSync(path.join(dir, "jev-test.config.yaml"))).toBe(false);
+  });
+});
+
 describe("env and gitignore merges", () => {
   it("quotes a value with special characters so that .env parses it back", () => {
     const text = mergeEnv("", { A: "plain-value_1", B: "has space#and=hash", C: "" });
@@ -132,8 +181,24 @@ describe("cli init", () => {
     const code = await main(["init", "--yes", "--dir", dir, "--app-url", "https://app.example.com", "--env-name", "prod", "--no-example"],
       { out: (s) => out.push(s), err: (s) => out.push(s), env: {}, prompter: scripted([]) });
     expect(code).toBe(0);
-    expect(fs.readFileSync(path.join(dir, "jev-test.config.yaml"), "utf8")).toContain("default_environment: prod");
+    expect(fs.readFileSync(path.join(dir, "global.yaml"), "utf8")).toContain("default_environment: prod");
+    expect(fs.readFileSync(path.join(dir, "jev-test.config.yaml"), "utf8")).toContain("global: global.yaml");
     expect(fs.existsSync(path.join(dir, "suites"))).toBe(false);
+    expect(loadProject(path.join(dir, "jev-test.config.yaml"), { processEnv: {} }).policy).toMatchObject({ confirm: "autonomous", actions: { dangerous: [], safe: [], hosts: {} } });
+  });
+
+  it("writes the confirm mode and the action words of the options to global.yaml, and refuses a bad mode or a word that is both", async () => {
+    const dir = tmp();
+    const io = { out: () => undefined, err: () => undefined, env: {}, prompter: scripted([]) };
+    const code = await main(["init", "--yes", "--dir", dir, "--app-url", "https://app.example.com", "--env-name", "prod", "--confirm", "never", "--dangerous", "Approve, merge,approve", "--safe", "archive"], io);
+    expect(code).toBe(0);
+    const project = loadProject(path.join(dir, "jev-test.config.yaml"), { processEnv: {} });
+    expect(project.env).toEqual({ name: "prod", baseUrl: "https://app.example.com" });
+    expect(project.policy).toMatchObject({ confirm: "never", actions: { dangerous: ["approve", "merge"], safe: ["archive"] }, jevNotes: "", llmInstructions: "" });
+    expect(await main(["init", "--yes", "--dir", tmp(), "--app-url", "https://a.example", "--confirm", "sometimes"], io)).toBe(2);
+    const clash = tmp();
+    expect(await main(["init", "--yes", "--dir", clash, "--app-url", "https://a.example", "--dangerous", "delete", "--safe", "Delete"], io)).toBe(2);
+    expect(fs.existsSync(path.join(clash, "global.yaml"))).toBe(false);
   });
 });
 

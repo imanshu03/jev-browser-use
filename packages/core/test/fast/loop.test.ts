@@ -2,7 +2,7 @@ import type { ChoiceQuestion, Questions } from "@typesafe-ai/sdk";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { FastRunner, actionKey, riskOf, searchField, searchFormButton } from "../../src/fast/loop.js";
+import { FastRunner, actionKey, riskOf, searchField, searchFormButton, wordsFor } from "../../src/fast/loop.js";
 import { DONE_SENT, DONE_TEXT, GENERATE, VALUE_Q, cutText } from "../../src/fast/policy.js";
 import type { FastRunnerDeps } from "../../src/fast/loop.js";
 import type { Action, DateInfo, Observation, Page, Popup, TokenFacts, UnsentText } from "../../src/fast/model.js";
@@ -252,6 +252,42 @@ describe("FastRunner control", () => {
     expect(riskOf("CLICK", "English")).toBe("navigational");
     expect(riskOf("TYPE_TEXT", "Confirm password")).toBe("data_entry");
     expect(riskOf("SELECT", "Delete reason")).toBe("data_entry");
+  });
+  it("riskOf with user words: a dangerous word is destructive, and a safe phrase stops only the built-in words that it holds", () => {
+    const w = { dangerous: ["approve"], safe: ["remove from list", "archive"] };
+    expect(riskOf("CLICK", "Approve request")).toBe("navigational");
+    expect(riskOf("CLICK", "Approve request", w)).toBe("destructive");
+    expect(riskOf("CLICK", "Remove from list")).toBe("destructive");
+    expect(riskOf("CLICK", "Remove from list", w)).toBe("navigational");
+    expect(riskOf("CLICK", "Archive", w)).toBe("navigational");
+    expect(riskOf("CLICK", "Delete and remove from list", w)).toBe("destructive");
+    expect(riskOf("CLICK", "Save and archive", w)).toBe("submit");
+    expect(riskOf("CLICK", "Archive and approve", w)).toBe("destructive");
+    expect(riskOf("TYPE_TEXT", "Approve", w)).toBe("data_entry");
+  });
+  it("wordsFor: the words of each matching host go over the words for all pages, the longest host last", () => {
+    const rules = { dangerous: ["approve"], safe: [], hosts: { "Prod.Example.com": { dangerous: ["delete"], safe: [] }, "example.com": { dangerous: [], safe: ["delete", "approve"] } } };
+    expect(wordsFor(undefined, "https://app.example.com/")).toBeUndefined();
+    expect(wordsFor(rules, "https://other.org/x")).toEqual({ dangerous: ["approve"], safe: [] });
+    expect(wordsFor(rules, "https://notexample.com/")).toEqual({ dangerous: ["approve"], safe: [] });
+    expect(wordsFor(rules, "https://example.com/x")).toEqual({ dangerous: [], safe: ["delete", "approve"] });
+    expect(wordsFor(rules, "https://app.example.com/x")).toEqual({ dangerous: [], safe: ["delete", "approve"] });
+    expect(wordsFor(rules, "https://prod.example.com/x")).toEqual({ dangerous: ["delete"], safe: ["approve"] });
+    expect(wordsFor(rules, "not a url")).toEqual({ dangerous: ["approve"], safe: [] });
+  });
+  it("cfg.actions: a safe word lets Delete run under confirm never on its host only; a dangerous word blocks a link", async () => {
+    const script = byUrl({ [DASH.url]: (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "Delete project"), confidence: 0.9 } }) });
+    const run = (actions: RunConfig["actions"]) => setup("open https://app.example/dash and delete the project", { pages: { d: DASH }, start: "d" }, script, { confirm: "never", maxSteps: 1, ...(actions ? { actions } : {}) });
+    const safe = run({ dangerous: [], safe: [], hosts: { "app.example": { dangerous: [], safe: ["delete"] } } });
+    const r = await safe.runner.run();
+    expect(r.steps[0]).toMatchObject({ risk: "navigational", result: "ok" });
+    expect(safe.page.calls).toContainEqual({ op: "act", id: "e3", kind: "click" });
+    const elsewhere = await run({ dangerous: [], safe: [], hosts: { "other.example": { dangerous: [], safe: ["delete"] } } }).runner.run();
+    expect(elsewhere.blocked?.kind).toBe("needs_confirmation");
+    const link = byUrl({ [HOME.url]: (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "English"), confidence: 0.9 } }) });
+    const danger = await setup("open wikipedia.org and click English", { pages: { home: HOME }, start: "home" }, link, { confirm: "never", actions: { dangerous: ["english"], safe: [] } }).runner.run();
+    expect(danger.blocked?.kind).toBe("needs_confirmation");
+    expect(danger.steps[0]?.risk).toBe("destructive");
   });
   it("max_steps, run_timeout with an injected clock, dry-run never acts", async () => {
     const click = byUrl({ [HOME.url]: (q) => ({ page_kind: "task_page", operation: "CLICK", click_target: { choice: idx(q, "click_target", "English"), confidence: 0.7 } }) });

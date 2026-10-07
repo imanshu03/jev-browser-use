@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TextRequest } from "../src/io.js";
-import { DEFAULT_TEXT_BASE_URL, TEXT_MODEL_RULES, createTextModel, parseTextAnswer, textModelFromEnv } from "../src/writer.js";
+import { DEFAULT_TEXT_BASE_URL, TEXT_MODEL_RULES, USER_INSTRUCTIONS_HEAD, createTextModel, parseTextAnswer, textModelFromEnv } from "../src/writer.js";
 import { fakeLogger } from "./fakes.js";
 
 const req: TextRequest = {
@@ -36,6 +36,8 @@ describe("textModelFromEnv", () => {
     expect(textModelFromEnv({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_BASE_URL: "http://127.0.0.1:8790/v1/", JEV_TEXT_REASONING: "none" }))
       .toEqual({ baseUrl: "http://127.0.0.1:8790/v1", model: "m", apiKey: "k", reasoning: "none" });
     expect(textModelFromEnv({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_REASONING: "high" })).not.toHaveProperty("reasoning");
+    expect(textModelFromEnv({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_INSTRUCTIONS: "  Write in British English.\n" })).toMatchObject({ instructions: "Write in British English." });
+    expect(textModelFromEnv({ JEV_TEXT_MODEL: "m", JEV_TEXT_API_KEY: "k", JEV_TEXT_INSTRUCTIONS: " " })).not.toHaveProperty("instructions");
   });
 });
 
@@ -54,6 +56,15 @@ describe("parseTextAnswer", () => {
 });
 
 describe("createTextModel", () => {
+  it("the user's instructions go in a second system message after the rules", async () => {
+    const k = fetcher(['{"f1": "Cheers, Tuesday works."}']);
+    await createTextModel({ ...cfg, instructions: "Write in British English." }, fakeLogger(), k.f).write(req, { timeoutMs: 5000, check: ok });
+    expect(k.bodies[0]?.["messages"]).toEqual([
+      { role: "system", content: TEXT_MODEL_RULES },
+      { role: "system", content: `${USER_INSTRUCTIONS_HEAD}\nWrite in British English.` },
+      { role: "user", content: JSON.stringify(req) },
+    ]);
+  });
   it("one call with the rules and the request; the answer goes back as text; the log names the fields, never the text", async () => {
     const k = fetcher(['{"f1": "Tuesday works for me."}']);
     const log = fakeLogger();

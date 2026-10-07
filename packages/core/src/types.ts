@@ -201,6 +201,21 @@ export interface RunConfig {
   chromeBin?: string;
   /** Fast engine: geolocation override for the tabs of the Chrome it launches (`--geo lat,lon[,accuracy]`, MCP browse `geo`). */
   geo?: GeoPoint;
+  /** Direct engines: words that make a click label dangerous or safe, added to the built-in lists. */
+  actions?: ActionRules;
+  /** Direct engines: short notes about the app, sent to Jev as `app_notes` in each step request. */
+  notes?: string;
+}
+
+/** Label words of one scope. A dangerous word makes a click destructive. A safe word stops a built-in destructive word. */
+export interface ActionWords {
+  dangerous: string[];
+  safe: string[];
+}
+
+/** Action words for all pages, and more words for some hosts. A host key matches that host and its subdomains. */
+export interface ActionRules extends ActionWords {
+  hosts?: Record<string, ActionWords>;
 }
 
 export type CheckAnswer = boolean | "unknown";
@@ -293,7 +308,7 @@ export const LIMITS = {
   causalPollMs: 10,               // the page layer checks the tracker and the requests this often
   titleChars: 200, urlChars: 2000,       // fast engine state caps for page.title and page.url
   // Fast engine.
-  fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500,
+  fastStaleRetries: 3, fastReasks: 1, textChars: 6000, textCharsTrimmed: 3000, textCharsMin: 1500, notesChars: 1000,
   fastElementsTrimmed: 150, answerLines: 254, answerLineChars: 160,
   valueHeads: 8,                  // fields with a value head in the step request; a fill of another field asks in a second request
   // Assistant-written text (MCP runs only).

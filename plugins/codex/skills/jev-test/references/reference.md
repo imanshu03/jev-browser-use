@@ -4,7 +4,8 @@
 
 ```
 my-qa/
-  jev-test.config.yaml     environments, vars, secrets, flows, browser, Jev, LLM, repair policy
+  jev-test.config.yaml     vars, secrets, flows, browser, Jev, LLM, repair policy
+  global.yaml              environments, confirm mode, action words, instructions for Jev and the LLM
   suites/*.suite.yaml      the tests (a suite file name must end with .suite.yaml)
   .jev/recordings/         saved steps, one JSON file for each suite: commit them
   reports/<run id>/        results.json, junit.xml, screenshots, logs (not committed)
@@ -14,10 +15,8 @@ my-qa/
 ## Config: jev-test.config.yaml
 
 ```yaml
-environments:
-  stage: { base_url: https://app.staging.example.com }
-  prod:  { base_url: https://app.example.com, vars: { org: Prod Org } }
-default_environment: stage     # or a top-level base_url with no environments
+global: global.yaml            # default; a missing global.yaml is no error
+base_url: https://app.example.com   # only for a project with no environments
 
 vars: { org: Test Org }        # {org} in any step
 secrets: [TEST_PASSWORD]       # also hidden in reports
@@ -46,9 +45,42 @@ heal:    { local: warn, ci: fail }                 # off | warn | fail
 timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 ```
 
-- Every key is optional except one base URL. Unknown keys are errors.
+- Every key is optional except one base URL: `base_url`, or an environment in `global.yaml` (or in `environments` of the config, the older layout). Unknown keys are errors.
 - A secret is the value (4 or more characters) of an env var that `secrets` names, or whose name holds pass, secret, token, api_key (or apikey), private, otp, or pin, in any case. Reports show it as `***`.
 - `llm` is any OpenAI-compatible endpoint. Leave `llm.base_url` empty for no LLM. `judge` checks need the endpoint, `llm.judge_model` or `llm.model`, and any key that the endpoint requires.
+
+## Global: global.yaml
+
+```yaml
+environments:
+  stage: { base_url: https://app.staging.example.com }
+  prod:
+    base_url: https://app.example.com
+    vars: { org: Prod Org }
+    confirm: never             # goes over the global confirm
+    actions: { dangerous: [save], safe: [] }
+    instructions: { llm: Keep replies short. }
+default_environment: stage
+
+confirm: autonomous            # autonomous | never | always
+
+actions:                       # click label words, added to the built-in lists
+  dangerous: [approve, merge]
+  safe: [archive, remove from list]
+  hosts:                       # a host and its subdomains
+    admin.example.com: { dangerous: [delete user], safe: [] }
+
+instructions:
+  jev: The Save button of the editor is the disk icon in the toolbar.
+  llm: Write all text in British English.
+```
+
+- `confirm` sets what Jev may do when it records or repairs a step, and what a replay of a recorded step may click. `autonomous` (default): every action. `never`: no dangerous click or Enter; the step fails. `always`: also no submit click (save, create, sign in, and so on). Explicit `click` and `press` steps are not checked: the author wrote them.
+- `actions` changes which labels are dangerous. A `dangerous` word makes a click with that word dangerous. A `safe` word stops a built-in dangerous word that it holds: `archive` stops `archive`, and `remove from list` stops `remove` but not `delete`. Built-in dangerous words include delete, remove, pay, buy, send, post, publish, share, reply, and archive. Words are not case-sensitive.
+- The order is global, then the environment, then the suite file (see [Suite](#suite-suiteyaml)). Each later level wins: its `confirm` replaces the earlier one, its `actions` words go over the earlier words, and its `instructions` come after the earlier text. Host words go over the other words on that host.
+- A word that one scope lists as dangerous and as safe is an error. An environment in both `global.yaml` and the config is an error.
+- `instructions.jev` goes to Jev in each step request as notes about the app (at most 1000 characters). Write facts about the app, not rules about the task: extra rules can make Jev skip steps. `instructions.llm` goes to the text writer and to the `judge` checks.
+- A secret value in `instructions` is an error.
 
 ## Suite: *.suite.yaml
 
@@ -56,6 +88,9 @@ timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 suite: Artifacts               # required
 tags: [artifacts]              # added to each case
 vars: { project: QA Automation }
+confirm: never                 # this file only; goes over global.yaml and the environment
+actions: { dangerous: [publish], safe: [] }
+instructions: { jev: The Artifacts tab lists the newest artifact first., llm: Artifacts are in English. }
 
 before_all:  []                # once, before the first case
 before_each: []                # before each case, after `start`
@@ -121,7 +156,7 @@ Code checks poll the page until they pass or reach `timeout_ms` (default `timeou
 
 | Command | Does |
 |---|---|
-| `jev-test init` | Asks for the settings and writes the config, `.env`, `.gitignore` lines, and an example suite. |
+| `jev-test init` | Asks for the settings, checks the Jev key, and writes the config, `global.yaml`, `.env`, `.gitignore` lines, and an example suite. |
 | `jev-test validate [files or dirs]` | Checks the config and every suite. |
 | `jev-test list [files or dirs]` | Lists the cases that a run selects. |
 | `jev-test run [files or dirs]` | Runs the cases. Default: the suites directory of the config. |
@@ -140,7 +175,7 @@ Code checks poll the page until they pass or reach `timeout_ms` (default `timeou
 | `--workers 4` | Suites at the same time. |
 | `--report-dir dir` | Writes the reports there. |
 
-`init` options: `--dir`, `--app-url`, `--env-name`, `--llm-url`, `--llm-model`, `--no-example`, `--ci-workflow`, `--force`, and `--yes` (no questions; the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment).
+`init` options: `--dir`, `--app-url`, `--env-name`, `--llm-url`, `--llm-model`, `--confirm`, `--dangerous` and `--safe` (comma-separated words), `--no-example`, `--ci-workflow`, `--force`, and `--yes` (no questions; the keys come from `TYPESAFE_API_KEY` and `JEV_TEST_LLM_API_KEY` in the environment). `init` checks the Jev key with one small request. When TypeSafe rejects it, `init` asks for the key again, unless you keep it; with `--yes` it only reports.
 
 Exit codes: `0` all passed, `1` a case failed, `2` the config, a suite, or the command line is not valid.
 

@@ -80,6 +80,16 @@ describe("actionSpace", () => {
 });
 
 describe("buildStep", () => {
+  it("app_notes: the user's notes go in the state, cut to the limit and redacted; no notes, no key", () => {
+    const plain = buildStep(input()).state as Record<string, unknown>;
+    expect(plain).not.toHaveProperty("app_notes");
+    const notes = `The Save button is the disk icon. Token tok-12345. ${"x".repeat(LIMITS.notesChars)}`;
+    const b = buildStep(input({ notes, redactor: (t) => t.split("tok-12345").join("***") })).state as Record<string, unknown>;
+    const got = b["app_notes"] as string;
+    expect(got.startsWith("The Save button is the disk icon. Token ***.")).toBe(true);
+    expect(got).not.toContain("tok-12345");
+    expect(got.length).toBeLessThanOrEqual(LIMITS.notesChars + 1);
+  });
   it("operation options follow the page: no TYPE_TEXT or SELECT without such fields, scroll only when offered, DONE unless banned", () => {
     const b = buildStep(input());
     expect(criteriaKeys(b.questions["operation"])).toEqual(["CLICK", "WAIT", "PRESS_ENTER", "GO_BACK", "DONE", "BLOCKED"]);

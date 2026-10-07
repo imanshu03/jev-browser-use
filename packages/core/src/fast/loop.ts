@@ -16,7 +16,7 @@ import { BudgetError, choiceOf } from "../jev.js";
 import type { Plan } from "../plan.js";
 import { catalogWords, prePlan, resolvePlan } from "../plan.js";
 import { extractKeys, extractSpans, redact, varSpans } from "../task.js";
-import type { ActionKind, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord, UnattendedAction } from "../types.js";
+import type { ActionKind, ActionRules, ActionWords, BlockedKind, Goal, Operation, PageKind, RiskClass, RunConfig, RunResult, Span, StepRecord, UnattendedAction } from "../types.js";
 import { AUTH_HOST, COMPOSER_SEND_WORDS, CREDENTIAL_NAME, DESTRUCTIVE_WORDS, GATES, KEY_PATTERN, LIMITS, SEND_WORDS, SIGN_IN_HEADING, SUBMIT_WORDS, THRESHOLDS } from "../types.js";
 import type { Action, Chrome, EditPlan, EditResult, FastHistoryEntry, Observation, Page, Popup, UnsentText } from "./model.js";
 import { EditRefused, StalePage } from "./model.js";
@@ -358,14 +358,38 @@ function valueText(v: Decision["value"]): string {
 /** Risk classes from low to high. */
 const RISK_ORDER: RiskClass[] = ["read_only", "navigational", "data_entry", "submit", "destructive"];
 
-/** Risk of one target from its label. Keyword classes apply to clicks; a fill or select is data entry. */
-export function riskOf(op: TargetOp, label: string): RiskClass {
+/**
+ * Risk of one target from its label. Keyword classes apply to clicks; a fill or select is data entry. `words` adds the
+ * user's words: a dangerous word makes the click destructive, and a safe phrase in the label stops each built-in
+ * destructive word that the phrase holds ("remove from list" stops "remove", not "delete").
+ */
+export function riskOf(op: TargetOp, label: string, words?: ActionWords): RiskClass {
   if (op === "CLICK") {
-    if (hit(label, DESTRUCTIVE_WORDS)) return "destructive";
+    if (words && words.dangerous.length > 0 && hit(label, words.dangerous)) return "destructive";
+    const safe = words ? words.safe.filter((p) => hit(label, [p])) : [];
+    if (DESTRUCTIVE_WORDS.some((w) => hit(label, [w]) && !safe.some((p) => hit(p, [w])))) return "destructive";
     if (hit(label, SUBMIT_WORDS)) return "submit";
     return "navigational";
   }
   return "data_entry";
+}
+
+/** The action words for a page: the words for all pages, then the words of each matching host, the longest host last. */
+export function wordsFor(rules: ActionRules | undefined, url: string): ActionWords | undefined {
+  if (!rules) return undefined;
+  let host = "";
+  try { host = new URL(url).hostname.toLowerCase(); } catch { host = ""; }
+  let dangerous = [...rules.dangerous];
+  let safe = [...rules.safe];
+  const keys = Object.keys(rules.hosts ?? {}).sort((a, b) => a.length - b.length);
+  for (const key of keys) {
+    const k = key.toLowerCase();
+    if (!host || (host !== k && !host.endsWith(`.${k}`))) continue;
+    const w = (rules.hosts as Record<string, ActionWords>)[key] as ActionWords;
+    dangerous = [...dangerous.filter((x) => !w.safe.includes(x)), ...w.dangerous];
+    safe = [...safe.filter((x) => !w.dangerous.includes(x)), ...w.safe];
+  }
+  return { dangerous, safe };
 }
 
 /** A label that names a search field. */
@@ -385,15 +409,16 @@ export function searchField(obs: Observation, focused: Action | undefined): bool
 }
 
 /** Only a plain Send or Submit label can use the search exception. */
-function searchSubmitLabel(label: string): boolean {
-  return /^(?:send|submit)$/i.test(label.trim()) || riskOf("CLICK", label) === "navigational";
+function searchSubmitLabel(label: string, words?: ActionWords): boolean {
+  if (words && words.dangerous.length > 0 && hit(label, words.dangerous)) return false;
+  return /^(?:send|submit)$/i.test(label.trim()) || riskOf("CLICK", label, words) === "navigational";
 }
 
 /** A native submit button can run without confirmation when the full form contains search fields only. */
-export function searchFormButton(action: Action, label: string, obs: Observation): boolean {
+export function searchFormButton(action: Action, label: string, obs: Observation, words?: ActionWords): boolean {
   const form = action.form ?? null;
   return action.kind === "click" && action.submitControl === true && action.searchOnly === true &&
-    form !== null && searchSubmitLabel(label) && searchForm(form, obs);
+    form !== null && searchSubmitLabel(label, words) && searchForm(form, obs);
 }
 
 /** Check the observed fields as well as the full-form fact from the snapshot. */
@@ -978,6 +1003,7 @@ export class FastRunner {
         return {
           redactor: (text) => this.redact(text),
           task: this.cfg.task, goal: this.goal, obs: o, history: this.history, spans: this.offered(o), keys: this.keys,
+          ...(this.cfg.notes?.trim() ? { notes: this.cfg.notes.trim() } : {}),
           bannedActionIds: this.bannedIds(o), doneBanned: this.stepNo <= this.doneBannedUntil,
           ...(retryReason ? { retryReason } : {}),
           ...(this.deps.text ? { canGenerate: true } : {}),
@@ -1216,6 +1242,11 @@ export class FastRunner {
    *   form without submit controls (a script handles its Send button) needs only the shared form.
    * Null for any other element.
    */
+  /** The user's action words for a page of this run, or undefined when the run has none. */
+  private words(url: string): ActionWords | undefined {
+    return wordsFor(this.cfg.actions, url);
+  }
+
   private submitButton(d: Decision, obs: Observation): { target: Target; p: number } | null {
     const c = d.click;
     const focus = obs.focus;
@@ -1223,7 +1254,7 @@ export class FastRunner {
     if (!c || !focus || focus.enterOption) return null;
     const button = obs.actions.find((a) => a.id === c.actionId);
     if (!button || button.kind !== "click" || button.role !== "button" || button.node === focus.node) return null;
-    if (riskOf("CLICK", c.label) === "navigational") return null;
+    if (riskOf("CLICK", c.label, this.words(obs.url)) === "navigational") return null;
     // The snapshot gives the focus form. An older adapter gives none: then the form of the focused element's action.
     const focusForm = this.focusForm(obs);
     if (focusForm === null || (button.form ?? null) !== focusForm) return null;
@@ -1270,7 +1301,7 @@ export class FastRunner {
     const was = before.actions.find((a) => a.node === action.node && a.kind === "click")?.expanded;
     const popup = was !== "true" && after.actions.some((a) => a.node === action.node && a.kind === "click" && a.expanded === "true");
     const dialogs = new Set(fresh.filter((a) => a.form != null && !forms.has(a.form) && CANCEL_CONTROL.test(a.label.trim())).map((a) => a.form));
-    const buttons = fresh.filter((a) => (popup || dialogs.has(a.form ?? null)) && riskOf("CLICK", a.label) !== "navigational")
+    const buttons = fresh.filter((a) => (popup || dialogs.has(a.form ?? null)) && riskOf("CLICK", a.label, this.words(after.url)) !== "navigational")
       .map((a) => ({ node: a.node as number, label: cutText(a.label, 40) }));
     if (buttons.length === 0) return;
     // A send click whose text is still in the page: a click on a button of the step finishes the send, so it watches
@@ -1414,10 +1445,11 @@ export class FastRunner {
       // Enter can submit a form even when no submit button is visible. Treat unknown focus as submit. Enter in a search
       // field runs the search, as a click on a link does: navigational, while no name says more and no option is picked.
       // In a form of search fields only, a submit name or "send" (CMFRI's "SEND") does not say more.
-      const own = riskOf("CLICK", label);
+      const words = this.words(obs.url);
+      const own = riskOf("CLICK", label, words);
       const search = !pick && searchField(obs, focused) && (own === "navigational" ||
-        (focusForm != null && obs.focus?.searchOnly === true && riskOf("CLICK", obs.focus.label) === "navigational" &&
-          (obs.focus.submitLabel ?? "").split("|").every(searchSubmitLabel) && searchForm(focusForm, obs)));
+        (focusForm != null && obs.focus?.searchOnly === true && riskOf("CLICK", obs.focus.label, words) === "navigational" &&
+          (obs.focus.submitLabel ?? "").split("|").every((l) => searchSubmitLabel(l, words)) && searchForm(focusForm, obs)));
       const risk: RiskClass = search ? "navigational" : own === "destructive" ? "destructive" : "submit";
       ctx.risk = risk;
       ctx.action = "press_key";
@@ -1509,7 +1541,8 @@ export class FastRunner {
     ctx.target = { ref: action.id, role: action.role ?? "", name: t.label, under: "" };
     ctx.targetConf = t.conf; ctx.runnerUp = t.runnerUp;
     ctx.action = ACTION_OF[op] ?? "none";
-    const own = op === "CLICK" && searchFormButton(action, t.label, obs) ? "navigational" : riskOf(op, t.label);
+    const words = this.words(obs.url);
+    const own = op === "CLICK" && searchFormButton(action, t.label, obs, words) ? "navigational" : riskOf(op, t.label, words);
     const risk = floor !== undefined && RISK_ORDER.indexOf(floor) > RISK_ORDER.indexOf(own) ? floor : own;
     ctx.risk = risk;
     const bans = this.bansFor(obs.url);
@@ -2741,7 +2774,7 @@ export class FastRunner {
     const checked = obs.actions.filter((a) => a.role === "option" && a.checked === "true" && (a.popup ?? []).length > 0 && !chips.some((c) => mentionMatches(a.label, c)));
     if (checked.length === 0) return null;
     for (const commit of obs.actions) {
-      if (commit.kind !== "click" || commit.role !== "button" || !COMMIT_BUTTON.test(commit.label.trim()) || hit(commit.label, DESTRUCTIVE_WORDS)) continue;
+      if (commit.kind !== "click" || commit.role !== "button" || !COMMIT_BUTTON.test(commit.label.trim()) || riskOf("CLICK", commit.label, this.words(obs.url)) === "destructive") continue;
       const popup = (commit.popup ?? []).find((p) => checked.every((o) => (o.popup ?? []).includes(p)));
       if (popup !== undefined) return { popup, names: checked.map((o) => cutText(o.label, LIMITS.nameChars)), commit };
     }

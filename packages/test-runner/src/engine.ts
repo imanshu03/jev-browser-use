@@ -4,11 +4,13 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import {
   FastRunner, LIMITS, baseRunConfig, browserOf, createBrowser, createHuman, createLogger, createNavigator, defaultUserDataDir,
-  listProfiles, replaySteps, stepsFromRecords,
+  listProfiles, replaySteps, riskOf, stepsFromRecords, wordsFor,
 } from "@imanshu03/jev-browser-use";
 import type { Browser, BrowserKind, Logger, NavigatorDeps, Page, RunConfig } from "@imanshu03/jev-browser-use";
+import { DEFAULT_POLICY } from "./load.js";
+import type { Policy } from "./load.js";
 import type { ConfigDef } from "./schema.js";
-import type { JevOutcome, ReplayOutcome, Session, SessionFactory } from "./session.js";
+import type { JevOutcome, ReplayOptions, ReplayOutcome, Session, SessionFactory } from "./session.js";
 import type { Secrets } from "./template.js";
 
 export interface EngineOptions {
@@ -18,10 +20,14 @@ export interface EngineOptions {
   headed: boolean;
   /** Directory for the jev log of each session. */
   logDir: string;
+  /** global.yaml for the environment of the run. Default: every action allowed, built-in words only. */
+  policy?: Policy;
+  /** The environment name, for the reasons of refused actions. */
+  envName?: string | null;
 }
 
 /** The env that jev-browser-use reads: the Jev key, and the OpenAI-compatible endpoint of the config as the text model. */
-export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv, llmInstructions = ""): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...processEnv };
   if (config.jev.api_key) env["TYPESAFE_API_KEY"] = config.jev.api_key;
   env["TYPESAFE_DEFAULT_MODEL"] = config.jev.model;
@@ -30,8 +36,25 @@ export function engineEnv(config: ConfigDef, processEnv: NodeJS.ProcessEnv): Nod
     env["JEV_TEXT_BASE_URL"] = config.llm.base_url.replace(/\/+$/, "");
     env["JEV_TEXT_MODEL"] = textModel;
     env["JEV_TEXT_API_KEY"] = config.llm.api_key || "none";
+    if (llmInstructions) env["JEV_TEXT_INSTRUCTIONS"] = llmInstructions;
+    else delete env["JEV_TEXT_INSTRUCTIONS"];
   }
   return env;
+}
+
+/** Why the environment does not allow a click or Enter with this label, or null when it does. Autonomous allows all. */
+export function refusal(policy: Policy, envName: string | null, input: { kind: "click" | "enter"; label: string; url: string }): string | null {
+  if (policy.confirm === "autonomous") return null;
+  const risk = riskOf("CLICK", input.label, wordsFor(policy.actions, input.url));
+  const refused = risk === "destructive" || (input.kind === "click" && risk === "submit" && policy.confirm === "always");
+  if (!refused) return null;
+  const what = `${risk === "destructive" ? "dangerous" : "submit"} ${input.kind === "enter" ? "Enter on" : "click on"} ${JSON.stringify(input.label)}`;
+  return `confirm is ${policy.confirm} for this suite${envName ? ` in the ${envName} environment` : ""}, so the run does not do the ${what}`;
+}
+
+/** The hint of a Jev run that blocked on an action that the confirm mode does not allow. */
+function confirmHint(policy: Policy, envName: string | null): string {
+  return `confirm is ${policy.confirm} for this suite${envName ? ` in the ${envName} environment` : ""}. To allow it, change confirm or the actions words in global.yaml, the environment, or the suite file`;
 }
 
 function lineStream(write: (line: string) => void): Writable {
@@ -79,6 +102,8 @@ class JevSession implements Session {
     private readonly stepMs: number,
     private readonly headed: boolean,
     private readonly secrets: Secrets,
+    private readonly policy: Policy,
+    private readonly envName: string | null,
   ) {}
 
   private page(): Promise<Page> {
@@ -98,13 +123,15 @@ class JevSession implements Session {
     const current = await page.url().catch(() => "");
     signal?.throwIfAborted();
     const cfg: RunConfig = {
-      ...this.base, task, goal, vars: { ...params }, keepOpen: true, headed: this.headed, profile: "none", confirm: "autonomous",
+      ...this.base, task, goal, vars: { ...params }, keepOpen: true, headed: this.headed, profile: "none", confirm: this.policy.confirm,
+      actions: this.policy.actions, ...(this.policy.jevNotes ? { notes: this.policy.jevNotes } : {}),
       ...(current && current !== "about:blank" ? { fallbackUrl: current } : {}),
     };
+    const hint = confirmHint(this.policy, this.envName);
     const runner = new FastRunner({
       cfg, profiles: nav.profiles, chrome: () => this.browser.chrome(), page, openPage: async () => page,
       ...(signal ? { signal } : {}), redactor: (text) => this.secrets.redact(text),
-      oracle: nav.oracle, human: nav.human, log: this.log, attended: false,
+      oracle: nav.oracle, human: nav.human, log: this.log, attended: false, hints: { confirmNever: hint, noConfirm: hint, noConfirmHeadless: hint },
       ...(nav.warm ? { warm: nav.warm } : {}), ...(nav.text ? { text: nav.text } : {}),
     });
     const before = nav.oracle.stats.requests;
@@ -118,9 +145,12 @@ class JevSession implements Session {
     return out;
   }
 
-  async replay(steps: Parameters<Session["replay"]>[0], params: Record<string, string>, signal?: AbortSignal): Promise<ReplayOutcome> {
-    const r = await replaySteps(await this.page(), steps, params, { log: this.log, stepTimeoutMs: this.stepMs, headed: this.headed, ...(signal ? { signal } : {}) });
-    return r.ok ? { ok: true } : { ok: false, step: r.step, reason: r.reason };
+  async replay(steps: Parameters<Session["replay"]>[0], params: Record<string, string>, signal?: AbortSignal, opts: ReplayOptions = {}): Promise<ReplayOutcome> {
+    const guard = opts.guard && this.policy.confirm !== "autonomous"
+      ? (input: { kind: "click" | "enter"; label: string; url: string }) => refusal(this.policy, this.envName, input)
+      : undefined;
+    const r = await replaySteps(await this.page(), steps, params, { log: this.log, stepTimeoutMs: this.stepMs, headed: this.headed, ...(signal ? { signal } : {}), ...(guard ? { guard } : {}) });
+    return r.ok ? { ok: true } : { ok: false, step: r.step, reason: r.reason, ...(r.refused ? { refused: true as const } : {}) };
   }
 
   async fillCredential(field: string, value: string): Promise<ReplayOutcome> {
@@ -165,7 +195,8 @@ class JevSession implements Session {
 }
 
 export function jevSessions(o: EngineOptions): SessionFactory {
-  const env = engineEnv(o.config, o.processEnv);
+  const projectPolicy = o.policy ?? DEFAULT_POLICY;
+  const env = engineEnv(o.config, o.processEnv, projectPolicy.llmInstructions);
   const browserKind = o.config.browser.browser as BrowserKind | undefined;
   const kind = browserOf({ ...(browserKind ? { browser: browserKind } : {}) }, env);
   const profiles = listProfiles(defaultUserDataDir(env, undefined, kind ?? "chrome"));
@@ -173,7 +204,9 @@ export function jevSessions(o: EngineOptions): SessionFactory {
   const profile = wanted.toLowerCase() === "none" ? undefined : profiles.find((p) => p.name.toLowerCase() === wanted.toLowerCase() || p.directory.toLowerCase() === wanted.toLowerCase());
   if (wanted.toLowerCase() !== "none" && !profile) throw new Error(`unknown browser profile "${wanted}". Known: ${profiles.map((p) => `${p.name} (${p.directory})`).join(", ") || "none"}`);
   return {
-    async open(name, write) {
+    async open(name, write, suitePolicy) {
+      const policy = suitePolicy ?? projectPolicy;
+      const env = engineEnv(o.config, o.processEnv, policy.llmInstructions);
       fs.mkdirSync(o.logDir, { recursive: true });
       const file = fs.createWriteStream(path.join(o.logDir, `${name.replace(/[^A-Za-z0-9_.-]+/g, "_")}.log`));
       const log = createLogger(lineStream((l) => { file.write(o.secrets.redact(l) + "\n"); if (/ WARN /.test(l) && !/ unattended: /.test(l)) write(o.secrets.redact(l)); }), "info", false);
@@ -184,7 +217,7 @@ export function jevSessions(o: EngineOptions): SessionFactory {
       const browser = createBrowser({
         headed: o.headed, env, log, ...(kind ? { browser: kind } : {}), ...(profile ? { profileDirectory: profile.directory } : {}),
       });
-      const session = new JevSession(browser, nav, base, log, o.config.timeouts.step_ms, o.headed, o.secrets);
+      const session = new JevSession(browser, nav, base, log, o.config.timeouts.step_ms, o.headed, o.secrets, policy, o.envName ?? null);
       const close = session.close.bind(session);
       session.close = async () => { try { await close(); } finally { await new Promise<void>((r) => file.end(r)); } };
       return session;

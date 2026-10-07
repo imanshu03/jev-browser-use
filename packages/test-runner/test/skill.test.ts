@@ -7,7 +7,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { main } from "../src/cli.js";
 import { loadProject, loadSuites } from "../src/load.js";
 import { runAll } from "../src/runner.js";
-import { Assertion, CaseDef, ConfigDef, StepDef, SuiteDef } from "../src/schema.js";
+import { Assertion, CaseDef, ConfigDef, GlobalDef, StepDef, SuiteDef } from "../src/schema.js";
 import { FakeSession, factoryOf, tempProject } from "./fake.js";
 
 const skillDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "mcp", "skills", "jev-test");
@@ -38,9 +38,10 @@ describe("jev-test skill", () => {
 
   it("the documented config, suite, steps, and checks parse with the runner schema", () => {
     const blocks = yamlBlocks(reference);
-    expect(blocks).toHaveLength(2);
+    expect(blocks).toHaveLength(3);
     expect(() => ConfigDef.parse(parseYaml(blocks[0] as string))).not.toThrow();
-    expect(() => SuiteDef.parse(parseYaml(blocks[1] as string))).not.toThrow();
+    expect(() => GlobalDef.parse(parseYaml(blocks[1] as string))).not.toThrow();
+    expect(() => SuiteDef.parse(parseYaml(blocks[2] as string))).not.toThrow();
     expect(yamlBlocks(skill)).toHaveLength(1);
     expect(() => SuiteDef.parse(parseYaml(yamlBlocks(skill)[0] as string))).not.toThrow();
     for (const [, text] of reference.matchAll(/^\| `(- [^`]+)` \|/gm)) {
@@ -75,7 +76,7 @@ describe("jev-test skill", () => {
     session.onJev = (task, params, goal) => {
       if (goal === "check") return { ok: true, steps: [], reason: "signed in", jevRequests: 1, check: { answer: true, probability: 0.9 } };
       const steps = [{ op: "click" as const, target: { role: "button", name: `${task.startsWith("Add ") ? "Add" : "Delete"} {title}` } }];
-      session.onReplay(steps, params);
+      session.onReplay(steps, params, {});
       return { ok: true, steps, reason: "done", jevRequests: 1 };
     };
     let judgeCalls = 0;
@@ -107,7 +108,9 @@ describe("jev-test skill", () => {
   });
 
   it("the reference names every case, suite, and top-level config key", () => {
-    for (const k of [...Object.keys(CaseDef.shape), ...Object.keys(SuiteDef.shape), ...Object.keys(ConfigDef.shape)]) {
+    const envKeys = Object.keys(((GlobalDef.shape.environments.unwrap() as unknown as { valueType: { shape: object } }).valueType).shape);
+    expect(envKeys).toEqual(["base_url", "vars", "confirm", "instructions", "actions"]);
+    for (const k of [...Object.keys(CaseDef.shape), ...Object.keys(SuiteDef.shape), ...Object.keys(ConfigDef.shape), ...Object.keys(GlobalDef.shape), ...envKeys]) {
       expect(reference, k).toMatch(new RegExp(`(^|\\s|\\{ )${k}:`, "m"));
     }
   });

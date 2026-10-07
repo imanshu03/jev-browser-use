@@ -252,6 +252,8 @@ export interface StepInput {
   sentMissesMention?: boolean;
   /** False: the tab has no earlier web page, or a GO_BACK of this step fell below its gate. GO_BACK is not offered then. */
   canGoBack?: boolean;
+  /** The user's notes about the app: `app_notes` in the state. Data about the app, never a rule that changes the goal. */
+  notes?: string;
 }
 
 /** Enter cannot submit an observed empty editor. Missing focus is tolerated by older adapters. */
@@ -741,6 +743,7 @@ function assemble(input: StepInput, trim: Trim, cuts: string[], only?: string, a
     focus: obs.focus ? focusState(obs.focus, mention) : null,
     recent_actions: history.slice(-LIMITS.history).map((h) => ({ action: h.action, kind: h.kind, text: h.text, page_changed: h.page_changed })),
   };
+  if (input.notes) state["app_notes"] = cutText(input.notes, LIMITS.notesChars);
   if (input.retryReason) state["retry_reason"] = cutText(redact(input.retryReason, spans), LIMITS.textCharsMin);
   if (typedValues.length > 0) {
     state["typed_values"] = typedValues.map((s) => s.source === "generated"
@@ -766,7 +769,7 @@ const LADDER: { trim: Trim; note: string }[] = [
 /** Redact the task, the page, and the history with the secret spans. */
 function redacted(input: StepInput): StepInput {
   const clean = input.redactor ?? ((text: string) => redact(text, input.spans));
-  return { ...input, task: clean(input.task), obs: redactData(input.obs, clean), history: redactData(input.history, clean) };
+  return { ...input, task: clean(input.task), obs: redactData(input.obs, clean), history: redactData(input.history, clean), ...(input.notes ? { notes: clean(input.notes) } : {}) };
 }
 
 function fitted(input: StepInput, only?: string, ask?: ValueAsk): { state: EntryType; questions: Questions; meta: StepMeta } {
