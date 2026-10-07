@@ -1,0 +1,34 @@
+suite: Notes
+tags: [notes]
+
+before_all:
+  - use: login
+
+cases:
+  - id: NOTE-001
+    title: Add a note and delete it
+    tags: [smoke]
+    start: /app.html
+    vars:
+      title: Groceries {now}
+    steps:
+      - Add a note titled "{title}"
+      - expect: { row_contains: ["{title}"] }
+      - Delete the note "{title}"
+    expect:
+      - not_visible_text: "{title}"
+
+  - id: NOTE-002
+    title: A note with no title shows an error
+    start: /app.html
+    steps:
+      - click: Add note
+    expect:
+      - visible_text: Title is required
+
+  - id: NOTE-003
+    title: Signed-in user shows in the header
+    start: /app.html
+    expect:
+      - visible_text: "{user_email}"
+      - element: { name: Sign out }

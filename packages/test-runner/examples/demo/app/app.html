@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Demo Notes</title></head>
+<body>
+  <header><span id="user"></span> <button id="logout">Sign out</button></header>
+  <main>
+    <h1>Notes</h1>
+    <form id="add">
+      <label>Note title <input name="title"></label>
+      <button type="submit" id="add-button">Add note</button>
+    </form>
+    <p id="error" role="alert"></p>
+    <table>
+      <thead><tr><th>Title</th><th>Created</th><th>Actions</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+  <script>
+    const user = localStorage.getItem("demo-user");
+    if (!user) location.href = "/login.html";
+    document.getElementById("user").textContent = user || "";
+    const addLabel = new URLSearchParams(location.search).get("label");
+    if (addLabel) document.getElementById("add-button").textContent = addLabel;
+    const load = () => JSON.parse(localStorage.getItem("demo-notes") || "[]");
+    const save = (notes) => localStorage.setItem("demo-notes", JSON.stringify(notes));
+    function render() {
+      const body = document.getElementById("rows");
+      body.textContent = "";
+      for (const n of load()) {
+        const tr = document.createElement("tr");
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.setAttribute("aria-label", "Delete " + n.title);
+        del.addEventListener("click", () => { save(load().filter((x) => x.id !== n.id)); render(); });
+        for (const text of [n.title, n.created]) { const td = document.createElement("td"); td.textContent = text; tr.appendChild(td); }
+        const td = document.createElement("td"); td.appendChild(del); tr.appendChild(td);
+        body.appendChild(tr);
+      }
+    }
+    document.getElementById("add").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = e.target.elements.title;
+      const title = input.value.trim();
+      const error = document.getElementById("error");
+      if (!title) { error.textContent = "Title is required"; return; }
+      error.textContent = "";
+      save([...load(), { id: Date.now() + Math.random(), title, created: new Date().toISOString().slice(0, 10) }]);
+      input.value = "";
+      render();
+    });
+    document.getElementById("logout").addEventListener("click", () => { localStorage.removeItem("demo-user"); location.href = "/login.html"; });
+    render();
+  </script>
+</body>
+</html>

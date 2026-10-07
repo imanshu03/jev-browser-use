@@ -8,7 +8,25 @@ Jev selects operations, targets, offered text values, and completion answers. Co
 
 `jev-scrape` saves a scraper for a table or a list on a page, and runs it again with no model call; see [Scraping](#scraping-jev-scrape).
 
-The package and repository are named `jev-browser-use`. The commands remain `jev-browser` and `jev-chat`. Saved keys and profile copies continue to use the `jev-browser` configuration directory, and environment variable names remain unchanged.
+The repository is named `jev-browser-use`. The commands remain `jev-browser` and `jev-chat`. Saved keys and profile copies continue to use the `jev-browser` configuration directory, and environment variable names remain unchanged.
+
+## Repository layout
+
+This repository is an npm workspace. The engine is in one package, and every front end uses it.
+
+| Folder | Package | Holds |
+|---|---|---|
+| [packages/core](packages/core) | `@imanshu03/jev-core` | The engine: Chrome over CDP, the Jev step loop, record and replay, the page reader, and the shared run settings (`args.ts`). |
+| [packages/mcp](packages/mcp) | `@imanshu03/jev-mcp` | The MCP server and the `jev-browser` skill. Both plugins run this one server and get this one skill. |
+| [packages/cli](packages/cli) | `@imanshu03/jev-cli` | The commands `jev-browser`, `jev-chat`, and `jev-scrape`. |
+| [packages/sdk](packages/sdk) | `@imanshu03/jev-browser-use` | The public library API for other tools. |
+| [packages/test-runner](packages/test-runner) | `@imanshu03/jev-test` | YAML test suites for web apps (see its [README](packages/test-runner/README.md)). |
+| [plugins/claude](plugins/claude) | - | The Claude Code plugin: manifest and server config. |
+| [plugins/codex](plugins/codex) | - | The Codex plugin: manifest and server config. |
+
+`npm run plugins` builds the MCP server into one file and copies it, with the skills of `packages/mcp/skills`, into each plugin folder. Edit the skill only in `packages/mcp/skills`. A test fails when a plugin copy differs.
+
+In this repository the packages use each other's TypeScript source (the `jev-source` export condition), so a change in `core` shows at once in the other packages. A published package uses the built `dist` files.
 
 ## Install
 
@@ -43,17 +61,17 @@ Select the browser with `--browser <chrome|edge|brave|chromium>` in either CLI o
 Each browser works with profiles in the same way. When the task or `--profile` names a profile, the run copies it from that browser's own profile folder (for example `~/Library/Application Support/Microsoft Edge` on macOS) to `~/.config/jev-browser/<browser>/<profile>`, and launches the browser on the copy. Otherwise the run uses a temporary profile. The copy root uses `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. With the one-shot `--cdp <port>` flag, either direct engine uses the browser at that port and opens an owned tab. The selected engine does not change the attached browser binary or profile.
 
 ```sh
-./bin/jev-browser.js "open wikipedia.org" --engine cdp --profile none
-./bin/jev-browser.js "open wikipedia.org" --browser edge --profile "Work"
-./bin/jev-browser.js "open wikipedia.org" --engine chromium --profile none
-./bin/jev-browser.js "open wikipedia.org" --engine vercel --profile none
+npx jev-browser "open wikipedia.org" --engine cdp --profile none
+npx jev-browser "open wikipedia.org" --browser edge --profile "Work"
+npx jev-browser "open wikipedia.org" --engine chromium --profile none
+npx jev-browser "open wikipedia.org" --engine vercel --profile none
 ```
 
 ## Usage
 
 ```
 npm start -- "open wikipedia.org and search for Alan Turing, then tell me the title of the article" --profile none
-./bin/jev-browser.js "open app.parallelloop.ai and check if licious account project has 3rd September artifacts"
+npx jev-browser "open app.parallelloop.ai and check if licious account project has 3rd September artifacts"
 ```
 
 The result goes to stdout as one JSON document. The trace goes to stderr. The exit code tells the outcome.
@@ -150,7 +168,7 @@ Start it:
 
 ```
 npm run chat
-./bin/jev-chat.js
+npx jev-chat
 ```
 
 If no environment or saved key is available, chat asks for your TypeSafe API key. Paste the key. The chat checks it with one small request and saves it to `~/.config/jev-browser/config.json` with mode 600. Later runs read the key from that file. `TYPESAFE_API_KEY` in the environment or in `.env` has priority over the file. Set `JEV_BROWSER_CONFIG` to use a different file.
@@ -214,19 +232,19 @@ The numbers are for that task only. `time` is the run time in seconds. `jev` is 
 
 ```sh
 # A form: Jev reaches the price sheet once, and the steps keep {month} and {year} as params.
-./bin/jev-scrape.js new necc-daily --url https://www.e2necc.com/home/eggprice \
+npx jev-scrape new necc-daily --url https://www.e2necc.com/home/eggprice \
   --task "Show the NECC daily egg prices for {month} {year}" --param month=09 --param year=2026 \
   --want "one row per zone and day: section, zone, day, rate (per 100 eggs)"
-./bin/jev-scrape.js run necc-daily --param month=08
+npx jev-scrape run necc-daily --param month=08
 
 # A search after a delivery location: the location steps run only while the site asks for a location.
-./bin/jev-scrape.js new zepto-search --url https://www.zepto.com/ \
+npx jev-scrape new zepto-search --url https://www.zepto.com/ \
   --task "Set the delivery location to Koramangala, Bengaluru, then search for {query}" --param "query=Licious chicken curry cut" \
   --want "one row per product card in the search results: name, pack, price, mrp (the struck-through price), in_stock"
-./bin/jev-scrape.js run zepto-search --param query="brown bread" --format csv --out bread.csv
+npx jev-scrape run zepto-search --param query="brown bread" --format csv --out bread.csv
 
 # A page that shows the table at its URL: no navigation, no Jev key needed.
-./bin/jev-scrape.js new necc-now --no-nav --url https://www.e2necc.com/home/eggprice \
+npx jev-scrape new necc-now --no-nav --url https://www.e2necc.com/home/eggprice \
   --task "NECC daily egg prices" --want "one row per zone and day"
 ```
 
@@ -272,10 +290,10 @@ In Claude Code or Codex, the plugin tools `read_page` and `scraper` do the same 
 
 The plugin lets Claude Code or Codex run browser tasks with the direct engines. The assistant starts a run with a tool call. Jev chooses every action, as in the CLI. When a form needs new text, such as a reply, the run asks the assistant to write it (see [Assistant-written text](#assistant-written-text-plugin-runs-only)). Before Jev clicks or presses Enter while that text is in a field, the user must allow the action in a dialog. The user can turn off the dialogs of one task with their own words (see [Autonomous mode](#autonomous-mode)).
 
-[plugin/](plugin/) holds the manifests for both clients, the MCP server configuration, and the `jev-browser` skill. The server is one bundled file, `plugin/dist/jev-mcp.mjs`. Git ignores it, so build it after [Install](#install) and after each source change:
+[plugins/claude](plugins/claude) and [plugins/codex](plugins/codex) hold the manifest and the MCP server configuration of each client. Both run the same server, one bundled file at `dist/jev-mcp.mjs` in each plugin folder, and use the same `jev-browser` skill from [packages/mcp/skills](packages/mcp/skills). Git ignores the bundle, so build it after [Install](#install) and after each source change:
 
 ```sh
-npm run build:mcp
+npm run plugins
 ```
 
 The MCP server is not a public command. It supports the `cdp` and `chromium` engines.
@@ -283,12 +301,12 @@ The MCP server is not a public command. It supports the `cdp` and `chromium` eng
 ### Install in Claude Code
 
 ```sh
-claude plugin validate ./plugin
+claude plugin validate ./plugins/claude
 claude plugin marketplace add "$PWD" --scope user
 claude plugin install jev-browser@jev-browser-use
 ```
 
-Claude Code loads the plugin from this repository. After a rebuild, start a new session or run `/reload-plugins`. To load the plugin for one session without an install, run `claude --plugin-dir ./plugin`. The tools are named `mcp__plugin_jev-browser_jev__<tool>`. The skill is `/jev-browser:jev-browser`.
+Claude Code loads the plugin from this repository. After a rebuild, start a new session or run `/reload-plugins`. To load the plugin for one session without an install, run `claude --plugin-dir ./plugins/claude`. The tools are named `mcp__plugin_jev-browser_jev__<tool>`. The skill is `/jev-browser:jev-browser`.
 
 ### Install in Codex
 
@@ -312,7 +330,7 @@ If you do not use the Codex plugin, add the server to the Codex `config.toml`. R
 ```toml
 [mcp_servers.jev]
 command = "node"
-args = ["<repo>/plugin/dist/jev-mcp.mjs"]
+args = ["<repo>/plugins/codex/dist/jev-mcp.mjs"]
 env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "JEV_BROWSER_CONFIG", "XDG_CONFIG_HOME",
   "JEV_BROWSER_ENGINE", "JEV_BROWSER_MAX_STEPS", "AGENT_BROWSER_PROFILE", "JEV_BROWSER", "JEV_CHROME_BIN", "JEV_EDGE_BIN", "JEV_BRAVE_BIN", "JEV_CHROMIUM_BIN",
   "JEV_MCP_LOG_LEVEL", "JEV_MCP_ALLOW_FILE", "JEV_MCP_TRUST_ELICITATION", "JEV_MCP_AUTONOMOUS", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
@@ -320,7 +338,7 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
 
-This setup does not install the skill. Link it into a Codex skill folder, for example `ln -s <repo>/plugin/skills/jev-browser ~/.agents/skills/jev-browser`. With the `agent-skill` tool, run `ln -s <repo>/plugin/skills/jev-browser ~/.agent-skills/skills/jev-browser && agent-skill link jev-browser --to codex-pl`. Do not link it to Claude Code profiles; the Claude Code plugin supplies it there.
+This setup does not install the skill. Link it into a Codex skill folder, for example `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agents/skills/jev-browser`. With the `agent-skill` tool, run `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agent-skills/skills/jev-browser && agent-skill link jev-browser --to codex-pl`. Do not link it to Claude Code profiles; the Claude Code plugin supplies it there.
 
 ### API key
 
@@ -466,7 +484,7 @@ The server also reads `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT
 For an exact message or search query, quote the text in the task or supply a variable:
 
 ```sh
-./bin/jev-browser.js 'Open wikipedia.org, type "Alan Turing" in the search field, and open the article' --profile none
+npx jev-browser 'Open wikipedia.org, type "Alan Turing" in the search field, and open the article' --profile none
 npm run chat -- --engine cdp --log-level debug
 ```
 
@@ -563,17 +581,31 @@ This abbreviated example shows the shared result format. `stats.engine` is `cdp`
 ## Development
 
 ```
-npm run typecheck
-npm test          # offline; Jev, Chrome, and agent-browser are faked
+npm run typecheck # every package
+npm test          # every package, offline; Jev, Chrome, and agent-browser are faked
 npm run test:live # launches headless Chrome on a temporary profile with local HTTP/CDP fixtures; no external API or real key
-npm run smoke     # live: the three acceptance runs, prints a pass/fail table (SMOKE_ENGINE selects cdp, chromium, or vercel; default cdp)
-npm run build:mcp # bundles the MCP server into plugin/dist/jev-mcp.mjs, which the plugin runs
-npm run mcp       # runs the MCP server from src/mcp/main.ts through tsx, on stdio, with the package .env
+npm run build     # builds every package into its dist, then the plugin bundles
+npm run plugins   # only the MCP bundle and the skill copies of plugins/claude and plugins/codex
+npm run mcp       # runs the MCP server from packages/mcp/src through tsx, on stdio, with the root .env
+npm run smoke -w @imanshu03/jev-cli  # live: the three acceptance runs (SMOKE_ENGINE selects cdp, chromium, or vercel)
 ```
 
-The live suite launches Chrome. It tests both direct engine names through attachment, native and rich-text entry, editor freshness, browser actions, profiles, and cleanup. It also runs the MCP server on the [reply fixture](test/fixtures/live/reply.html) with a scripted Jev and an in-memory client that answers the dialogs. It does not establish that a local Chromium binary launches. Verify that separately when changing Chromium launch behavior. Smoke runs use real API access and prepared browser profiles; Chromium needs its own prepared profile.
+Run one package with `-w`, for example `npm test -w @imanshu03/jev-core`. The commands `npx jev-browser`, `npx jev-chat`, `npx jev-scrape`, and `npx jev-test` run from the source in this repository.
 
-Run `npm run build:mcp` after each change to `src/`, because the plugin runs the bundle and not the source. Git ignores `plugin/dist/`.
+The live suite launches Chrome. It tests both direct engine names through attachment, native and rich-text entry, editor freshness, browser actions, profiles, and cleanup. It also runs the MCP server on the [reply fixture](packages/core/test/fixtures/live/reply.html) with a scripted Jev and an in-memory client that answers the dialogs. It does not establish that a local Chromium binary launches. Verify that separately when changing Chromium launch behavior. Smoke runs use real API access and prepared browser profiles; Chromium needs its own prepared profile.
+
+Run `npm run plugins` after each change to the source, because the plugins run the bundle and not the source. Git ignores every `dist/`.
+
+## Publishing
+
+The packages publish to GitHub Packages under the `@imanshu03` scope. Push a tag `v<version>` to run [.github/workflows/publish.yml](.github/workflows/publish.yml): it builds, tests, and publishes every package. Keep the version of every package and plugin manifest the same.
+
+To install a package in another project, add this `.npmrc` and a token with `read:packages` in `NODE_AUTH_TOKEN`:
+
+```
+@imanshu03:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
 
 ## Limits
 

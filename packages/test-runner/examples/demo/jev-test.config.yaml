@@ -1,0 +1,22 @@
+# The demo project: run `node examples/demo/serve.mjs` in one terminal, then
+# `npx jev-test run --config examples/demo/jev-test.config.yaml` in another.
+base_url: http://127.0.0.1:${DEMO_PORT:-8790}
+
+vars:
+  user_email: ${DEMO_EMAIL:-qa@example.com}
+
+flows:
+  login:
+    - goto: /login.html
+    - fill: { field: Email, value: "{user_email}" }
+    - fill: { field: Password, value: "${DEMO_PASSWORD:-demo-pass}" }
+    - click: Sign in
+    - wait_for_text: Notes
+
+jev:
+  api_key: ${TYPESAFE_API_KEY}
+
+llm:
+  base_url: ${LITELLM_PROXY_URL}
+  api_key: ${LITELLM_API_KEY}
+  model: ${LITELLM_MODEL:-claude-sonnet-5-5}

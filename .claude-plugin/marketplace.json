@@ -3,7 +3,7 @@
   "owner": { "name": "Imanshu Rathore" },
   "metadata": { "description": "Browser tasks in Chrome with TypeSafe Jev, for Claude Code and Codex." },
   "plugins": [
-    { "name": "jev-browser", "source": "./plugin",
+    { "name": "jev-browser", "source": "./plugins/claude",
       "description": "Run browser tasks in Chrome with TypeSafe Jev. Your assistant writes new text, such as replies, when a form needs it." }
   ]
 }

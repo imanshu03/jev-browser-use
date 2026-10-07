@@ -1,0 +1,23 @@
+suite: Home
+tags: [home]
+
+before_all:
+  - use: login
+
+cases:
+  - id: TC-HOME-001
+    title: The home page opens after sign-in
+    tags: [smoke]
+    start: /
+    expect:
+      - not_visible_text: Sign in
+      - check: Is the user signed in and looking at the Parallel Loop home page?
+
+  - id: TC-HOME-002
+    title: The user can switch to the test organization
+    tags: [smoke]
+    start: /
+    steps:
+      - Switch the organization to "{org}"
+    expect:
+      - visible_text: "{org}"
