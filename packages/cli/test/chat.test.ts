@@ -21,7 +21,7 @@ let env: NodeJS.ProcessEnv;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "jev-chat-"));
-  env = { JEV_BROWSER_CONFIG: path.join(dir, "config.json") };
+  env = { JEV_BROWSER_CONFIG: path.join(dir, "config.json"), JEV_CHROME_BIN: "/opt/chrome" };
 });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 

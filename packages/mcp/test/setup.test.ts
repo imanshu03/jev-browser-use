@@ -243,7 +243,7 @@ describe("fastStarter", () => {
     const log = fakeLogger();
     const chrome = fakeChrome();
     const page = fakePage({ pages: { a: obs("https://mail.example/t/1", []) }, start: "a" });
-    const session = new BrowserSession({ env: {}, log, launch: async () => chrome, open: async () => page });
+    const session = new BrowserSession({ env: { JEV_CHROME_BIN: "/opt/chrome" }, log, launch: async () => chrome, open: async () => page });
     const prepare = vi.spyOn(session, "prepare");
     const keep = vi.spyOn(session, "keep");
     const close = vi.spyOn(session, "close");
