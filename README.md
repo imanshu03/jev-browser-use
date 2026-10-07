@@ -17,14 +17,14 @@ This repository is an npm workspace. The engine is in one package, and every fro
 | Folder | Package | Holds |
 |---|---|---|
 | [packages/core](packages/core) | `@imanshu03/jev-core` | The engine: Chrome over CDP, the Jev step loop, record and replay, the page reader, and the shared run settings (`args.ts`). |
-| [packages/mcp](packages/mcp) | `@imanshu03/jev-mcp` | The MCP server and the `jev-browser` skill. Both plugins run this one server and get this one skill. |
+| [packages/mcp](packages/mcp) | `@imanshu03/jev-mcp` | The MCP server and the skills `jev-browser`, `jev-plugin`, and `jev-test`. Both plugins run this one server and get these skills. |
 | [packages/cli](packages/cli) | `@imanshu03/jev-cli` | The commands `jev-browser`, `jev-chat`, and `jev-scrape`. |
 | [packages/sdk](packages/sdk) | `@imanshu03/jev-browser-use` | The public library API for other tools. |
 | [packages/test-runner](packages/test-runner) | `@imanshu03/jev-test` | YAML test suites for web apps (see its [README](packages/test-runner/README.md)). |
 | [plugins/claude](plugins/claude) | - | The Claude Code plugin: manifest and server config. |
 | [plugins/codex](plugins/codex) | - | The Codex plugin: manifest and server config. |
 
-`npm run plugins` builds the MCP server into one file and copies it, with the skills of `packages/mcp/skills`, into each plugin folder. Edit the skill only in `packages/mcp/skills`. A test fails when a plugin copy differs.
+`npm run plugins` builds the MCP server into one file and copies it, with the skills of `packages/mcp/skills`, into each plugin folder. Edit the skills only in `packages/mcp/skills`. A test fails when a plugin copy differs.
 
 In this repository the packages use each other's TypeScript source (the `jev-source` export condition), so a change in `core` shows at once in the other packages. A published package uses the built `dist` files.
 
@@ -290,13 +290,21 @@ In Claude Code or Codex, the plugin tools `read_page` and `scraper` do the same 
 
 The plugin lets Claude Code or Codex run browser tasks with the direct engines. The assistant starts a run with a tool call. Jev chooses every action, as in the CLI. When a form needs new text, such as a reply, the run asks the assistant to write it (see [Assistant-written text](#assistant-written-text-plugin-runs-only)). Before Jev clicks or presses Enter while that text is in a field, the user must allow the action in a dialog. The user can turn off the dialogs of one task with their own words (see [Autonomous mode](#autonomous-mode)).
 
-[plugins/claude](plugins/claude) and [plugins/codex](plugins/codex) hold the manifest and the MCP server configuration of each client. Both run the same server, one bundled file at `dist/jev-mcp.mjs` in each plugin folder, and use the same `jev-browser` skill from [packages/mcp/skills](packages/mcp/skills). Git ignores the bundle, so build it after [Install](#install) and after each source change:
+[plugins/claude](plugins/claude) and [plugins/codex](plugins/codex) hold the manifest and the MCP server configuration of each client. Both run the same server, one bundled file at `dist/jev-mcp.mjs` in each plugin folder, and use the same skills from [packages/mcp/skills](packages/mcp/skills). Git ignores the bundle, so build it after [Install](#install) and after each source change:
 
 ```sh
 npm run plugins
 ```
 
 The MCP server is not a public command. It supports the `cdp` and `chromium` engines.
+
+Each plugin has three skills:
+
+| Skill | Use |
+|---|---|
+| `jev-browser` | The assistant runs a browser task with the tools. |
+| `jev-plugin` | The assistant answers questions about setup: install, the API key, dialogs, autonomous mode, permissions, and problems. |
+| `jev-test` | The assistant writes, checks, and runs [jev-test](packages/test-runner/README.md) YAML test cases for a web app. |
 
 ### Install in Claude Code
 
@@ -306,7 +314,7 @@ claude plugin marketplace add "$PWD" --scope user
 claude plugin install jev-browser@jev-browser-use
 ```
 
-Claude Code loads the plugin from this repository. After a rebuild, start a new session or run `/reload-plugins`. To load the plugin for one session without an install, run `claude --plugin-dir ./plugins/claude`. The tools are named `mcp__plugin_jev-browser_jev__<tool>`. The skill is `/jev-browser:jev-browser`.
+Claude Code loads the plugin from this repository. After a rebuild, start a new session or run `/reload-plugins`. To load the plugin for one session without an install, run `claude --plugin-dir ./plugins/claude`. The tools are named `mcp__plugin_jev-browser_jev__<tool>`. The skills are `/jev-browser:jev-browser`, `/jev-browser:jev-plugin`, and `/jev-browser:jev-test`.
 
 ### Install in Codex
 
@@ -323,7 +331,7 @@ codex plugin remove jev-browser@jev-browser-use
 codex plugin add jev-browser@jev-browser-use
 ```
 
-The plugin supplies the skill `jev-browser:jev-browser`. Do not also link the skill into the Codex profile, because Codex then shows two copies.
+The plugin supplies the skills `jev-browser:jev-browser`, `jev-browser:jev-plugin`, and `jev-browser:jev-test`. Do not also link these skills into the Codex profile, because Codex then shows two copies.
 
 If you do not use the Codex plugin, add the server to the Codex `config.toml`. Replace `<repo>` with the absolute path of this repository:
 
@@ -338,7 +346,7 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
 
-This setup does not install the skill. Link it into a Codex skill folder, for example `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agents/skills/jev-browser`. With the `agent-skill` tool, run `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agent-skills/skills/jev-browser && agent-skill link jev-browser --to codex-pl`. Do not link it to Claude Code profiles; the Claude Code plugin supplies it there.
+This setup does not install the skills. Link each skill folder of `packages/mcp/skills` into a Codex skill folder, for example `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agents/skills/jev-browser`. With the `agent-skill` tool, run `ln -s <repo>/packages/mcp/skills/jev-browser ~/.agent-skills/skills/jev-browser && agent-skill link jev-browser --to codex-pl`. Link `jev-plugin` and `jev-test` in the same way. Do not link them to Claude Code profiles; the Claude Code plugin supplies them there.
 
 ### API key
 
@@ -348,7 +356,7 @@ The server reads the key at the first `browse` call, not at startup. It uses the
 2. `TYPESAFE_API_KEY` in the package `.env`. The server reads `.env` only when it runs from this repository. It sets only the keys that the environment does not set, so `TYPESAFE_API_KEY=""` in the environment stops the `.env` key from loading.
 3. The key that `jev-chat` saved in `~/.config/jev-browser/config.json`, or in the file that `JEV_BROWSER_CONFIG` names.
 
-Claude Code gives the server its full environment and runs the plugin from this repository, so all three sources work. The Codex plugin runs from the Codex cache, so it does not read `.env`. Codex passes only the variables in `env_vars` ([plugin/.codex-mcp.json](plugin/.codex-mcp.json)). The list also holds `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_RUNTIME_DIR`, so that a headed Chrome can start on a Linux desktop. Codex skips a variable that is not set. With the Codex plugin, set the key in the shell that starts Codex, or save it with `jev-chat`. The `config.toml` setup runs from this repository and reads `.env`.
+Claude Code gives the server its full environment and runs the plugin from this repository, so all three sources work. The Codex plugin runs from the Codex cache, so it does not read `.env`. Codex passes only the variables in `env_vars` ([plugins/codex/.codex-mcp.json](plugins/codex/.codex-mcp.json)). The list also holds `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_RUNTIME_DIR`, so that a headed Chrome can start on a Linux desktop. Codex skips a variable that is not set. With the Codex plugin, set the key in the shell that starts Codex, or save it with `jev-chat`. The `config.toml` setup runs from this repository and reads `.env`.
 
 Without a key, `browse` returns an error that tells how to add one. When the server runs from a copy outside this repository, such as the Codex cache, the error does not name the `.env` file.
 
