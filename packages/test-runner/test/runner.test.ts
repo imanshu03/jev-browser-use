@@ -192,4 +192,43 @@ cases:
     await t.run({ ci: false, record: true, heal: "warn" });
     expect(t.session.calls.filter((c) => c.startsWith("jev act"))).toHaveLength(1);
   });
+  it("never sends a secret in a plain-language step to Jev, and never writes it to a recording", async () => {
+    const t = setup(`
+suite: S
+cases:
+  - { id: S-1, title: env secret, steps: ["Log in with the password \${QA_PASSWORD}"] }
+  - { id: S-2, title: var secret, vars: { pw: "\${QA_PASSWORD}" }, steps: ["Type {pw} in the password field"] }
+`);
+    const r = await t.run();
+    expect(r.suites[0]?.cases.map((c) => c.status)).toEqual(["failed", "failed"]);
+    expect(r.suites[0]?.cases[0]?.error).toMatch(/holds a secret value.*explicit fill step/);
+    expect(t.session.calls.some((c) => c.startsWith("jev"))).toBe(false);
+    expect(fs.existsSync(t.recording())).toBe(false);
+    expect(JSON.stringify(r)).not.toContain("s3cret-pass");
+  });
+
+  it("does not save recorded steps that hold a secret value", async () => {
+    const t = setup(`
+suite: S
+cases:
+  - { id: S-1, title: t, steps: ["Sign in"] }
+`);
+    t.session.onJev = () => ({ ok: true, steps: [{ op: "fill", target: { role: "textbox", name: "Password" }, value: "s3cret-pass" }], reason: "done", jevRequests: 1 });
+    const r = await t.run();
+    expect(r.suites[0]?.cases[0]?.error).toMatch(/hold a secret value, so they are not saved/);
+    expect(fs.existsSync(t.recording())).toBe(false);
+    expect(JSON.stringify(r)).not.toContain("s3cret-pass");
+  });
+
+  it("never sends a secret in a check or judge text to a model", async () => {
+    const t = setup(`
+suite: S
+cases:
+  - { id: S-1, title: t, expect: [{ check: "Does the page show \${QA_PASSWORD}?" }] }
+`);
+    const r = await t.run();
+    expect(r.suites[0]?.cases[0]?.error).toMatch(/check or judge text holds a secret value/);
+    expect(t.session.calls.some((c) => c.startsWith("jev"))).toBe(false);
+    expect(JSON.stringify(r)).not.toContain("s3cret-pass");
+  });
 });

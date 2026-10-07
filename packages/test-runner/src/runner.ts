@@ -85,6 +85,9 @@ class StepFailure extends Error {
 }
 
 const MAX_FLOW_DEPTH = 5;
+const SECRET_IN_STEP = "a plain-language step holds a secret value: Jev would get it, and the recording file would keep it.";
+const SECRET_IN_RECORDING = "the recorded steps hold a secret value, so they are not saved. Type the value with an explicit fill step";
+const SECRET_IN_CHECK = "a check or judge text holds a secret value, and Jev or the LLM would get it. Remove the secret from the text";
 /** Fields that Jev and the page snapshot never see. An explicit fill types into them with code only. */
 const CREDENTIAL_FIELD = /password|passcode|passphrase|\bpin\b|\botp\b|one-time|verification code|security code|2fa|mfa|totp/i;
 
@@ -131,6 +134,11 @@ class SuiteRunner {
 
   get recordings(): RecordingStore {
     return this.store;
+  }
+
+  /** True when the text holds the value of a secret env var. Such text never goes to Jev, the LLM, or a recording file. */
+  private hasSecret(text: string): boolean {
+    return this.o.project.secrets.redact(text) !== text;
   }
 
   private log(line: string): void {
@@ -198,6 +206,10 @@ class SuiteRunner {
   /** A plain-language step: replay its recording, or let Jev do it and record it, or repair a replay that failed. */
   private async plainStep(text: string, key: string, run: CaseRun, push: (how: StepLog["how"], ok: boolean, detail?: string) => void): Promise<void> {
     const task = fillVars(text, run.vars);
+    if (this.hasSecret(text) || this.hasSecret(task)) {
+      push("jev", false, `${SECRET_IN_STEP} Write the step without it and type the value with an explicit fill step`);
+      return;
+    }
     const params = Object.fromEntries(varNames(text).map((n) => [n, run.vars[n] as string]));
     const entry = this.o.mode.record ? null : this.store.get(key, text);
     const at = (this.o.now ?? (() => new Date()))().toISOString();
@@ -212,6 +224,7 @@ class SuiteRunner {
       if (!j.ok) { push("healed", false, `${why}; Jev could not repair it: ${j.reason}`); return; }
       // The steps before the failed one already ran, so Jev went on from there: the repaired recording keeps them.
       const steps = [...entry.steps.slice(0, r.step), ...j.steps];
+      if (this.hasSecret(JSON.stringify(steps))) { push("healed", false, SECRET_IN_RECORDING); return; }
       this.store.put(key, { text, steps, recorded_at: at, healed: [...(entry.healed ?? []), { at, reason: why }].slice(-10) });
       run.healed.push(`${task}: ${why}`);
       push("healed", true, why);
@@ -224,6 +237,7 @@ class SuiteRunner {
     const j = await this.session.jev(task, params, "act");
     run.jevRequests += j.jevRequests;
     if (!j.ok) { push("jev", false, j.reason); return; }
+    if (this.hasSecret(JSON.stringify(j.steps))) { push("recorded", false, SECRET_IN_RECORDING); return; }
     this.store.put(key, { text, steps: j.steps, recorded_at: at });
     push("recorded", true, `${j.steps.length} replay step(s)`);
   }
@@ -231,6 +245,12 @@ class SuiteRunner {
   async expect(list: readonly Assertion[], run: CaseRun): Promise<void> {
     for (const a of list) {
       const t0 = Date.now();
+      const asked = "check" in a ? a.check : "judge" in a ? a.judge : null;
+      if (asked !== null && this.hasSecret(fillVars(asked, run.vars))) {
+        const label = this.o.project.secrets.redact(fillVars(asked, run.vars));
+        run.steps.push({ label, how: "expect", ok: false, ms: 0, detail: SECRET_IN_CHECK });
+        throw new StepFailure(`expected ${label}: ${SECRET_IN_CHECK}`);
+      }
       const r = await runAssertion(a, { session: this.session, vars: run.vars, llm: this.o.llm, timeoutMs: this.o.project.config.timeouts.assert_ms });
       const red = { ...r, label: this.o.project.secrets.redact(r.label), detail: this.o.project.secrets.redact(r.detail) };
       run.assertions.push(red);

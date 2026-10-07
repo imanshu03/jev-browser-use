@@ -89,6 +89,8 @@ heal:    { local: warn, ci: fail }
 timeouts: { step_ms: 8000, assert_ms: 8000, case_ms: 300000 }
 ```
 
+Secrets: a plain-language step, a `check`, or a `judge` text that holds a secret value fails at once, because Jev, the LLM, and the recording file would get the value. Type a secret with an explicit `fill` step. A secret is a value of an env var named in `secrets`, or whose name holds password, secret, token, key, otp, or pin, and that is 4 or more characters long.
+
 `${NAME}` and `${NAME:-default}` read environment variables when the file loads. `{name}` reads a var when the step runs. Write `{{` and `}}` for a literal brace.
 
 ## Suites
