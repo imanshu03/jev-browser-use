@@ -1,38 +1,31 @@
 {
   "name": "jev-browser-use",
   "version": "0.1.0",
-  "description": "Jev-powered browser automation for one-shot tasks and interactive chat, with cdp, chromium, and vercel engines",
-  "type": "module",
   "private": true,
-  "bin": {
-    "jev-browser": "./bin/jev-browser.js",
-    "jev-chat": "./bin/jev-chat.js",
-    "jev-scrape": "./bin/jev-scrape.js"
-  },
+  "type": "module",
+  "description": "Monorepo of jev-browser-use: engine, MCP server, CLI, library, test runner, and the Claude and Codex plugins",
+  "workspaces": [
+    "packages/core",
+    "packages/sdk",
+    "packages/mcp",
+    "packages/cli",
+    "packages/test-runner"
+  ],
   "scripts": {
-    "start": "tsx --env-file=.env src/cli.ts",
-    "chat": "node bin/jev-chat.js",
-    "mcp": "node bin/jev-mcp.js",
-    "scrape": "node bin/jev-scrape.js",
-    "build:mcp": "node scripts/build-mcp.mjs",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:live": "JEV_LIVE=1 vitest run test/fast/page.live.test.ts test/fast/pointer-rows.live.test.ts test/fast/read.live.test.ts test/scrape/scrape.live.test.ts test/mcp/mcp.live.test.ts test/mcp/read-page.live.test.ts",
-    "smoke": "tsx --env-file=.env scripts/smoke.ts"
+    "build": "npm run build --workspaces --if-present && npm run plugins",
+    "plugins": "npm run bundle -w @imanshu03/jev-mcp",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "test:live": "npm run test:live --workspaces --if-present",
+    "mcp": "npm start -w @imanshu03/jev-mcp",
+    "start": "npm start -w @imanshu03/jev-cli --",
+    "chat": "npm run chat -w @imanshu03/jev-cli --",
+    "scrape": "npm run scrape -w @imanshu03/jev-cli --"
   },
   "engines": {
     "node": ">=22"
   },
-  "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
-    "@typesafe-ai/sdk": "^0.6.0",
-    "agent-browser": "^0.38.1",
-    "undici": "^7.29.1",
-    "zod": "^4.6.5"
-  },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^26.6.2",
     "esbuild": "0.28.2",
     "tsx": "^4.23.13",

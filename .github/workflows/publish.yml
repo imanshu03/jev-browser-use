@@ -1,0 +1,31 @@
+# Publishes every package to GitHub Packages (@imanshu03) when a v<version> tag is pushed.
+# GITHUB_TOKEN publishes only to the scope of the account that owns this repository (imanshu03). A move to another owner changes the scope.
+name: publish
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, registry-url: https://npm.pkg.github.com, scope: "@imanshu03" }
+      - run: npm ci
+      - name: Check that the tag is the version of every package
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          for f in packages/*/package.json; do
+            got=$(node -p "require('./$f').version")
+            [ "$got" = "$want" ] || { echo "$f has $got, the tag is $want"; exit 1; }
+          done
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm publish --workspaces
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

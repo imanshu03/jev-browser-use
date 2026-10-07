@@ -1,10 +1,10 @@
 These instructions apply to `jev-browser-use` and its subdirectories.
 
-The package and repository name is `jev-browser-use`. Public commands remain `jev-browser` and `jev-chat`. The MCP server is not a public command. The plugin runs `plugin/dist/jev-mcp.mjs`. Preserve the existing configuration paths and environment variable names when editing project branding.
+The repository name is `jev-browser-use`. It is an npm workspace: `packages/core` (engine), `packages/mcp` (MCP server and skill), `packages/cli` (commands), `packages/sdk` (public library), and `packages/test-runner` (jev-test). Only `core` may hold engine code; other packages import it as `@imanshu03/jev-core/<path>.js` and core never imports them. Public commands remain `jev-browser` and `jev-chat`. The MCP server is not a public command. Each plugin folder (`plugins/claude`, `plugins/codex`) runs its copy of the one MCP bundle, `dist/jev-mcp.mjs`. Preserve the existing configuration paths and environment variable names when editing project branding.
 
 Use ASD-STE100 Simplified Technical English. Follow Zinsser's principles: simplicity, brevity, clarity, and humanity. Avoid staccato pairs, antithesis reframes, negative parallelism, isocolon metaphor-pairs, and backward references.
 
-The public engine options are `cdp`, `chromium`, and `vercel`. `cdp` is the default. The two direct engines share `src/fast/`; Chromium uses its own binary discovery and profile storage. The `vercel` option uses the `agent-browser` implementation. The MCP server supports `cdp` and `chromium`. A `vercel` environment default falls back to `cdp` with a warning.
+The public engine options are `cdp`, `chromium`, and `vercel`. `cdp` is the default. The two direct engines share `packages/core/src/fast/`; Chromium uses its own binary discovery and profile storage. The `vercel` option uses the `agent-browser` implementation. The MCP server supports `cdp` and `chromium`. A `vercel` environment default falls back to `cdp` with a warning.
 
 This project runs browser tasks from natural-language instructions. TypeSafe Jev selects semantic operations and targets. Code controls execution, risk checks, request limits, retries, and cleanup. Keep those responsibilities separate.
 
@@ -12,20 +12,20 @@ Before editing, check the working tree and read the files and tests for the affe
 
 Use these files to find the correct layer:
 
-- `src/cli.ts` and `bin/jev-browser.js`: one-shot arguments, dependency setup, result output, and process exit.
-- `src/chat.ts`, `src/config.ts`, and `bin/jev-chat.js`: repeated tasks, session commands, and API key storage.
-- `src/plan.ts` and `src/task.ts`: profile and URL resolution, task values, and secret removal.
-- `src/fast/loop.ts` and `src/fast/policy.ts`: the shared `cdp` and `chromium` task loop, questions, action checks, and completion decisions.
-- `src/fast/model.ts`: interfaces between the direct task loop and browser code. Keep the decision loop independent of browser I/O.
-- `src/fast/chrome.ts`, `src/fast/cdp.ts`, `src/fast/page.ts`, and `src/fast/snapshot.ts`: profile ownership, browser transport, observations, and input execution.
-- `src/loop.ts`, `src/policy.ts`, `src/questions.ts`, `src/browser.ts`, `src/snapshot.ts`, and `src/extract.ts`: the `vercel` engine, which uses `agent-browser`.
-- `src/jev.ts`, `src/transport.ts`, `src/io.ts`, and `src/types.ts`: shared model access, HTTP connections, output, and result contracts.
-- `src/fast/generate.ts`: assistant-written text for the direct loop: field selection, the text request, reply checks, and the sanitizer. Pure functions.
-- `src/fast/session.ts`: the Chrome and the tab that the MCP server keeps between runs, and profile relaunch.
-- `src/mcp/main.ts` and `src/mcp/server.ts`: the MCP server entry, stdio, shutdown, the tools, and the dialogs. Only these two files import the MCP SDK.
-- `src/mcp/runs.ts`, `src/mcp/view.ts`, `src/mcp/setup.ts`, `src/mcp/timers.ts`, and `src/mcp/limits.ts`: run state and hand-offs, tool results, environment and input checks, idle timers, and constants.
-- `plugin/`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files, the MCP configurations, and the `jev-browser` skill.
-- `scripts/build-mcp.mjs` and `bin/jev-mcp.js`: the plugin bundle build and the development launcher (`npm run mcp`).
+- `packages/cli/src/cli.ts` and `packages/cli/bin/jev-browser.js`: one-shot arguments, dependency setup, result output, and process exit.
+- `packages/cli/src/chat.ts`, `packages/core/src/config.ts`, and `packages/cli/bin/jev-chat.js`: repeated tasks, session commands, and API key storage.
+- `packages/core/src/plan.ts` and `packages/core/src/task.ts`: profile and URL resolution, task values, and secret removal.
+- `packages/core/src/fast/loop.ts` and `packages/core/src/fast/policy.ts`: the shared `cdp` and `chromium` task loop, questions, action checks, and completion decisions.
+- `packages/core/src/fast/model.ts`: interfaces between the direct task loop and browser code. Keep the decision loop independent of browser I/O.
+- `packages/core/src/fast/chrome.ts`, `packages/core/src/fast/cdp.ts`, `packages/core/src/fast/page.ts`, and `packages/core/src/fast/snapshot.ts`: profile ownership, browser transport, observations, and input execution.
+- `packages/core/src/loop.ts`, `packages/core/src/policy.ts`, `packages/core/src/questions.ts`, `packages/core/src/browser.ts`, `packages/core/src/snapshot.ts`, and `packages/core/src/extract.ts`: the `vercel` engine, which uses `agent-browser`.
+- `packages/core/src/jev.ts`, `packages/core/src/transport.ts`, `packages/core/src/io.ts`, and `packages/core/src/types.ts`: shared model access, HTTP connections, output, and result contracts.
+- `packages/core/src/fast/generate.ts`: assistant-written text for the direct loop: field selection, the text request, reply checks, and the sanitizer. Pure functions.
+- `packages/core/src/fast/session.ts`: the Chrome and the tab that the MCP server keeps between runs, and profile relaunch.
+- `packages/mcp/src/main.ts` and `packages/mcp/src/server.ts`: the MCP server entry, stdio, shutdown, the tools, and the dialogs. Only these two files import the MCP SDK.
+- `packages/mcp/src/runs.ts`, `view.ts`, `setup.ts`, `timers.ts`, and `limits.ts`: run state and hand-offs, tool results, environment and input checks, idle timers, and constants.
+- `plugins/claude`, `plugins/codex`, `.claude-plugin/marketplace.json`, and `.agents/plugins/marketplace.json`: the Claude Code and Codex plugin files and MCP configurations. The `jev-browser` skill has one source, `packages/mcp/skills`; `npm run plugins` copies it into both plugin folders.
+- `packages/mcp/scripts/build.mjs` and `packages/mcp/bin/jev-mcp.js`: the plugin bundle build and the development launcher (`npm run mcp`).
 
 For CLI or user-visible changes, read and update `README.md`. For changes to architecture, planning, or decision rules, consult `DESIGN.md`. It covers all three engines and states their differences. Keep the design consistent with the source and tests.
 
@@ -59,10 +59,10 @@ For changes to browser scripts, CDP, profile ownership, or process cleanup, also
 npm run test:live
 ```
 
-For MCP server or plugin changes, also run `npm run build:mcp`. The plugin runs the bundle, not the source.
+For MCP server, skill, or plugin changes, also run `npm run plugins`. The plugin runs the bundle, not the source.
 
 The live suite uses local fixtures, temporary profiles, and a local API stand-in. It tests attachment under both direct engine names with Chrome, and it runs the MCP server on the reply fixture; it does not prove that Chromium launches. Report actual Chromium launch coverage separately. It requires Chrome but does not need a real Jev key. Unit tests skip the live suite by default. Use process-level tests for exit behavior; a mocked close call does not prove that a process exits.
 
-Use `test/fakes.ts`, `test/fast/fakes.ts`, `test/mcp/helpers.ts`, and `test/fixtures/` for isolated tests. Keep tests independent of personal Chrome data and real accounts. `npm run smoke` uses the real API and browser workflow; use it when the requested task calls for that validation. Keep credentials, profile copies, and runtime logs out of version control.
+Use `packages/core/test/fakes.ts`, `packages/core/test/fast/fakes.ts`, `packages/mcp/test/helpers.ts`, and `packages/core/test/fixtures/` for isolated tests. Keep tests independent of personal Chrome data and real accounts. `npm run smoke` uses the real API and browser workflow; use it when the requested task calls for that validation. Keep credentials, profile copies, and runtime logs out of version control.
 
 Before completing work, report the behavior changed, the checks run, and any check that could not run. For documentation-only edits, verify referenced paths and commands; code tests are not required.

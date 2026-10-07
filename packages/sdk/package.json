@@ -1,0 +1,38 @@
+{
+  "name": "@imanshu03/jev-browser-use",
+  "version": "0.1.0",
+  "description": "The public library API of jev-browser-use, for test runners and other tools",
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imanshu03/jev-browser-use.git",
+    "directory": "packages/sdk"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "jev-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@imanshu03/jev-core": "^0.1.0"
+  }
+}

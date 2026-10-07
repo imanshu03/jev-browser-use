@@ -1,0 +1,36 @@
+# GitHub Actions workflow for a project that uses jev-test. Copy it to .github/workflows/.
+name: jev-test
+on:
+  workflow_dispatch:
+    inputs:
+      env: { description: Environment, default: stage }
+      tag: { description: Tag filter (empty for all), default: smoke }
+  schedule:
+    - cron: "30 2 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, registry-url: https://npm.pkg.github.com, scope: "@imanshu03" }
+      - run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}  # a token that can read the @imanshu03 packages (read:packages)
+      # ubuntu-latest has Google Chrome on PATH; elsewhere set JEV_CHROME_BIN to the browser binary.
+      - name: Run suites
+        env:
+          TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          JEV_TEST_LLM_BASE_URL: ${{ vars.JEV_TEST_LLM_BASE_URL }}
+          JEV_TEST_LLM_MODEL: ${{ vars.JEV_TEST_LLM_MODEL }}
+          JEV_TEST_LLM_API_KEY: ${{ secrets.JEV_TEST_LLM_API_KEY }}
+        run: npx jev-test run --ci --env "${{ inputs.env || 'stage' }}" ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }} --report-dir reports/ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: jev-test-reports, path: reports/ci }
+      - uses: mikepenz/action-junit-report@v5
+        if: always()
+        with: { report_paths: reports/ci/junit.xml }

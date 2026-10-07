@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "suite": "suites/notes.suite.yaml",
+  "entries": {
+    "NOTE-001/9c460a335b27": {
+      "text": "Delete the note \"{title}\"",
+      "steps": [
+        {
+          "op": "click",
+          "target": {
+            "role": "button",
+            "name": "{title}",
+            "match": "contains"
+          }
+        }
+      ],
+      "recorded_at": "2026-10-07T10:27:37.186Z"
+    },
+    "NOTE-001/f9b8bfdca69b": {
+      "text": "Add a note titled \"{title}\"",
+      "steps": [
+        {
+          "op": "fill",
+          "target": {
+            "role": "textbox",
+            "name": "Note title"
+          },
+          "value": "{title}"
+        },
+        {
+          "op": "click",
+          "target": {
+            "role": "button",
+            "name": "Add note"
+          }
+        }
+      ],
+      "recorded_at": "2026-10-07T10:26:38.231Z"
+    }
+  }
+}

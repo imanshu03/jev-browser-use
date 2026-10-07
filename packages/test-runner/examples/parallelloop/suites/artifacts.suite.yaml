@@ -1,0 +1,33 @@
+suite: Artifacts
+tags: [artifacts]
+
+before_all:
+  - use: login
+
+cases:
+  - id: TC-ART-001
+    title: Create an artifact in a project and delete it
+    tags: [regression]
+    start: /
+    vars:
+      project: ${QA_PROJECT:-QA Automation}
+      name: jev artifact {now}
+    steps:
+      - Open the project "{project}"
+      - Open the Artifacts tab
+      - Create a new artifact named "{name}"
+    expect:
+      - visible_text: "{name}"
+    cleanup:
+      - Delete the artifact "{name}"
+
+  - id: TC-ART-002
+    title: Chat explains an artifact
+    tags: [regression, chat]
+    start: /
+    steps:
+      - Open the chat and ask "What is the newest artifact in {project} about?"
+    vars:
+      project: ${QA_PROJECT:-QA Automation}
+    expect:
+      - judge: The chat answers with a short summary of an artifact and does not refuse or show an error

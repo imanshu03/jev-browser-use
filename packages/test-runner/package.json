@@ -1,0 +1,46 @@
+{
+  "name": "@imanshu03/jev-test",
+  "version": "0.1.0",
+  "description": "YAML test suites for web apps on jev-browser-use: Jev records each plain-language step once, later runs replay it with no model, and a changed page is repaired",
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imanshu03/jev-browser-use.git",
+    "directory": "packages/test-runner"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "bin": {
+    "jev-test": "./bin/jev-test.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "jev-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:live": "JEV_LIVE=1 vitest run live"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@imanshu03/jev-browser-use": "^0.1.0",
+    "yaml": "^2.8.1",
+    "zod": "^4.6.5"
+  }
+}

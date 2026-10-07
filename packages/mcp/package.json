@@ -1,0 +1,49 @@
+{
+  "name": "@imanshu03/jev-mcp",
+  "version": "0.1.0",
+  "description": "The jev MCP server that the Claude and Codex plugins run",
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imanshu03/jev-browser-use.git",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "jev-mcp": "./bin/jev-mcp.js"
+  },
+  "exports": {
+    "./*.js": {
+      "jev-source": "./src/*.ts",
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "bundle": "node scripts/build.mjs",
+    "start": "node bin/jev-mcp.js",
+    "test:live": "JEV_LIVE=1 vitest run test/mcp.live.test.ts test/read-page.live.test.ts"
+  },
+  "dependencies": {
+    "@imanshu03/jev-core": "^0.1.0",
+    "@modelcontextprotocol/server": "2.0.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  }
+}

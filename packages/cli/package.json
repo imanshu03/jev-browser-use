@@ -1,0 +1,41 @@
+{
+  "name": "@imanshu03/jev-cli",
+  "version": "0.1.0",
+  "description": "jev-browser, jev-chat and jev-scrape: the command-line front ends of jev",
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imanshu03/jev-browser-use.git",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "jev-browser": "./bin/jev-browser.js",
+    "jev-chat": "./bin/jev-chat.js",
+    "jev-scrape": "./bin/jev-scrape.js"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node bin/jev-browser.js",
+    "chat": "node bin/jev-chat.js",
+    "scrape": "node bin/jev-scrape.js",
+    "smoke": "tsx --conditions=jev-source --env-file-if-exists=../../.env scripts/smoke.ts",
+    "test:live": "JEV_LIVE=1 vitest run test/scrape/scrape.live.test.ts"
+  },
+  "dependencies": {
+    "@imanshu03/jev-core": "^0.1.0",
+    "@typesafe-ai/sdk": "^0.6.0"
+  }
+}
