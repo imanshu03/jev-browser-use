@@ -41,9 +41,9 @@ const ADD_STEPS = [
   { op: "click", target: { role: "button", name: "Add note" } },
 ];
 
-function setup(suite = SUITE, config = CONFIG) {
+function setup(suite = SUITE, config = CONFIG, password = "s3cret-pass") {
   const cfg = tempProject(config, { "notes.suite.yaml": suite });
-  const project = loadProject(cfg, { processEnv: { QA_PASSWORD: "s3cret-pass" } });
+  const project = loadProject(cfg, { processEnv: { QA_PASSWORD: password } });
   const root = path.dirname(cfg);
   const session = new FakeSession();
   const run = (mode: RunMode = LOCAL, now = new Date("2026-10-07T10:00:00Z")): Promise<RunReport> => runAll({
@@ -230,5 +230,30 @@ cases:
     expect(r.suites[0]?.cases[0]?.error).toMatch(/check or judge text holds a secret value/);
     expect(t.session.calls.some((c) => c.startsWith("jev"))).toBe(false);
     expect(JSON.stringify(r)).not.toContain("s3cret-pass");
+  });
+  it("finds a secret with a quote or a backslash in recorded steps: JSON escapes do not hide it", async () => {
+    const secret = 'pa"ss\\word';
+    const t = setup(`
+suite: S
+cases:
+  - { id: S-1, title: t, steps: ["Sign in"] }
+`, CONFIG, secret);
+    t.session.onJev = () => ({ ok: true, steps: [{ op: "fill", target: { role: "textbox", name: "Key" }, value: secret }], reason: "done", jevRequests: 1 });
+    const r = await t.run();
+    expect(r.suites[0]?.cases[0]?.error).toMatch(/hold a secret value, so they are not saved/);
+    expect(fs.existsSync(t.recording())).toBe(false);
+  });
+
+  it("a check sends Jev only the vars that its text uses, so a secret var stays out", async () => {
+    const t = setup(`
+suite: S
+cases:
+  - { id: S-1, title: t, vars: { pw: "\${QA_PASSWORD}", name: Milk }, expect: [{ check: "Is {name} listed?" }] }
+`);
+    const seen: Record<string, string>[] = [];
+    t.session.onJev = (_task, params) => { seen.push(params); return { ok: true, steps: [], reason: "", jevRequests: 1, check: { answer: true, probability: 0.9 } }; };
+    const r = await t.run();
+    expect(r.totals).toMatchObject({ passed: 1 });
+    expect(seen).toEqual([{ name: "Milk" }]);
   });
 });

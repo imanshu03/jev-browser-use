@@ -3,7 +3,7 @@ import type { Observation, PageRead } from "@imanshu03/jev-browser-use";
 import type { Llm } from "./llm.js";
 import type { Assertion } from "./schema.js";
 import type { Session } from "./session.js";
-import { fillVars } from "./template.js";
+import { fillVars, varNames } from "./template.js";
 
 export interface AssertResult {
   pass: boolean;
@@ -107,7 +107,8 @@ function probeOf(a: Assertion, ctx: AssertContext): Probe {
 export async function runAssertion(a: Assertion, ctx: AssertContext): Promise<AssertResult> {
   const label = describe(a, ctx.vars);
   if ("check" in a) {
-    const r = await ctx.session.jev(fillVars(a.check, ctx.vars), ctx.vars, "check");
+    const params = Object.fromEntries(varNames(a.check).map((n) => [n, ctx.vars[n] as string]));
+    const r = await ctx.session.jev(fillVars(a.check, ctx.vars), params, "check");
     const min = a.min_probability ?? DEFAULT_MIN_PROBABILITY;
     if (!r.check) return { pass: false, label, detail: `Jev gave no answer: ${r.reason}`, model: "jev" };
     const pass = r.check.answer === true && r.check.probability >= min;

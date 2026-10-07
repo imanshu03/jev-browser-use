@@ -141,6 +141,12 @@ class SuiteRunner {
     return this.o.project.secrets.redact(text) !== text;
   }
 
+  /** True when any string in the steps holds a secret. Each string is checked as it is, not as JSON text, where escapes would hide a value. */
+  private stepsHaveSecret(steps: readonly Step[]): boolean {
+    const walk = (v: unknown): boolean => typeof v === "string" ? this.hasSecret(v) : Array.isArray(v) ? v.some(walk) : v !== null && typeof v === "object" ? Object.values(v).some(walk) : false;
+    return walk(steps);
+  }
+
   private log(line: string): void {
     this.o.onLog?.(this.o.project.secrets.redact(line));
   }
@@ -224,9 +230,9 @@ class SuiteRunner {
       if (!j.ok) { push("healed", false, `${why}; Jev could not repair it: ${j.reason}`); return; }
       // The steps before the failed one already ran, so Jev went on from there: the repaired recording keeps them.
       const steps = [...entry.steps.slice(0, r.step), ...j.steps];
-      if (this.hasSecret(JSON.stringify(steps))) { push("healed", false, SECRET_IN_RECORDING); return; }
+      if (this.stepsHaveSecret(steps)) { push("healed", false, SECRET_IN_RECORDING); return; }
       this.store.put(key, { text, steps, recorded_at: at, healed: [...(entry.healed ?? []), { at, reason: why }].slice(-10) });
-      run.healed.push(`${task}: ${why}`);
+      run.healed.push(this.o.project.secrets.redact(`${task}: ${why}`));
       push("healed", true, why);
       return;
     }
@@ -237,7 +243,7 @@ class SuiteRunner {
     const j = await this.session.jev(task, params, "act");
     run.jevRequests += j.jevRequests;
     if (!j.ok) { push("jev", false, j.reason); return; }
-    if (this.hasSecret(JSON.stringify(j.steps))) { push("recorded", false, SECRET_IN_RECORDING); return; }
+    if (this.stepsHaveSecret(j.steps)) { push("recorded", false, SECRET_IN_RECORDING); return; }
     this.store.put(key, { text, steps: j.steps, recorded_at: at });
     push("recorded", true, `${j.steps.length} replay step(s)`);
   }
